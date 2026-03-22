@@ -238,6 +238,26 @@ class TestComputeProgress:
         assert p["failed"] == 1
         assert p["completed"] == 1
 
+    def test_cost_absent_when_no_data(self):
+        tasks = [_make_task("a", "A", status="completed")]
+        p = compute_progress(tasks)
+        assert "cost_usd" not in p
+
+    def test_cost_aggregated(self):
+        tasks = [
+            {**_make_task("a", "A", status="completed"), "cost_usd": 1.50},
+            {**_make_task("b", "B", status="completed"), "cost_usd": 2.75},
+            _make_task("c", "C"),  # no cost field
+        ]
+        p = compute_progress(tasks)
+        assert p["cost_usd"] == pytest.approx(4.25)
+
+    def test_cost_zero_still_reported(self):
+        tasks = [{**_make_task("a", "A", status="completed"), "cost_usd": 0.0}]
+        p = compute_progress(tasks)
+        assert "cost_usd" in p
+        assert p["cost_usd"] == 0.0
+
 
 # ── render_ascii_dag ──────────────────────────────────────────────────────
 
@@ -367,6 +387,21 @@ class TestRenderAsciiDag:
         assert "⬚" in out
         assert "◻" in out
 
+    def test_cost_shown_when_available(self):
+        """Cost summary appears when tasks carry cost_usd."""
+        tasks = [
+            {**_make_task("a", "Done", status="completed"), "cost_usd": 2.50},
+            {**_make_task("b", "Todo", depends_on=["a"]), "cost_usd": 1.00},
+        ]
+        out = render_ascii_dag(tasks, use_color=False)
+        assert "Cost: $3.50" in out
+
+    def test_cost_hidden_when_absent(self):
+        """No cost line when tasks have no cost data."""
+        tasks = [_make_task("a", "Task")]
+        out = render_ascii_dag(tasks, use_color=False)
+        assert "Cost:" not in out
+
 
 # ── render_mermaid ────────────────────────────────────────────────────────
 
@@ -442,6 +477,29 @@ class TestRenderMermaid:
         assert "my_task" in out
         assert "other_task" in out
         assert "my_task --> other_task" in out
+
+    def test_mermaid_cost_in_comment(self):
+        tasks = [
+            {**_make_task("a", "Done", status="completed"), "cost_usd": 4.23},
+        ]
+        out = render_mermaid(tasks)
+        assert "Cost: $4.23" in out
+
+    def test_mermaid_no_cost_when_absent(self):
+        tasks = [_make_task("a", "Alpha")]
+        out = render_mermaid(tasks)
+        assert "Cost:" not in out
+
+    def test_parallel_branches_mermaid(self):
+        tasks = [
+            _make_task("a", "BranchA", status="completed"),
+            _make_task("b", "BranchB", status="completed"),
+            _make_task("c", "Merge", depends_on=["a", "b"]),
+        ]
+        out = render_mermaid(tasks)
+        assert "a --> c" in out
+        assert "b --> c" in out
+        assert "2/3" in out
 
 
 # ── CLI integration ───────────────────────────────────────────────────────

@@ -159,7 +159,11 @@ def assign_rows(tasks, levels, forward, reverse):
 
 
 def compute_progress(tasks: list[dict]) -> dict:
-    """Compute progress statistics from task list."""
+    """Compute progress statistics from task list.
+
+    Also aggregates cost_usd from tasks that have it (populated by the
+    dispatcher after agent completion).
+    """
     statuses = compute_effective_status(tasks)
     total = len(tasks)
     counts = {"completed": 0, "running": 0, "ready": 0, "blocked": 0, "failed": 0}
@@ -169,7 +173,20 @@ def compute_progress(tasks: list[dict]) -> dict:
         elif s in ("assigned", "handed_off"):
             counts["running"] += 1
     pct = (counts["completed"] * 100 // total) if total else 0
-    return {"total": total, "percent": pct, **counts}
+
+    # Aggregate cost data when available
+    total_cost = 0.0
+    has_cost = False
+    for t in tasks:
+        c = t.get("cost_usd")
+        if c is not None:
+            total_cost += float(c)
+            has_cost = True
+
+    result = {"total": total, "percent": pct, **counts}
+    if has_cost:
+        result["cost_usd"] = total_cost
+    return result
 
 
 def _progress_bar(pct: int, width: int = 20) -> str:
@@ -398,6 +415,10 @@ def render_ascii_dag(tasks: list[dict], use_color: bool = True) -> str:
     if status_parts:
         prog += f"\n  {' | '.join(status_parts)}"
 
+    # Cost summary when data is available
+    if "cost_usd" in progress:
+        prog += f"\n  Cost: ${progress['cost_usd']:.2f}"
+
     return f"\n{dag_art}\n\n{legend}\n\n{prog}\n"
 
 
@@ -454,9 +475,12 @@ def render_mermaid(tasks: list[dict]) -> str:
 
     # Progress as comment
     progress = compute_progress(tasks)
-    lines.append(
+    prog_comment = (
         f"  %% Progress: {progress['completed']}/{progress['total']} "
         f"({progress['percent']}%)"
     )
+    if "cost_usd" in progress:
+        prog_comment += f" | Cost: ${progress['cost_usd']:.2f}"
+    lines.append(prog_comment)
 
     return "\n".join(lines) + "\n"
