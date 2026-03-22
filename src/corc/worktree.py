@@ -4,19 +4,32 @@ Each dispatched agent runs in its own git worktree, providing filesystem
 isolation so multiple agents can edit files without conflicts.
 
 Lifecycle: create_worktree() -> agent runs -> merge_worktree() -> remove_worktree()
+
+IMPORTANT: Worktrees contain a full checkout of the repo, including
+pyproject.toml and src/. To prevent agents from accidentally running
+`pip install -e .` inside a worktree (which would redirect the shared
+Python environment's editable install to the worktree's src/), we
+neutralize the worktree's pyproject.toml after creation.
 """
 
 import subprocess
 import shutil
 from pathlib import Path
 
+# Files that enable `pip install -e .` — neutralized in worktrees to prevent
+# accidental editable installs that would hijack the shared Python path.
+_INSTALLABLE_FILES = ("pyproject.toml", "setup.py", "setup.cfg")
+
 
 class WorktreeError(Exception):
     """Raised when a git worktree operation fails."""
+
     pass
 
 
-def create_worktree(project_root: Path, task_id: str, attempt: int = 1) -> tuple[Path, str]:
+def create_worktree(
+    project_root: Path, task_id: str, attempt: int = 1
+) -> tuple[Path, str]:
     """Create a git worktree for an agent to work in.
 
     Creates a new worktree branching from the current HEAD. The worktree
@@ -69,10 +82,16 @@ def create_worktree(project_root: Path, task_id: str, attempt: int = 1) -> tuple
                 f"Failed to create worktree: {result.stderr.strip()} / {result2.stderr.strip()}"
             )
 
+    # Neutralize the worktree so agents can't accidentally `pip install -e .`
+    # which would hijack the shared Python environment's editable install path.
+    _neutralize_installable_files(worktree_path)
+
     return worktree_path, branch_name
 
 
-def remove_worktree(project_root: Path, worktree_path: Path, remove_branch: bool = True) -> bool:
+def remove_worktree(
+    project_root: Path, worktree_path: Path, remove_branch: bool = True
+) -> bool:
     """Remove a git worktree and optionally its branch.
 
     Args:
@@ -200,7 +219,13 @@ def merge_main_into_worktree(project_root: Path, worktree_path: Path) -> bool:
 
     # Merge main into the worktree branch (run in worktree directory)
     result = subprocess.run(
-        ["git", "merge", main_branch, "-m", f"Merge {main_branch} for conflict resolution"],
+        [
+            "git",
+            "merge",
+            main_branch,
+            "-m",
+            f"Merge {main_branch} for conflict resolution",
+        ],
         capture_output=True,
         text=True,
         cwd=str(worktree_path),
@@ -286,16 +311,35 @@ def _get_worktree_branch(project_root: Path, worktree_path: Path) -> str | None:
         current_path = None
         for line in result.stdout.splitlines():
             if line.startswith("worktree "):
-                current_path = line[len("worktree "):]
+                current_path = line[len("worktree ") :]
             elif line.startswith("branch ") and current_path:
                 if str(worktree_path) == current_path:
-                    branch = line[len("branch "):]
+                    branch = line[len("branch ") :]
                     # Strip refs/heads/ prefix
                     if branch.startswith("refs/heads/"):
-                        branch = branch[len("refs/heads/"):]
+                        branch = branch[len("refs/heads/") :]
                     return branch
                 current_path = None
 
         return None
     except (subprocess.SubprocessError, FileNotFoundError, OSError):
         return None
+
+
+def _neutralize_installable_files(worktree_path: Path):
+    """Remove package install files from a worktree to prevent path hijacking.
+
+    If an agent runs `pip install -e .` inside a worktree, it overwrites the
+    shared Python environment's editable install (.pth file) to point at the
+    worktree's src/ instead of the main project's src/. This causes all
+    ``import corc`` calls — including from the main project and other worktrees —
+    to resolve to the wrong source tree.
+
+    By removing pyproject.toml, setup.py, and setup.cfg from the worktree,
+    ``pip install -e .`` will fail harmlessly, preventing the hijack. The agent
+    can still import corc via the existing editable install from the main project.
+    """
+    for filename in _INSTALLABLE_FILES:
+        filepath = worktree_path / filename
+        if filepath.exists():
+            filepath.unlink()

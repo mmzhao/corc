@@ -21,6 +21,9 @@ data/knowledge.db
 
 # OS
 .DS_Store
+
+# CORC runtime
 .corc/daemon.pid
+.corc/worktrees/
 data/state.db-shm
 data/state.db-wal
