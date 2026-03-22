@@ -1247,6 +1247,103 @@ def role_validate(name):
         sys.exit(1)
 
 
+# --- Chaos Monkey ---
+
+
+@cli.group()
+def chaos():
+    """Chaos monkey — resilience testing."""
+    pass
+
+
+@chaos.command("enable")
+@click.option(
+    "--kill-rate",
+    default=0.1,
+    type=float,
+    help="Probability of killing an agent per tick (0.0–1.0)",
+)
+@click.option(
+    "--corrupt-rate",
+    default=0.05,
+    type=float,
+    help="Probability of corrupting state per tick (0.0–1.0)",
+)
+@click.option("--seed", default=None, type=int, help="RNG seed for reproducibility")
+def chaos_enable(kill_rate, corrupt_rate, seed):
+    """Enable chaos mode — randomly kills agents and corrupts state."""
+    from corc.chaos import ChaosConfig, write_chaos_config
+
+    config = ChaosConfig(
+        enabled=True, kill_rate=kill_rate, corrupt_rate=corrupt_rate, seed=seed
+    )
+    errors = config.validate()
+    if errors:
+        for err in errors:
+            click.echo(f"Error: {err}", err=True)
+        sys.exit(1)
+
+    paths = get_paths()
+    write_chaos_config(paths["corc_dir"], config)
+
+    _, _, _, al, _, _ = _get_all()
+    al.log("chaos_enabled", kill_rate=kill_rate, corrupt_rate=corrupt_rate, seed=seed)
+
+    click.echo(f"Chaos monkey ENABLED")
+    click.echo(f"  kill-rate:    {kill_rate}")
+    click.echo(f"  corrupt-rate: {corrupt_rate}")
+    if seed is not None:
+        click.echo(f"  seed:         {seed}")
+    click.echo("The daemon will pick up these settings on the next tick.")
+
+
+@chaos.command("disable")
+def chaos_disable():
+    """Disable chaos mode."""
+    from corc.chaos import read_chaos_config, write_chaos_config, ChaosConfig
+
+    paths = get_paths()
+    config = read_chaos_config(paths["corc_dir"])
+    config.enabled = False
+    write_chaos_config(paths["corc_dir"], config)
+
+    _, _, _, al, _, _ = _get_all()
+    al.log("chaos_disabled")
+
+    click.echo("Chaos monkey DISABLED.")
+
+
+@chaos.command("status")
+def chaos_status():
+    """Show chaos monkey settings and recovery stats."""
+    from corc.chaos import read_chaos_config, get_chaos_stats
+
+    paths = get_paths()
+    config = read_chaos_config(paths["corc_dir"])
+    stats = get_chaos_stats(paths["corc_dir"])
+
+    if config.enabled:
+        click.echo("Chaos monkey: ENABLED")
+    else:
+        click.echo("Chaos monkey: disabled")
+
+    click.echo(f"  kill-rate:    {config.kill_rate}")
+    click.echo(f"  corrupt-rate: {config.corrupt_rate}")
+    if config.seed is not None:
+        click.echo(f"  seed:         {config.seed}")
+
+    if stats["total_events"] > 0:
+        click.echo(f"\nChaos events: {stats['total_events']}")
+        click.echo(f"  kills:       {stats['kills']}")
+        click.echo(f"  corruptions: {stats['corruptions']}")
+        click.echo(f"  recovered:   {stats['recovered']}")
+        click.echo(f"  failed:      {stats['failed']}")
+        click.echo(f"  pending:     {stats['pending']}")
+        click.echo(f"  recovery %%:  {stats['recovery_rate']:.1f}%%")
+    else:
+        click.echo("\nNo chaos events recorded yet.")
+
+
 # --- Self-test ---
 
 
