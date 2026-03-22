@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Data (local, not tracked)
+data/state.db
+data/events/
+data/sessions/
+data/knowledge.db
+
+# Keep the mutations log tracked (source of truth)
+# But not SQLite derivatives
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
