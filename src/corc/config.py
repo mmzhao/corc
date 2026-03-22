@@ -23,4 +23,5 @@ def get_paths(root: Path | None = None) -> dict:
         "knowledge_dir": root / "knowledge",
         "knowledge_db": root / "data" / "knowledge.db",
         "corc_dir": root / ".corc",
+        "ratings_dir": root / "data" / "ratings",
     }
