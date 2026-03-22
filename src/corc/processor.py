@@ -11,6 +11,11 @@ from pathlib import Path
 from corc.audit import AuditLog
 from corc.dispatch import AgentResult
 from corc.mutations import MutationLog
+from corc.notifications import (
+    NotificationManager,
+    notify_escalation,
+    notify_task_failure,
+)
 from corc.repo_policy import get_repo_policy
 from corc.retry import create_escalation
 from corc.sessions import SessionLogger
@@ -21,6 +26,7 @@ from corc.validate import run_validations
 @dataclass
 class ProcessResult:
     """Result of processing a completed task."""
+
     task_id: str
     passed: bool
     details: list[tuple[bool, str]] = field(default_factory=list)
@@ -36,6 +42,7 @@ def process_completed(
     audit_log: AuditLog,
     session_logger: SessionLogger,
     project_root: Path,
+    notification_manager: NotificationManager | None = None,
 ) -> ProcessResult:
     """Validate task output and update state.
 
@@ -45,6 +52,9 @@ def process_completed(
 
     After max_retries are exhausted, sets status to 'escalated' instead
     of 'failed' and creates an escalation record.
+
+    When notification_manager is provided, sends notifications on
+    escalation and task failure events.
     """
     task_id = task["id"]
     max_retries = task.get("max_retries", 3)
@@ -53,8 +63,9 @@ def process_completed(
     state.refresh()
     current = state.get_task(task_id)
     if current and current["status"] == "completed":
-        audit_log.log("task_completion_skipped", task_id=task_id,
-                      reason="already completed")
+        audit_log.log(
+            "task_completion_skipped", task_id=task_id, reason="already completed"
+        )
         return ProcessResult(
             task_id=task_id,
             passed=True,
@@ -69,20 +80,35 @@ def process_completed(
         if attempt > max_retries:
             # Retries exhausted — escalate
             _escalate_task(
-                task, attempt, error_detail, mutation_log, audit_log, session_logger,
+                task,
+                attempt,
+                error_detail,
+                mutation_log,
+                audit_log,
+                session_logger,
+                notification_manager=notification_manager,
             )
         else:
             # Mark as failed (retriable — scheduler will pick it up)
             mutation_log.append(
                 "task_failed",
-                {"attempt": attempt, "exit_code": result.exit_code, "attempt_count": attempt},
+                {
+                    "attempt": attempt,
+                    "exit_code": result.exit_code,
+                    "attempt_count": attempt,
+                },
                 reason=error_msg,
                 task_id=task_id,
             )
             audit_log.log(
-                "task_failed", task_id=task_id,
-                attempt=attempt, exit_code=result.exit_code,
+                "task_failed",
+                task_id=task_id,
+                attempt=attempt,
+                exit_code=result.exit_code,
             )
+            # Notify on task failure
+            if notification_manager:
+                notify_task_failure(notification_manager, task, attempt, error_detail)
 
         state.refresh()
         return ProcessResult(
@@ -107,7 +133,9 @@ def process_completed(
 
     # Log validation result
     session_logger.log_validation(
-        task_id, attempt, all_passed,
+        task_id,
+        attempt,
+        all_passed,
         json.dumps([d for _, d in details]),
     )
 
@@ -152,16 +180,30 @@ def process_completed(
             # Retries exhausted — escalate
             error_msg = f"Validation failed: {'; '.join(failed_details[:3])}"
             _escalate_task(
-                task, attempt, error_msg, mutation_log, audit_log, session_logger,
+                task,
+                attempt,
+                error_msg,
+                mutation_log,
+                audit_log,
+                session_logger,
+                notification_manager=notification_manager,
             )
         else:
             mutation_log.append(
                 "task_failed",
-                {"attempt": attempt, "findings": failed_details, "attempt_count": attempt},
+                {
+                    "attempt": attempt,
+                    "findings": failed_details,
+                    "attempt_count": attempt,
+                },
                 reason="Validation failed",
                 task_id=task_id,
             )
             audit_log.log("task_validation_failed", task_id=task_id, attempt=attempt)
+            # Notify on task failure
+            if notification_manager:
+                error_msg = f"Validation failed: {'; '.join(failed_details[:3])}"
+                notify_task_failure(notification_manager, task, attempt, error_msg)
 
     # Refresh state so subsequent reads see the update
     state.refresh()
@@ -181,11 +223,13 @@ def _escalate_task(
     mutation_log: MutationLog,
     audit_log: AuditLog,
     session_logger: SessionLogger,
+    notification_manager: NotificationManager | None = None,
 ) -> None:
     """Mark a task as escalated and create an escalation record.
 
     Called when max_retries are exhausted. Sets task status to 'escalated'
-    and creates a structured escalation for operator review.
+    and creates a structured escalation for operator review. Sends
+    notifications via notification_manager if provided.
     """
     task_id = task["id"]
 
@@ -197,7 +241,9 @@ def _escalate_task(
         task_id=task_id,
     )
     audit_log.log(
-        "task_escalated", task_id=task_id, attempt=attempt,
+        "task_escalated",
+        task_id=task_id,
+        attempt=attempt,
     )
 
     # Create escalation record for operator
@@ -214,6 +260,10 @@ def _escalate_task(
         escalation_id=escalation["escalation_id"],
         attempts=attempt,
     )
+
+    # Send escalation notification
+    if notification_manager:
+        notify_escalation(notification_manager, task, escalation)
 
 
 def _parse_done_when(done_when: str) -> list[dict]:
