@@ -21,6 +21,7 @@ from corc.dispatch import get_dispatcher, Constraints
 from corc.validate import run_validations
 from corc.templates import get_template, render_template, list_types
 from corc.lint_done_when import lint_done_when
+from corc.retry import resolve_escalation
 
 
 def _get_all():
@@ -488,73 +489,37 @@ def template_cmd(type_name, title, project, render):
         sys.exit(1)
 
 
-# --- Watch (TUI v0) ---
+# --- Watch (TUI v1 — two-panel dashboard) ---
 
 @cli.command()
 @click.option("--last", "last_n", default=20, help="Show last N events")
 def watch(last_n):
-    """Live event stream (TUI v0)."""
+    """Live two-panel dashboard: DAG status + event stream.
+
+    Top panel shows the task dependency graph with live status updates.
+    Bottom panel shows color-coded events as they happen.
+    Press 'q' to quit, or Ctrl+C.
+    """
     try:
-        from rich.live import Live
-        from rich.table import Table
-        from rich.console import Console
-        _watch_rich(last_n)
+        from corc.tui import run_dashboard
+        _watch_dashboard(last_n)
     except ImportError:
         _watch_plain(last_n)
 
 
-def _watch_rich(last_n):
-    from rich.live import Live
-    from rich.text import Text
-    from rich.panel import Panel
-    from rich.console import Console
+def _watch_dashboard(last_n):
+    from corc.tui import run_dashboard
 
-    paths = get_paths()
-    al = AuditLog(paths["events_dir"])
-    console = Console()
+    paths, ml, ws, al, _, _ = _get_all()
 
-    STATUS_COLORS = {
-        "task_created": "cyan",
-        "task_dispatched": "yellow",
-        "task_dispatch_complete": "yellow",
-        "task_completed": "green",
-        "task_failed": "red",
-        "escalation": "red bold",
-        "pause": "red",
-        "resume": "green",
-    }
+    def get_tasks():
+        ws.refresh()
+        return ws.list_tasks()
 
-    seen = set()
+    def get_events():
+        return al.read_recent(last_n)
 
-    with Live(console=console, refresh_per_second=2) as live:
-        while True:
-            events = al.read_recent(last_n)
-            display_events = events
-
-            lines = []
-            for e in display_events:
-                ts = e.get("timestamp", "")[:19].replace("T", " ")
-                etype = e.get("event_type", "unknown")
-                tid = e.get("task_id", "")[:8] if e.get("task_id") else ""
-                color = STATUS_COLORS.get(etype, "white")
-
-                extra = ""
-                if e.get("duration_s"):
-                    extra += f" ({e['duration_s']:.1f}s)"
-                if e.get("exit_code") is not None and e["exit_code"] != 0:
-                    extra += f" exit={e['exit_code']}"
-
-                line = Text()
-                line.append(f"{ts} ", style="dim")
-                line.append(f"{etype:<25}", style=color)
-                line.append(f" {tid}", style="bold")
-                line.append(extra, style="dim")
-                lines.append(line)
-
-            output = Text("\n").join(lines) if lines else Text("No events yet. Waiting...", style="dim")
-            panel = Panel(output, title="[bold]CORC Events[/bold]", subtitle="Ctrl+C to exit")
-            live.update(panel)
-            time.sleep(2)
+    run_dashboard(get_tasks, get_events, max_events=last_n)
 
 
 def _watch_plain(last_n):
@@ -629,6 +594,104 @@ def stop_cmd():
         click.echo("Stop signal sent to daemon. In-flight tasks will finish.")
     else:
         click.echo("No running daemon found.")
+
+
+# --- Escalations ---
+
+@cli.command("escalations")
+@click.option("--all", "show_all", is_flag=True, help="Show all escalations (including resolved)")
+def escalations_cmd(show_all):
+    """List pending escalations."""
+    _, _, ws, _, _, _ = _get_all()
+    ws.refresh()
+    if show_all:
+        escs = ws.list_escalations()
+    else:
+        escs = ws.list_escalations(status="pending")
+
+    if not escs:
+        click.echo("No escalations found.")
+        return
+
+    for esc in escs:
+        status_icon = "🔴" if esc["status"] == "pending" else "✅"
+        click.echo(f"  {status_icon} {esc['id']}  task={esc['task_id']}  {esc.get('task_name', '')}  "
+                    f"attempts={esc.get('attempts', '?')}  status={esc['status']}")
+
+
+@cli.group()
+def escalation():
+    """Manage escalations."""
+    pass
+
+
+@escalation.command("show")
+@click.argument("escalation_id")
+def escalation_show(escalation_id):
+    """Show full details of an escalation."""
+    _, _, ws, _, sl, _ = _get_all()
+    ws.refresh()
+    esc = ws.get_escalation(escalation_id)
+    if not esc:
+        click.echo(f"Escalation {escalation_id} not found.")
+        sys.exit(1)
+        return
+
+    click.echo(f"Escalation: {esc['id']}")
+    click.echo(f"Status: {esc['status']}")
+    click.echo(f"Task: {esc.get('task_name', '')} ({esc['task_id']})")
+    click.echo(f"Attempts: {esc.get('attempts', '?')}")
+    click.echo(f"Created: {esc.get('created', 'unknown')}")
+    if esc.get("resolved"):
+        click.echo(f"Resolved: {esc['resolved']}")
+    if esc.get("resolution"):
+        click.echo(f"Resolution: {esc['resolution']}")
+    click.echo(f"Done when: {esc.get('done_when', '')}")
+    click.echo(f"Session log: {esc.get('session_log_path', '')}")
+
+    click.echo(f"\nError:")
+    click.echo(f"  {esc.get('error', 'no error recorded')}")
+
+    actions = esc.get("suggested_actions", [])
+    if actions:
+        click.echo(f"\nSuggested actions:")
+        for action in actions:
+            click.echo(f"  • {action}")
+
+
+@escalation.command("resolve")
+@click.argument("escalation_id")
+@click.option("--resolution", default="", help="Resolution description")
+@click.option("--unblock", is_flag=True, help="Reset the task to pending after resolving")
+def escalation_resolve(escalation_id, resolution, unblock):
+    """Resolve an escalation and optionally unblock the task."""
+    paths, ml, ws, al, _, _ = _get_all()
+    ws.refresh()
+    esc = ws.get_escalation(escalation_id)
+    if not esc:
+        click.echo(f"Escalation {escalation_id} not found.")
+        sys.exit(1)
+        return
+
+    if esc["status"] == "resolved":
+        click.echo(f"Escalation {escalation_id} is already resolved.")
+        return
+
+    resolve_escalation(escalation_id, ml, resolution)
+    al.log("escalation_resolved", escalation_id=escalation_id, task_id=esc["task_id"])
+
+    if unblock:
+        ml.append(
+            "task_updated",
+            {"status": "pending"},
+            reason=f"Unblocked by escalation resolution {escalation_id}",
+            task_id=esc["task_id"],
+        )
+        al.log("task_unblocked", task_id=esc["task_id"], escalation_id=escalation_id)
+        click.echo(f"Task {esc['task_id']} reset to pending.")
+
+    ws.refresh()
+    click.echo(f"Escalation {escalation_id} resolved.")
 
 
 # --- Self-test ---
