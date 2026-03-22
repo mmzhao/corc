@@ -396,6 +396,13 @@ class KnowledgeStore:
         for md_file in self.knowledge_dir.rglob("*.md"):
             if md_file.name.startswith("_"):
                 continue
+            # Skip files in _-prefixed directories (e.g. _templates/)
+            try:
+                rel = md_file.relative_to(self.knowledge_dir.resolve())
+                if any(part.startswith("_") for part in rel.parts):
+                    continue
+            except ValueError:
+                pass
             try:
                 rel_path = str(md_file.relative_to(self.knowledge_dir.resolve()))
             except ValueError:
@@ -689,6 +696,13 @@ class KnowledgeStore:
         for md_file in self.knowledge_dir.rglob("*.md"):
             if md_file.name.startswith("_"):
                 continue
+            # Skip files in _-prefixed directories (e.g. _templates/)
+            try:
+                rel = md_file.relative_to(self.knowledge_dir.resolve())
+                if any(part.startswith("_") for part in rel.parts):
+                    continue
+            except ValueError:
+                pass
             try:
                 self.add(file_path=md_file)
             except Exception as e:
