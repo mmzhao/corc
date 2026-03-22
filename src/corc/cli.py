@@ -1601,5 +1601,55 @@ def ratings_dimension(name):
         sys.exit(1)
 
 
+# --- Retrospective ---
+
+
+@cli.command()
+@click.argument("project_name")
+@click.option(
+    "--estimate",
+    "cost_estimate",
+    default=None,
+    type=float,
+    help="Cost estimate in USD for comparison",
+)
+def retro(project_name, cost_estimate):
+    """Generate a project-level retrospective.
+
+    Produces a structured analysis: what went well, what didn't, cost vs.
+    estimate, quality trends, top findings, and recommendations. The
+    retrospective is saved to the knowledge store as a task-outcome document.
+
+    Examples:
+      corc retro myproject
+      corc retro myproject --estimate 50.00
+    """
+    from corc.rating import RatingStore
+    from corc.retro import (
+        generate_retrospective,
+        format_retrospective,
+        save_retrospective,
+    )
+
+    paths, _, ws, al, _, ks = _get_all()
+    rs = RatingStore(paths["ratings_dir"])
+
+    retro_result = generate_retrospective(
+        project_name=project_name,
+        work_state=ws,
+        audit_log=al,
+        rating_store=rs,
+        cost_estimate_usd=cost_estimate,
+    )
+
+    # Display the retrospective
+    click.echo(format_retrospective(retro_result))
+
+    # Save to knowledge store
+    doc_id = save_retrospective(retro_result, ks)
+    click.echo()
+    click.echo(f"Retrospective saved to knowledge store: {doc_id}")
+
+
 if __name__ == "__main__":
     cli()
