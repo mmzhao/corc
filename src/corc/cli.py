@@ -59,7 +59,8 @@ def task():
 @click.option("--context", "context_bundle", default="", help="Comma-separated file paths for context bundle")
 @click.option("--checklist", default="", help="Comma-separated checklist items")
 @click.option("--strict", is_flag=True, help="Reject subjective done_when criteria")
-def task_create(name, done_when, description, role, depends_on, context_bundle, checklist, strict):
+@click.option("--priority", default=100, type=int, help="Task priority (lower=higher priority, default 100)")
+def task_create(name, done_when, description, role, depends_on, context_bundle, checklist, strict, priority):
     """Create a new task."""
     # Lint done_when criteria
     lint_result = lint_done_when(done_when)
@@ -90,10 +91,11 @@ def task_create(name, done_when, description, role, depends_on, context_bundle, 
         "checklist": cl,
         "context_bundle": bundle,
         "context_bundle_mtimes": bundle_mtimes,
+        "priority": priority,
     }, reason=f"Task created via CLI")
 
     al.log("task_created", task_id=task_id, name=name)
-    click.echo(f"Created task {task_id}: {name}")
+    click.echo(f"Created task {task_id}: {name} (priority {priority})")
 
 
 @task.command("list")
@@ -116,8 +118,31 @@ def task_list(status, ready):
     for t in tasks:
         deps = t.get("depends_on", [])
         dep_str = f" (depends: {', '.join(deps)})" if deps else ""
-        click.echo(f"  [{t['status']:>10}] {t['id']}  {t['name']}{dep_str}")
+        pri = t.get("priority", 100)
+        pri_str = f" [pri={pri}]" if pri != 100 else ""
+        click.echo(f"  [{t['status']:>10}] {t['id']}  {t['name']}{pri_str}{dep_str}")
         click.echo(f"             done_when: {t['done_when']}")
+
+
+@task.command("prioritize")
+@click.argument("task_id")
+@click.argument("priority", type=int)
+def task_prioritize(task_id, priority):
+    """Update the priority of an existing task (lower=higher priority)."""
+    _, ml, ws, al, _, _ = _get_all()
+    t = ws.get_task(task_id)
+    if not t:
+        click.echo(f"Task {task_id} not found.")
+        sys.exit(1)
+
+    ml.append(
+        "task_updated",
+        {"priority": priority},
+        reason=f"Priority updated to {priority} via CLI",
+        task_id=task_id,
+    )
+    al.log("task_prioritized", task_id=task_id, priority=priority)
+    click.echo(f"Task {task_id} priority updated to {priority}.")
 
 
 @task.command("status")
@@ -132,6 +157,7 @@ def task_status(task_id):
 
     click.echo(f"Task: {t['name']} ({t['id']})")
     click.echo(f"Status: {t['status']}")
+    click.echo(f"Priority: {t.get('priority', 100)}")
     click.echo(f"Role: {t.get('role', 'unset')}")
     click.echo(f"Done when: {t['done_when']}")
     if t.get("depends_on"):
@@ -299,7 +325,7 @@ def dispatch(task_id, provider):
     agent_id = f"agent-{_uuid.uuid4().hex[:8]}"
     ml.append("agent_created", {
         "id": agent_id,
-        "role": role,
+        "role": role_name,
         "task_id": task_id,
         "worktree_path": str(worktree_path) if worktree_path else None,
     }, reason="Agent created for CLI dispatch")

@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     micro_deviations TEXT DEFAULT '[]',
     attempt_count INTEGER DEFAULT 0,
     max_retries INTEGER DEFAULT 3,
-    merge_status TEXT
+    merge_status TEXT,
+    priority INTEGER DEFAULT 100
 );
 
 CREATE TABLE IF NOT EXISTS agents (
@@ -109,6 +110,7 @@ class WorkState:
             ("attempt_count", "INTEGER DEFAULT 0"),
             ("max_retries", "INTEGER DEFAULT 3"),
             ("merge_status", "TEXT"),
+            ("priority", "INTEGER DEFAULT 100"),
         ]
         for col_name, col_type in migrations:
             if col_name not in existing:
@@ -139,8 +141,8 @@ class WorkState:
             self.conn.execute(
                 """INSERT OR REPLACE INTO tasks(id, name, description, status, role, depends_on,
                    done_when, checklist, context_bundle, context_bundle_mtimes,
-                   created, updated, attempt_count, max_retries)
-                   VALUES(?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   created, updated, attempt_count, max_retries, priority)
+                   VALUES(?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     data["id"],
                     data["name"],
@@ -155,6 +157,7 @@ class WorkState:
                     entry["ts"],
                     data.get("attempt_count", 0),
                     data.get("max_retries", 3),
+                    data.get("priority", 100),
                 ),
             )
         elif t == "task_assigned":
@@ -214,6 +217,7 @@ class WorkState:
                 "attempt_count",
                 "max_retries",
                 "merge_status",
+                "priority",
             ):
                 if field in data:
                     val = data[field]
@@ -334,6 +338,7 @@ class WorkState:
 
         Returns pending tasks with satisfied dependencies, plus failed tasks
         that haven't exceeded their max_retries limit.
+        Sorted by priority ascending (lower number = higher priority).
         """
         all_tasks = self.list_tasks()
         completed_ids = {t["id"] for t in all_tasks if t["status"] == "completed"}
@@ -353,6 +358,8 @@ class WorkState:
                 max_retries = task.get("max_retries", 3)
                 if attempt_count <= max_retries:
                     ready.append(task)
+        # Sort by priority ascending: lower number = higher priority
+        ready.sort(key=lambda t: t.get("priority", 100))
         return ready
 
     def _row_to_dict(self, row: sqlite3.Row) -> dict:
