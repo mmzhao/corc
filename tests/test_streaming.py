@@ -582,6 +582,32 @@ class TestAuditLogStreaming:
 # ===========================================================================
 
 
+class MockStreamingDispatcher(AgentDispatcher):
+    """A mock dispatcher that emits stream events via event_callback.
+
+    Unlike the ClaudeCodeDispatcher tests which mock subprocess.Popen,
+    this tests the Executor→Dispatcher→callback wiring at the interface
+    level: the dispatcher receives event_callback and invokes it directly.
+    """
+
+    def __init__(self, events: list[dict], result: AgentResult | None = None):
+        self.events = events
+        self._result = result or AgentResult(
+            output="Mock completed.",
+            exit_code=0,
+            duration_s=0.1,
+        )
+        self.received_event_callback = None
+
+    def dispatch(self, prompt: str, system_prompt: str, constraints: Constraints,
+                 pid_callback=None, event_callback=None) -> AgentResult:
+        self.received_event_callback = event_callback
+        if event_callback:
+            for event in self.events:
+                event_callback(event)
+        return self._result
+
+
 class TestExecutorStreamingIntegration:
     """Test that the executor wires up event callbacks correctly."""
 
@@ -652,6 +678,162 @@ class TestExecutorStreamingIntegration:
         msg_events = [e for e in all_audit if e["event_type"] == "assistant_message"]
         assert len(msg_events) == 2  # Two assistant messages
         assert "analyze the codebase" in msg_events[0]["content"]
+
+        executor.shutdown()
+
+    def test_mock_dispatcher_stream_events_captured(self, mutation_log,
+                                                      work_state, audit_log,
+                                                      session_logger, tmp_project):
+        """Mock dispatcher emits stream events; executor captures them in session and audit logs.
+
+        This test verifies the full wiring path: Executor builds event_callback,
+        passes it to dispatcher.dispatch(), dispatcher invokes callback for each
+        event, and the callback writes to both session logger and audit log.
+        """
+        mock_dispatcher = MockStreamingDispatcher(
+            events=SAMPLE_EVENTS,
+            result=AgentResult(
+                output="Task completed. Created feature.py with the new feature.",
+                exit_code=0,
+                duration_s=5.0,
+            ),
+        )
+
+        _create_task(mutation_log, "t1", "Task 1")
+        work_state.refresh()
+        task = work_state.get_task("t1")
+
+        executor = Executor(
+            dispatcher=mock_dispatcher,
+            mutation_log=mutation_log,
+            state=work_state,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            project_root=tmp_project,
+        )
+
+        executor.dispatch(task)
+        time.sleep(0.5)
+        completed = executor.poll_completed()
+
+        assert len(completed) == 1
+        assert completed[0].result.exit_code == 0
+
+        # -- Verify event_callback was passed to the dispatcher --
+        assert mock_dispatcher.received_event_callback is not None
+
+        # -- Verify session log contains stream_event entries --
+        session = session_logger.read_session("t1", 1)
+        stream_entries = [e for e in session if e["type"] == "stream_event"]
+        assert len(stream_entries) == len(SAMPLE_EVENTS)
+
+        # Verify stream_type metadata on each entry
+        stream_types = [e["stream_type"] for e in stream_entries]
+        assert "assistant" in stream_types
+        assert "tool_use" in stream_types
+        assert "tool_result" in stream_types
+        assert "system" in stream_types
+        assert "result" in stream_types
+
+        # -- Verify audit log has real-time tool_use entries --
+        all_audit = audit_log.read_today()
+        tool_events = [e for e in all_audit if e["event_type"] == "tool_use"]
+        assert len(tool_events) == 2  # Read and Write from SAMPLE_EVENTS
+        assert tool_events[0]["task_id"] == "t1"
+        assert tool_events[0]["tool_name"] == "Read"
+        assert tool_events[1]["tool_name"] == "Write"
+
+        # -- Verify audit log has assistant_message entries --
+        msg_events = [e for e in all_audit if e["event_type"] == "assistant_message"]
+        assert len(msg_events) == 2
+        assert "analyze the codebase" in msg_events[0]["content"]
+        assert "implement the feature" in msg_events[1]["content"]
+
+        executor.shutdown()
+
+    def test_mock_dispatcher_no_events_still_works(self, mutation_log,
+                                                     work_state, audit_log,
+                                                     session_logger, tmp_project):
+        """Dispatcher that emits zero stream events still completes normally."""
+        mock_dispatcher = MockStreamingDispatcher(
+            events=[],
+            result=AgentResult(output="Done.", exit_code=0, duration_s=0.1),
+        )
+
+        _create_task(mutation_log, "t1", "Task 1")
+        work_state.refresh()
+        task = work_state.get_task("t1")
+
+        executor = Executor(
+            dispatcher=mock_dispatcher,
+            mutation_log=mutation_log,
+            state=work_state,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            project_root=tmp_project,
+        )
+
+        executor.dispatch(task)
+        time.sleep(0.5)
+        completed = executor.poll_completed()
+
+        assert len(completed) == 1
+        assert completed[0].result.output == "Done."
+
+        # Session log has dispatch + output but no stream events
+        session = session_logger.read_session("t1", 1)
+        stream_entries = [e for e in session if e["type"] == "stream_event"]
+        assert len(stream_entries) == 0
+
+        executor.shutdown()
+
+    def test_tool_result_events_in_session_log(self, mutation_log,
+                                                 work_state, audit_log,
+                                                 session_logger, tmp_project):
+        """tool_result events are captured in session log for full conversation replay."""
+        tool_result_events = [
+            {"type": "tool_use", "tool": {"name": "Bash", "input": {"command": "ls"}}},
+            {"type": "tool_result", "tool": {
+                "tool_use_id": "toolu_99",
+                "content": "file1.py\nfile2.py\n",
+            }},
+            {"type": "result", "result": "Listed files.", "is_error": False},
+        ]
+
+        mock_dispatcher = MockStreamingDispatcher(
+            events=tool_result_events,
+            result=AgentResult(output="Listed files.", exit_code=0, duration_s=0.2),
+        )
+
+        _create_task(mutation_log, "t1", "Task 1")
+        work_state.refresh()
+        task = work_state.get_task("t1")
+
+        executor = Executor(
+            dispatcher=mock_dispatcher,
+            mutation_log=mutation_log,
+            state=work_state,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            project_root=tmp_project,
+        )
+
+        executor.dispatch(task)
+        time.sleep(0.5)
+        executor.poll_completed()
+
+        session = session_logger.read_session("t1", 1)
+        stream_entries = [e for e in session if e["type"] == "stream_event"]
+        stream_types = [e["stream_type"] for e in stream_entries]
+
+        assert "tool_use" in stream_types
+        assert "tool_result" in stream_types
+        assert "result" in stream_types
+
+        # Verify tool_result content is preserved in session log
+        tool_result_entry = [e for e in stream_entries if e["stream_type"] == "tool_result"][0]
+        parsed = json.loads(tool_result_entry["content"])
+        assert "file1.py" in parsed["tool"]["content"]
 
         executor.shutdown()
 
