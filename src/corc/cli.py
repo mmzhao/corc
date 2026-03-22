@@ -13,6 +13,7 @@ from corc.state import WorkState
 from corc.audit import AuditLog
 from corc.sessions import SessionLogger
 from corc.knowledge import KnowledgeStore
+from corc.dag import render_ascii_dag, render_mermaid
 from corc.context import assemble_context
 from corc.daemon import Daemon, stop_daemon
 from corc.dispatch import get_dispatcher, Constraints
@@ -292,6 +293,25 @@ def status():
     events_today = al.read_today()
     if events_today:
         click.echo(f"\nEvents today: {len(events_today)}")
+
+
+# --- DAG Visualization ---
+
+@cli.command()
+@click.option("--mermaid", is_flag=True, help="Output Mermaid markdown instead of ASCII")
+@click.option("--no-color", is_flag=True, help="Disable ANSI colours")
+def dag(mermaid, no_color):
+    """Render the task dependency graph."""
+    _, _, ws, _, _, _ = _get_all()
+    tasks = ws.list_tasks()
+    if not tasks:
+        click.echo("No tasks found.")
+        return
+
+    if mermaid:
+        click.echo(render_mermaid(tasks), nl=False)
+    else:
+        click.echo(render_ascii_dag(tasks, use_color=not no_color), nl=False)
 
 
 # --- Knowledge Store ---
