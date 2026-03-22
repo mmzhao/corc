@@ -93,10 +93,32 @@ class WorkState:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(SCHEMA)
+        self._migrate_schema()
         self._replay_mutations()
 
+    def _migrate_schema(self):
+        """Add columns that may be missing from databases created before schema updates.
+
+        Uses ALTER TABLE to add new columns without data loss. Safe to call
+        repeatedly — only adds columns that don't already exist.
+        """
+        existing = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(tasks)").fetchall()
+        }
+        migrations = [
+            ("attempt_count", "INTEGER DEFAULT 0"),
+            ("max_retries", "INTEGER DEFAULT 3"),
+            ("merge_status", "TEXT"),
+        ]
+        for col_name, col_type in migrations:
+            if col_name not in existing:
+                self.conn.execute(f"ALTER TABLE tasks ADD COLUMN {col_name} {col_type}")
+        self.conn.commit()
+
     def _replay_mutations(self):
-        row = self.conn.execute("SELECT value FROM meta WHERE key='last_seq'").fetchone()
+        row = self.conn.execute(
+            "SELECT value FROM meta WHERE key='last_seq'"
+        ).fetchone()
         last_seq = int(row["value"]) if row else 0
         entries = self.mutation_log.read_since(last_seq)
         for entry in entries:
@@ -117,8 +139,8 @@ class WorkState:
             self.conn.execute(
                 """INSERT OR REPLACE INTO tasks(id, name, description, status, role, depends_on,
                    done_when, checklist, context_bundle, context_bundle_mtimes,
-                   created, updated, max_retries)
-                   VALUES(?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   created, updated, attempt_count, max_retries)
+                   VALUES(?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     data["id"],
                     data["name"],
@@ -131,6 +153,7 @@ class WorkState:
                     json.dumps(data.get("context_bundle_mtimes", {})),
                     entry["ts"],
                     entry["ts"],
+                    data.get("attempt_count", 0),
                     data.get("max_retries", 3),
                 ),
             )
@@ -152,7 +175,9 @@ class WorkState:
                     entry["ts"],
                     entry["ts"],
                     data.get("pr_url"),
-                    json.dumps(data.get("proof_of_work")) if data.get("proof_of_work") else None,
+                    json.dumps(data.get("proof_of_work"))
+                    if data.get("proof_of_work")
+                    else None,
                     json.dumps(data.get("findings", [])),
                     task_id,
                 ),
@@ -160,18 +185,36 @@ class WorkState:
         elif t == "task_failed":
             self.conn.execute(
                 "UPDATE tasks SET status='failed', updated=?, findings=?, attempt_count=? WHERE id=?",
-                (entry["ts"], json.dumps(data.get("findings", [])),
-                 data.get("attempt_count", data.get("attempt", 0)), task_id),
+                (
+                    entry["ts"],
+                    json.dumps(data.get("findings", [])),
+                    data.get("attempt_count", data.get("attempt", 0)),
+                    task_id,
+                ),
             )
         elif t == "task_escalated":
             self.conn.execute(
                 "UPDATE tasks SET status='escalated', updated=?, attempt_count=? WHERE id=?",
-                (entry["ts"], data.get("attempt_count", data.get("attempt", 0)), task_id),
+                (
+                    entry["ts"],
+                    data.get("attempt_count", data.get("attempt", 0)),
+                    task_id,
+                ),
             )
         elif t == "task_updated":
             updates = []
             params = []
-            for field in ("status", "checklist", "pr_url", "proof_of_work", "findings", "micro_deviations", "attempt_count", "max_retries", "merge_status"):
+            for field in (
+                "status",
+                "checklist",
+                "pr_url",
+                "proof_of_work",
+                "findings",
+                "micro_deviations",
+                "attempt_count",
+                "max_retries",
+                "merge_status",
+            ):
                 if field in data:
                     val = data[field]
                     if isinstance(val, (list, dict)):
@@ -196,7 +239,9 @@ class WorkState:
                    proof_of_work=?, findings=? WHERE id=?""",
                 (
                     entry["ts"],
-                    json.dumps(data.get("proof_of_work")) if data.get("proof_of_work") else None,
+                    json.dumps(data.get("proof_of_work"))
+                    if data.get("proof_of_work")
+                    else None,
                     json.dumps(data.get("findings", [])),
                     task_id,
                 ),
@@ -205,7 +250,14 @@ class WorkState:
             self.conn.execute(
                 """INSERT OR REPLACE INTO agents(id, role, task_id, status, worktree_path, pid, started)
                    VALUES(?, ?, ?, 'idle', ?, ?, ?)""",
-                (data["id"], data["role"], data.get("task_id"), data.get("worktree_path"), data.get("pid"), entry["ts"]),
+                (
+                    data["id"],
+                    data["role"],
+                    data.get("task_id"),
+                    data.get("worktree_path"),
+                    data.get("pid"),
+                    entry["ts"],
+                ),
             )
         elif t == "agent_updated":
             updates = []
@@ -270,7 +322,9 @@ class WorkState:
 
     def list_tasks(self, status: str | None = None) -> list[dict]:
         if status:
-            rows = self.conn.execute("SELECT * FROM tasks WHERE status=?", (status,)).fetchall()
+            rows = self.conn.execute(
+                "SELECT * FROM tasks WHERE status=?", (status,)
+            ).fetchall()
         else:
             rows = self.conn.execute("SELECT * FROM tasks ORDER BY created").fetchall()
         return [self._row_to_dict(r) for r in rows]
@@ -286,7 +340,11 @@ class WorkState:
         ready = []
         for task in all_tasks:
             if task["status"] == "pending":
-                deps = json.loads(task["depends_on"]) if isinstance(task["depends_on"], str) else task["depends_on"]
+                deps = (
+                    json.loads(task["depends_on"])
+                    if isinstance(task["depends_on"], str)
+                    else task["depends_on"]
+                )
                 if all(dep in completed_ids for dep in deps):
                     ready.append(task)
             elif task["status"] == "failed":
@@ -299,7 +357,14 @@ class WorkState:
 
     def _row_to_dict(self, row: sqlite3.Row) -> dict:
         d = dict(row)
-        for field in ("depends_on", "checklist", "context_bundle", "context_bundle_mtimes", "findings", "micro_deviations"):
+        for field in (
+            "depends_on",
+            "checklist",
+            "context_bundle",
+            "context_bundle_mtimes",
+            "findings",
+            "micro_deviations",
+        ):
             if d.get(field) and isinstance(d[field], str):
                 try:
                     d[field] = json.loads(d[field])
