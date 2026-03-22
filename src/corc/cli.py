@@ -14,9 +14,11 @@ from corc.audit import AuditLog
 from corc.sessions import SessionLogger
 from corc.knowledge import KnowledgeStore
 from corc.context import assemble_context
+from corc.daemon import Daemon, stop_daemon
 from corc.dispatch import get_dispatcher, Constraints
 from corc.validate import run_validations
 from corc.templates import get_template, render_template, list_types
+from corc.lint_done_when import lint_done_when
 
 
 def _get_all():
@@ -51,8 +53,18 @@ def task():
 @click.option("--depends-on", default="", help="Comma-separated task IDs")
 @click.option("--context", "context_bundle", default="", help="Comma-separated file paths for context bundle")
 @click.option("--checklist", default="", help="Comma-separated checklist items")
-def task_create(name, done_when, description, role, depends_on, context_bundle, checklist):
+@click.option("--strict", is_flag=True, help="Reject subjective done_when criteria")
+def task_create(name, done_when, description, role, depends_on, context_bundle, checklist, strict):
     """Create a new task."""
+    # Lint done_when criteria
+    lint_result = lint_done_when(done_when)
+    if lint_result.warnings:
+        for warning in lint_result.warnings:
+            click.echo(f"Warning: done_when: {warning}", err=True)
+        if strict:
+            click.echo("Aborted: --strict rejects subjective done_when criteria.", err=True)
+            sys.exit(1)
+
     paths, ml, ws, al, sl, ks = _get_all()
     task_id = str(uuid.uuid4())[:8]
     deps = [d.strip() for d in depends_on.split(",") if d.strip()]
@@ -474,6 +486,65 @@ def _watch_plain(last_n):
                 click.echo(f"{ts} {e.get('event_type', '?'):>25} {e.get('task_id', '')[:8]}")
             seen_count = len(events)
         time.sleep(2)
+
+
+# --- Daemon ---
+
+@cli.command("start")
+@click.option("--parallel", default=1, type=int, help="Max concurrent agents (default: 1)")
+@click.option("--task", "task_id", default=None, help="Run one specific task, then stop")
+@click.option("--once", is_flag=True, help="Process one ready task, then stop")
+@click.option("--provider", default="claude-code", help="Dispatch provider")
+@click.option("--poll-interval", default=5.0, type=float, help="Seconds between polls (default: 5)")
+def start_cmd(parallel, task_id, once, provider, poll_interval):
+    """Start the daemon. Processes all ready work. Idles when empty."""
+    paths, ml, ws, al, sl, _ = _get_all()
+
+    # Check for already-running daemon
+    pid_file = paths["root"] / ".corc" / "daemon.pid"
+    if pid_file.exists():
+        try:
+            pid = int(pid_file.read_text().strip())
+            import os
+            os.kill(pid, 0)  # Check if process exists
+            click.echo(f"Daemon already running (PID {pid}). Use 'corc stop' first.")
+            return
+        except (ProcessLookupError, ValueError):
+            pid_file.unlink(missing_ok=True)
+
+    dispatcher = get_dispatcher(provider)
+
+    click.echo(f"Starting CORC daemon (parallel={parallel}, provider={provider})")
+    if task_id:
+        click.echo(f"  Target task: {task_id}")
+    if once:
+        click.echo(f"  Mode: once (will stop after one task)")
+    click.echo("Press Ctrl+C to stop.\n")
+
+    daemon = Daemon(
+        state=ws,
+        mutation_log=ml,
+        audit_log=al,
+        session_logger=sl,
+        dispatcher=dispatcher,
+        project_root=paths["root"],
+        parallel=parallel,
+        poll_interval=poll_interval,
+        task_id=task_id,
+        once=once,
+    )
+    daemon.start()
+    click.echo("Daemon stopped.")
+
+
+@cli.command("stop")
+def stop_cmd():
+    """Graceful shutdown (in-flight tasks finish)."""
+    paths = get_paths()
+    if stop_daemon(paths["root"]):
+        click.echo("Stop signal sent to daemon. In-flight tasks will finish.")
+    else:
+        click.echo("No running daemon found.")
 
 
 # --- Self-test ---
