@@ -1489,6 +1489,66 @@ def analyze_failures(since):
     click.echo(format_failures(entries))
 
 
+@analyze.command("patterns")
+def analyze_patterns_cmd():
+    """Identify correlations between roles/task-types/context and scores.
+
+    Detects what's working and what isn't. Produces actionable recommendations.
+
+    Examples:
+      corc analyze patterns
+    """
+    from corc.rating import RatingStore
+    from corc.patterns import analyze_patterns, format_pattern_report
+
+    paths, _, _, _, _, _ = _get_all()
+    rs = RatingStore(paths["ratings_dir"])
+    ratings = rs.read_all()
+    report = analyze_patterns(ratings)
+    click.echo(format_pattern_report(report))
+
+
+@analyze.command("prompts")
+@click.option("--role", required=True, help="Role name to analyze prompt versions for")
+def analyze_prompts_cmd(role):
+    """Show quality scores by prompt version for a role.
+
+    Tracks which prompt versions produce better outcomes.
+
+    Examples:
+      corc analyze prompts --role implementer
+      corc analyze prompts --role reviewer
+    """
+    from corc.rating import RatingStore
+    from corc.patterns import analyze_prompts, format_prompt_report
+
+    paths, _, _, _, _, _ = _get_all()
+    rs = RatingStore(paths["ratings_dir"])
+    ratings = rs.read_all()
+    report = analyze_prompts(ratings, role)
+    click.echo(format_prompt_report(report))
+
+
+@analyze.command("planning")
+def analyze_planning_cmd():
+    """Show which spec structures produce better outcomes.
+
+    Analyzes checklist size, dependency count, context bundle size,
+    and done-when specificity against task quality scores.
+
+    Examples:
+      corc analyze planning
+    """
+    from corc.rating import RatingStore
+    from corc.patterns import analyze_planning, format_planning_report
+
+    paths, _, _, _, _, _ = _get_all()
+    rs = RatingStore(paths["ratings_dir"])
+    ratings = rs.read_all()
+    report = analyze_planning(ratings)
+    click.echo(format_planning_report(report))
+
+
 # --- Rating ---
 
 
