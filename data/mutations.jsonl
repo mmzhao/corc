@@ -30,3 +30,7 @@
 {"seq":28,"ts":"2026-03-22T06:51:31Z","type":"task_failed","data":{"attempt":1,"exit_code":-1},"reason":"Agent exited with code -1","task_id":"37b4237e"}
 {"seq":29,"ts":"2026-03-22T06:52:14Z","type":"task_completed","data":{"pr_url":null,"findings":[]},"reason":"Marked complete via CLI","task_id":"adcf7769"}
 {"seq":30,"ts":"2026-03-22T06:52:14Z","type":"task_completed","data":{"pr_url":null,"findings":[]},"reason":"Marked complete via CLI","task_id":"69e5ebf5"}
+{"seq":31,"ts":"2026-03-22T06:52:40Z","type":"task_started","data":{"attempt":1},"reason":"Dispatched via CLI","task_id":"d15345a9"}
+{"seq":31,"ts":"2026-03-22T06:52:40Z","type":"task_started","data":{"attempt":2},"reason":"Dispatched via CLI","task_id":"37b4237e"}
+{"seq":32,"ts":"2026-03-22T06:52:40Z","type":"task_started","data":{"attempt":1},"reason":"Dispatched via CLI","task_id":"30c5e094"}
+{"seq":33,"ts":"2026-03-22T07:02:40Z","type":"task_failed","data":{"attempt":1,"exit_code":-1},"reason":"Agent exited with code -1","task_id":"d15345a9"}

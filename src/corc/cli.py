@@ -354,9 +354,9 @@ def status():
     if ready:
         click.echo(f"\nReady to dispatch: {', '.join(t['name'] for t in ready)}")
 
-    events_today = al.read_today()
-    if events_today:
-        click.echo(f"\nEvents today: {len(events_today)}")
+    recent_events = al.read_recent(50)
+    if recent_events:
+        click.echo(f"\nRecent events: {len(recent_events)}")
 
 
 # --- DAG Visualization ---
@@ -528,8 +528,8 @@ def _watch_rich(last_n):
 
     with Live(console=console, refresh_per_second=2) as live:
         while True:
-            events = al.read_today()
-            display_events = events[-last_n:]
+            events = al.read_recent(last_n)
+            display_events = events
 
             lines = []
             for e in display_events:
@@ -563,7 +563,7 @@ def _watch_plain(last_n):
     click.echo("Watching events (install 'rich' for TUI). Ctrl+C to exit.")
     seen_count = 0
     while True:
-        events = al.read_today()
+        events = al.read_recent(last_n)
         if len(events) > seen_count:
             for e in events[seen_count:]:
                 ts = e.get("timestamp", "")[:19]
@@ -658,7 +658,7 @@ def log_cmd(last_n, task_id):
     if task_id:
         events = al.read_for_task(task_id)
     else:
-        events = al.read_today()[-last_n:]
+        events = al.read_recent(last_n)
 
     for e in events:
         ts = e.get("timestamp", "")[:19].replace("T", " ")

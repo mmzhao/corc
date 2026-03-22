@@ -16,7 +16,7 @@ class AuditLog:
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
     def _today_path(self) -> Path:
-        return self.base_dir / f"{time.strftime('%Y-%m-%d')}.jsonl"
+        return self.base_dir / f"{time.strftime('%Y-%m-%d', time.gmtime())}.jsonl"
 
     def log(self, event_type: str, task_id: str | None = None, **kwargs) -> dict:
         event = {
@@ -36,6 +36,11 @@ class AuditLog:
 
     def read_today(self) -> list[dict]:
         return self._read_file(self._today_path())
+
+    def read_recent(self, n: int = 100) -> list[dict]:
+        """Read the most recent N events across all log files."""
+        all_events = self.read_all()
+        return all_events[-n:]
 
     def read_all(self, since: str | None = None) -> list[dict]:
         events = []

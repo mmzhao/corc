@@ -30,12 +30,21 @@ class AgentResult:
 
 class AgentDispatcher(ABC):
     @abstractmethod
-    def dispatch(self, prompt: str, system_prompt: str, constraints: Constraints) -> AgentResult:
+    def dispatch(self, prompt: str, system_prompt: str, constraints: Constraints,
+                 pid_callback=None) -> AgentResult:
+        """Dispatch an agent with the given prompt and constraints.
+
+        Args:
+            pid_callback: Optional callable(pid: int) called with the process
+                PID once the agent subprocess starts. Used for PID tracking
+                during reconciliation on restart.
+        """
         ...
 
 
 class ClaudeCodeDispatcher(AgentDispatcher):
-    def dispatch(self, prompt: str, system_prompt: str, constraints: Constraints) -> AgentResult:
+    def dispatch(self, prompt: str, system_prompt: str, constraints: Constraints,
+                 pid_callback=None) -> AgentResult:
         cmd = ["claude", "-p", prompt]
 
         if system_prompt:
@@ -49,25 +58,33 @@ class ClaudeCodeDispatcher(AgentDispatcher):
 
         start = time.time()
         try:
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=600,
             )
+
+            # Report PID so it can be tracked for reconciliation
+            if pid_callback:
+                pid_callback(proc.pid)
+
+            stdout, stderr = proc.communicate(timeout=1800)
             duration = time.time() - start
-            output = result.stdout
-            if result.stderr:
-                output += "\n--- STDERR ---\n" + result.stderr
+            output = stdout or ""
+            if stderr:
+                output += "\n--- STDERR ---\n" + stderr
             return AgentResult(
                 output=output,
-                exit_code=result.returncode,
+                exit_code=proc.returncode,
                 duration_s=duration,
             )
         except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
             duration = time.time() - start
             return AgentResult(
-                output="[TIMEOUT: agent exceeded 600s limit]",
+                output="[TIMEOUT: agent exceeded 1800s limit]",
                 exit_code=-1,
                 duration_s=duration,
             )

@@ -213,5 +213,43 @@ class WorkState:
                 pass
         return d
 
+    def get_agents_for_task(self, task_id: str) -> list[dict]:
+        """Get all agent records associated with a task."""
+        rows = self.conn.execute(
+            "SELECT * FROM agents WHERE task_id=?", (task_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_agents(self, status: str | None = None) -> list[dict]:
+        """List all agents, optionally filtered by status."""
+        if status:
+            rows = self.conn.execute(
+                "SELECT * FROM agents WHERE status=?", (status,)
+            ).fetchall()
+        else:
+            rows = self.conn.execute("SELECT * FROM agents").fetchall()
+        return [dict(r) for r in rows]
+
+    def rebuild(self):
+        """Full rebuild: clear all data and replay entire mutation log.
+
+        Used on daemon startup to ensure SQLite matches the mutation log
+        exactly. This is the recovery mechanism after crashes.
+        """
+        self.conn.execute("DELETE FROM tasks")
+        self.conn.execute("DELETE FROM agents")
+        self.conn.execute("DELETE FROM meta")
+        self.conn.commit()
+
+        entries = self.mutation_log.read_all()
+        for entry in entries:
+            self._apply_mutation(entry)
+        if entries:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES('last_seq', ?)",
+                (str(entries[-1]["seq"]),),
+            )
+        self.conn.commit()
+
     def refresh(self):
         self._replay_mutations()
