@@ -151,6 +151,76 @@ def task_status(task_id):
             click.echo(f"  {e['timestamp']} {e['event_type']}")
 
 
+# --- Plan ---
+
+@cli.command()
+@click.argument("file", required=False, type=click.Path(exists=True))
+@click.option("--resume", "resume_session", is_flag=True, help="Resume the last planning session")
+def plan(file, resume_session):
+    """Start an interactive planning session.
+
+    Launches Claude Code in interactive mode with full CORC context injected:
+    knowledge store summary, work state summary, and repository context.
+
+    Optionally pre-load a seed document: corc plan my-idea.md
+
+    Resume a crashed/interrupted session: corc plan --resume
+    """
+    from pathlib import Path as _Path
+    from corc.plan import (
+        build_system_prompt,
+        save_session_metadata,
+        load_latest_draft,
+        mark_session_complete,
+        launch_interactive_claude,
+    )
+
+    paths, ml, ws, al, sl, ks = _get_all()
+
+    seed_content = None
+    if file:
+        seed_content = _Path(file).read_text()
+
+    draft_content = None
+    resume_meta = None
+    continue_session = False
+
+    if resume_session:
+        resume_meta, draft_content = load_latest_draft(paths["corc_dir"])
+        if resume_meta:
+            click.echo(f"Resuming session from {resume_meta.get('timestamp', 'unknown')}")
+            continue_session = True
+        else:
+            click.echo("No previous session found. Starting fresh.")
+
+    # Build system prompt with full context
+    system_prompt = build_system_prompt(
+        paths, ws, ks,
+        seed_content=seed_content,
+        draft_content=draft_content,
+        resume_meta=resume_meta,
+    )
+
+    # Save session metadata for crash recovery
+    session_id = time.strftime("%Y%m%d-%H%M%S")
+    save_session_metadata(
+        paths["corc_dir"], session_id,
+        seed_file=str(file) if file else None,
+    )
+
+    click.echo("Launching planning session...")
+    click.echo("Use 'corc task create' to create tasks from within the session.")
+    click.echo()
+
+    exit_code = launch_interactive_claude(system_prompt, continue_session=continue_session)
+
+    # Mark session complete on clean exit
+    if exit_code == 0:
+        mark_session_complete(paths["corc_dir"], session_id)
+
+    sys.exit(exit_code)
+
+
 # --- Dispatch ---
 
 @cli.command()
