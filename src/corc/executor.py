@@ -15,7 +15,7 @@ from pathlib import Path
 import json
 
 from corc.audit import AuditLog
-from corc.context import assemble_context
+from corc.context import assemble_context, check_context_staleness
 from corc.dispatch import AgentDispatcher, AgentResult, Constraints
 from corc.mutations import MutationLog
 from corc.retry import get_retry_context
@@ -149,6 +149,17 @@ class Executor:
             agent_id=agent_id,
             worktree_path=str(worktree_path) if worktree_path else None,
         )
+
+        # Check for stale context bundle files
+        stale_files = check_context_staleness(task, self.project_root)
+        if stale_files:
+            stale_names = [s["file"] for s in stale_files]
+            self.audit_log.log(
+                "context_staleness_warning",
+                task_id=task["id"],
+                stale_files=stale_names,
+                details=stale_files,
+            )
 
         # Build prompt and context using role config
         context = assemble_context(task, self.project_root)

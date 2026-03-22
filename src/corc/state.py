@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     done_when TEXT NOT NULL,
     checklist TEXT DEFAULT '[]',
     context_bundle TEXT DEFAULT '[]',
+    context_bundle_mtimes TEXT DEFAULT '{}',
     pr_url TEXT,
     proof_of_work TEXT,
     created TEXT NOT NULL,
@@ -115,8 +116,9 @@ class WorkState:
         if t == "task_created":
             self.conn.execute(
                 """INSERT OR REPLACE INTO tasks(id, name, description, status, role, depends_on,
-                   done_when, checklist, context_bundle, created, updated, max_retries)
-                   VALUES(?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   done_when, checklist, context_bundle, context_bundle_mtimes,
+                   created, updated, max_retries)
+                   VALUES(?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     data["id"],
                     data["name"],
@@ -126,6 +128,7 @@ class WorkState:
                     data["done_when"],
                     json.dumps(data.get("checklist", [])),
                     json.dumps(data.get("context_bundle", [])),
+                    json.dumps(data.get("context_bundle_mtimes", {})),
                     entry["ts"],
                     entry["ts"],
                     data.get("max_retries", 3),
@@ -296,7 +299,7 @@ class WorkState:
 
     def _row_to_dict(self, row: sqlite3.Row) -> dict:
         d = dict(row)
-        for field in ("depends_on", "checklist", "context_bundle", "findings", "micro_deviations"):
+        for field in ("depends_on", "checklist", "context_bundle", "context_bundle_mtimes", "findings", "micro_deviations"):
             if d.get(field) and isinstance(d[field], str):
                 try:
                     d[field] = json.loads(d[field])

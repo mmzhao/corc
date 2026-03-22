@@ -7,6 +7,7 @@ Same task + same files on disk = same context output.
 """
 
 from pathlib import Path
+from typing import Any
 
 
 def _load_blacklist(project_root: Path) -> str | None:
@@ -118,3 +119,63 @@ def _extract_section(content: str, section_slug: str) -> str:
     if captured:
         return "\n".join(captured)
     return content  # Fallback: return full content if section not found
+
+
+def record_context_mtimes(
+    context_bundle: list[str], project_root: Path
+) -> dict[str, float]:
+    """Record modification times for all files in a context bundle.
+
+    Called at task creation time to snapshot file mtimes. Returns a dict
+    mapping each file path (without section fragment) to its mtime as a float.
+    Files that don't exist are silently skipped.
+    """
+    mtimes: dict[str, float] = {}
+    for ref in context_bundle:
+        ref_str = str(ref)
+        # Strip section fragment (e.g. "spec.md#design" → "spec.md")
+        if "#" in ref_str:
+            ref_str = ref_str.rsplit("#", 1)[0]
+
+        file_path = project_root / ref_str
+        try:
+            if file_path.exists():
+                mtimes[ref_str] = file_path.stat().st_mtime
+        except OSError:
+            pass
+    return mtimes
+
+
+def check_context_staleness(
+    task: dict, project_root: Path
+) -> list[dict[str, Any]]:
+    """Check if context bundle files have changed since task creation.
+
+    Compares current file mtimes against those recorded in
+    task["context_bundle_mtimes"]. Returns a list of dicts describing
+    each stale file, e.g.:
+
+        [{"file": "src/foo.py", "recorded_mtime": 1234.0, "current_mtime": 1235.0}]
+
+    Returns an empty list if no staleness is detected or if no mtimes
+    were recorded.
+    """
+    recorded = task.get("context_bundle_mtimes")
+    if not recorded or not isinstance(recorded, dict):
+        return []
+
+    stale: list[dict[str, Any]] = []
+    for ref_str, recorded_mtime in recorded.items():
+        file_path = project_root / ref_str
+        try:
+            if file_path.exists():
+                current_mtime = file_path.stat().st_mtime
+                if current_mtime != recorded_mtime:
+                    stale.append({
+                        "file": ref_str,
+                        "recorded_mtime": recorded_mtime,
+                        "current_mtime": current_mtime,
+                    })
+        except OSError:
+            pass
+    return stale
