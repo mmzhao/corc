@@ -28,6 +28,8 @@ MUTATION_TYPES = {
     "resume",
     "escalation_created",
     "escalation_resolved",
+    "finding_approved",
+    "finding_rejected",
 }
 
 REQUIRED_FIELDS = {"seq", "ts", "type", "data", "reason"}

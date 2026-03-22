@@ -611,6 +611,114 @@ def knowledge_stats():
         click.echo(f"  {t}: {c}")
 
 
+# --- Knowledge Curation ---
+
+@cli.command("curate")
+@click.argument("task_id")
+@click.option("--non-interactive", is_flag=True, help="List findings without interactive prompts")
+@click.option("--approve-all", is_flag=True, help="Approve all findings without prompts")
+@click.option("--reject-all", is_flag=True, help="Reject all findings with a reason")
+@click.option("--reject-reason", default="", help="Reason for --reject-all")
+@click.option("--type", "doc_type", default="note", help="Document type for approved findings")
+@click.option("--project", default=None, help="Project for approved findings")
+def curate_cmd(task_id, non_interactive, approve_all, reject_all, reject_reason, doc_type, project):
+    """Curate agent findings from a completed task.
+
+    Shows findings reported by agents during task execution.
+    For each finding, the operator can approve (writes to knowledge store)
+    or reject (logs to mutation log with reason).
+
+    After 3+ rejections of the same finding type, suggests adding
+    that type to a blacklist.
+    """
+    from corc.curate import CurationEngine, CurationResult
+
+    paths, ml, ws, al, sl, ks = _get_all()
+    engine = CurationEngine(ws, ml, al, ks)
+
+    # Load findings
+    try:
+        findings = engine.get_findings(task_id)
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    if not findings:
+        click.echo(f"No findings for task {task_id}.")
+        return
+
+    task = ws.get_task(task_id)
+    click.echo(f"Task: {task['name']} ({task_id})")
+    click.echo(f"Findings: {len(findings)}")
+    click.echo()
+
+    result = CurationResult(task_id=task_id)
+
+    if non_interactive:
+        # Just list findings
+        for f in findings:
+            click.echo(f"  [{f.index}] [{f.finding_type}] {f.content}")
+        return
+
+    if approve_all:
+        for f in findings:
+            doc_id = engine.approve_finding(task_id, f, doc_type=doc_type, project=project)
+            click.echo(f"  Approved [{f.index}]: {f.content[:60]}... -> {doc_id}")
+            result.approved += 1
+    elif reject_all:
+        reason = reject_reason or "Batch rejected"
+        for f in findings:
+            engine.reject_finding(task_id, f, reason=reason)
+            click.echo(f"  Rejected [{f.index}]: {f.content[:60]}...")
+            result.rejected += 1
+    else:
+        # Interactive mode
+        for f in findings:
+            click.echo(f"--- Finding [{f.index}] ---")
+            click.echo(f"Type: {f.finding_type}")
+            click.echo(f"Content: {f.content}")
+            click.echo()
+
+            while True:
+                choice = click.prompt(
+                    "Action",
+                    type=click.Choice(["approve", "reject", "skip", "a", "r", "s"]),
+                    default="s",
+                )
+                if choice in ("approve", "a"):
+                    doc_id = engine.approve_finding(task_id, f, doc_type=doc_type, project=project)
+                    click.echo(f"  -> Approved, doc_id: {doc_id}")
+                    result.approved += 1
+                    break
+                elif choice in ("reject", "r"):
+                    reason = click.prompt("Rejection reason")
+                    engine.reject_finding(task_id, f, reason=reason)
+                    click.echo(f"  -> Rejected")
+                    result.rejected += 1
+                    break
+                elif choice in ("skip", "s"):
+                    click.echo(f"  -> Skipped")
+                    result.skipped += 1
+                    break
+            click.echo()
+
+    # Summary
+    click.echo(f"\nCuration summary:")
+    click.echo(f"  Approved: {result.approved}")
+    click.echo(f"  Rejected: {result.rejected}")
+    click.echo(f"  Skipped:  {result.skipped}")
+
+    # Check for blacklist suggestions
+    suggestions = engine.get_blacklist_suggestions()
+    if suggestions:
+        click.echo(f"\nBlacklist suggestions:")
+        for s in suggestions:
+            click.echo(f"  {s['finding_type']}: {s['rejection_count']} rejections")
+            click.echo(f"    {s['suggestion']}")
+            if s['recent_reasons']:
+                click.echo(f"    Recent reasons: {', '.join(s['recent_reasons'][:3])}")
+
+
 # --- Templates ---
 
 @cli.command("template")

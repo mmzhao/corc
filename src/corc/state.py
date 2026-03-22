@@ -59,10 +59,22 @@ CREATE TABLE IF NOT EXISTS escalations (
     resolved TEXT
 );
 
+CREATE TABLE IF NOT EXISTS finding_rejections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    finding_index INTEGER NOT NULL,
+    finding_type TEXT NOT NULL DEFAULT 'general',
+    finding_content TEXT NOT NULL,
+    rejection_reason TEXT NOT NULL,
+    ts TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE INDEX IF NOT EXISTS idx_finding_rejections_type ON finding_rejections(finding_type);
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
@@ -214,6 +226,22 @@ class WorkState:
                 "UPDATE escalations SET status='resolved', resolution=?, resolved=? WHERE id=?",
                 (data.get("resolution", ""), entry["ts"], data["escalation_id"]),
             )
+        elif t == "finding_approved":
+            pass  # Knowledge store writes handled by CurationEngine
+        elif t == "finding_rejected":
+            self.conn.execute(
+                """INSERT INTO finding_rejections(task_id, finding_index, finding_type,
+                   finding_content, rejection_reason, ts)
+                   VALUES(?, ?, ?, ?, ?, ?)""",
+                (
+                    task_id,
+                    data.get("finding_index", 0),
+                    data.get("finding_type", "general"),
+                    data.get("finding_content", ""),
+                    data.get("rejection_reason", ""),
+                    entry["ts"],
+                ),
+            )
         elif t in ("pause", "resume"):
             pass  # Pause state tracked via .corc/pause.lock, not SQLite
 
@@ -325,6 +353,7 @@ class WorkState:
         self.conn.execute("DELETE FROM tasks")
         self.conn.execute("DELETE FROM agents")
         self.conn.execute("DELETE FROM escalations")
+        self.conn.execute("DELETE FROM finding_rejections")
         self.conn.execute("DELETE FROM meta")
         self.conn.commit()
 
@@ -337,6 +366,13 @@ class WorkState:
                 (str(entries[-1]["seq"]),),
             )
         self.conn.commit()
+
+    def get_rejection_counts(self) -> dict[str, int]:
+        """Get finding rejection counts grouped by finding_type."""
+        rows = self.conn.execute(
+            "SELECT finding_type, COUNT(*) as cnt FROM finding_rejections GROUP BY finding_type"
+        ).fetchall()
+        return {row[0]: row[1] for row in rows}
 
     def refresh(self):
         self._replay_mutations()
