@@ -19,7 +19,12 @@ from corc.context import assemble_context, record_context_mtimes
 from corc.daemon import Daemon, stop_daemon
 from corc.dispatch import get_dispatcher, Constraints
 from corc.roles import RoleLoader, constraints_from_role, get_system_prompt_for_role
-from corc.worktree import WorktreeError, create_worktree, merge_worktree, remove_worktree
+from corc.worktree import (
+    WorktreeError,
+    create_worktree,
+    merge_worktree,
+    remove_worktree,
+)
 from corc.validate import run_validations
 from corc.templates import get_template, render_template, list_types
 from corc.lint_done_when import lint_done_when
@@ -44,6 +49,7 @@ def cli():
 
 # --- Task commands ---
 
+
 @cli.group()
 def task():
     """Manage tasks."""
@@ -56,11 +62,31 @@ def task():
 @click.option("--description", default="", help="Task description")
 @click.option("--role", default="implementer", help="Agent role")
 @click.option("--depends-on", default="", help="Comma-separated task IDs")
-@click.option("--context", "context_bundle", default="", help="Comma-separated file paths for context bundle")
+@click.option(
+    "--context",
+    "context_bundle",
+    default="",
+    help="Comma-separated file paths for context bundle",
+)
 @click.option("--checklist", default="", help="Comma-separated checklist items")
 @click.option("--strict", is_flag=True, help="Reject subjective done_when criteria")
-@click.option("--priority", default=100, type=int, help="Task priority (lower=higher priority, default 100)")
-def task_create(name, done_when, description, role, depends_on, context_bundle, checklist, strict, priority):
+@click.option(
+    "--priority",
+    default=100,
+    type=int,
+    help="Task priority (lower=higher priority, default 100)",
+)
+def task_create(
+    name,
+    done_when,
+    description,
+    role,
+    depends_on,
+    context_bundle,
+    checklist,
+    strict,
+    priority,
+):
     """Create a new task."""
     # Lint done_when criteria
     lint_result = lint_done_when(done_when)
@@ -68,7 +94,9 @@ def task_create(name, done_when, description, role, depends_on, context_bundle, 
         for warning in lint_result.warnings:
             click.echo(f"Warning: done_when: {warning}", err=True)
         if strict:
-            click.echo("Aborted: --strict rejects subjective done_when criteria.", err=True)
+            click.echo(
+                "Aborted: --strict rejects subjective done_when criteria.", err=True
+            )
             sys.exit(1)
 
     paths, ml, ws, al, sl, ks = _get_all()
@@ -81,18 +109,22 @@ def task_create(name, done_when, description, role, depends_on, context_bundle, 
     project_root = paths["root"] if isinstance(paths, dict) else paths.root
     bundle_mtimes = record_context_mtimes(bundle, project_root)
 
-    ml.append("task_created", {
-        "id": task_id,
-        "name": name,
-        "description": description,
-        "role": role,
-        "depends_on": deps,
-        "done_when": done_when,
-        "checklist": cl,
-        "context_bundle": bundle,
-        "context_bundle_mtimes": bundle_mtimes,
-        "priority": priority,
-    }, reason=f"Task created via CLI")
+    ml.append(
+        "task_created",
+        {
+            "id": task_id,
+            "name": name,
+            "description": description,
+            "role": role,
+            "depends_on": deps,
+            "done_when": done_when,
+            "checklist": cl,
+            "context_bundle": bundle,
+            "context_bundle_mtimes": bundle_mtimes,
+            "priority": priority,
+        },
+        reason=f"Task created via CLI",
+    )
 
     al.log("task_created", task_id=task_id, name=name)
     click.echo(f"Created task {task_id}: {name} (priority {priority})")
@@ -186,9 +218,12 @@ def task_status(task_id):
 
 # --- Plan ---
 
+
 @cli.command()
 @click.argument("file", required=False, type=click.Path(exists=True))
-@click.option("--resume", "resume_session", is_flag=True, help="Resume the last planning session")
+@click.option(
+    "--resume", "resume_session", is_flag=True, help="Resume the last planning session"
+)
 def plan(file, resume_session):
     """Start an interactive planning session.
 
@@ -221,14 +256,18 @@ def plan(file, resume_session):
     if resume_session:
         resume_meta, draft_content = load_latest_draft(paths["corc_dir"])
         if resume_meta:
-            click.echo(f"Resuming session from {resume_meta.get('timestamp', 'unknown')}")
+            click.echo(
+                f"Resuming session from {resume_meta.get('timestamp', 'unknown')}"
+            )
             continue_session = True
         else:
             click.echo("No previous session found. Starting fresh.")
 
     # Build system prompt with full context
     system_prompt = build_system_prompt(
-        paths, ws, ks,
+        paths,
+        ws,
+        ks,
         seed_content=seed_content,
         draft_content=draft_content,
         resume_meta=resume_meta,
@@ -237,7 +276,8 @@ def plan(file, resume_session):
     # Save session metadata for crash recovery
     session_id = time.strftime("%Y%m%d-%H%M%S")
     save_session_metadata(
-        paths["corc_dir"], session_id,
+        paths["corc_dir"],
+        session_id,
         seed_file=str(file) if file else None,
     )
 
@@ -245,7 +285,9 @@ def plan(file, resume_session):
     click.echo("Use 'corc task create' to create tasks from within the session.")
     click.echo()
 
-    exit_code = launch_interactive_claude(system_prompt, continue_session=continue_session)
+    exit_code = launch_interactive_claude(
+        system_prompt, continue_session=continue_session
+    )
 
     # Mark session complete on clean exit
     if exit_code == 0:
@@ -255,6 +297,7 @@ def plan(file, resume_session):
 
 
 # --- Dispatch ---
+
 
 @cli.command()
 @click.argument("task_id")
@@ -294,7 +337,9 @@ def dispatch(task_id, provider):
     except ValueError:
         # Fallback if role YAML not found
         constraints = Constraints()
-        system_prompt = f"You are a {role_name} working on task '{t['name']}'.\n\n{context}"
+        system_prompt = (
+            f"You are a {role_name} working on task '{t['name']}'.\n\n{context}"
+        )
         click.echo(f"Role: {role_name} (no YAML config found, using defaults)")
 
     prompt = (
@@ -306,29 +351,53 @@ def dispatch(task_id, provider):
 
     # Update state
     attempt = sl.get_latest_attempt(task_id) + 1
-    ml.append("task_started", {"attempt": attempt}, reason="Dispatched via CLI", task_id=task_id)
+    ml.append(
+        "task_started",
+        {"attempt": attempt},
+        reason="Dispatched via CLI",
+        task_id=task_id,
+    )
     al.log("task_dispatched", task_id=task_id, role=role_name, attempt=attempt)
-    sl.log_dispatch(task_id, attempt, prompt, system_prompt, constraints.allowed_tools, constraints.max_budget_usd)
+    sl.log_dispatch(
+        task_id,
+        attempt,
+        prompt,
+        system_prompt,
+        constraints.allowed_tools,
+        constraints.max_budget_usd,
+    )
 
     # Create git worktree for agent isolation
     worktree_path = None
     try:
         worktree_path, branch_name = create_worktree(paths["root"], task_id, attempt)
         click.echo(f"Created worktree: {worktree_path} (branch: {branch_name})")
-        al.log("worktree_created", task_id=task_id,
-               worktree_path=str(worktree_path), branch_name=branch_name)
+        al.log(
+            "worktree_created",
+            task_id=task_id,
+            worktree_path=str(worktree_path),
+            branch_name=branch_name,
+        )
     except (WorktreeError, Exception) as e:
-        click.echo(f"Warning: Could not create worktree ({e}), running in project root.", err=True)
+        click.echo(
+            f"Warning: Could not create worktree ({e}), running in project root.",
+            err=True,
+        )
 
     # Create agent record
     import uuid as _uuid
+
     agent_id = f"agent-{_uuid.uuid4().hex[:8]}"
-    ml.append("agent_created", {
-        "id": agent_id,
-        "role": role_name,
-        "task_id": task_id,
-        "worktree_path": str(worktree_path) if worktree_path else None,
-    }, reason="Agent created for CLI dispatch")
+    ml.append(
+        "agent_created",
+        {
+            "id": agent_id,
+            "role": role_name,
+            "task_id": task_id,
+            "worktree_path": str(worktree_path) if worktree_path else None,
+        },
+        reason="Agent created for CLI dispatch",
+    )
 
     cwd = str(worktree_path) if worktree_path else None
     click.echo(f"Dispatching {task_id} (attempt {attempt}) via {provider}...")
@@ -343,10 +412,15 @@ def dispatch(task_id, provider):
         # Write tool_use events to audit log
         if event_type == "tool_use":
             tool = event.get("tool", {})
-            al.log("tool_use", task_id=task_id,
-                   tool_name=tool.get("name", "unknown"),
-                   tool_input=json.dumps(tool.get("input", {}), separators=(",", ":")))
-            click.echo(f"  > {tool.get('name', '?')}: {json.dumps(tool.get('input', {}))}")
+            al.log(
+                "tool_use",
+                task_id=task_id,
+                tool_name=tool.get("name", "unknown"),
+                tool_input=json.dumps(tool.get("input", {}), separators=(",", ":")),
+            )
+            click.echo(
+                f"  > {tool.get('name', '?')}: {json.dumps(tool.get('input', {}))}"
+            )
 
         elif event_type == "assistant":
             message = event.get("message", {})
@@ -361,15 +435,23 @@ def dispatch(task_id, provider):
 
     # Dispatch with streaming — agent runs in worktree if available
     dispatcher = get_dispatcher(provider)
-    result = dispatcher.dispatch(prompt, system_prompt, constraints,
-                                  event_callback=event_callback, cwd=cwd)
+    result = dispatcher.dispatch(
+        prompt, system_prompt, constraints, event_callback=event_callback, cwd=cwd
+    )
 
     # Log result
     sl.log_output(task_id, attempt, result.output, result.exit_code, result.duration_s)
-    al.log("task_dispatch_complete", task_id=task_id, exit_code=result.exit_code,
-           duration_s=result.duration_s, attempt=attempt)
+    al.log(
+        "task_dispatch_complete",
+        task_id=task_id,
+        exit_code=result.exit_code,
+        duration_s=result.duration_s,
+        attempt=attempt,
+    )
 
-    click.echo(f"Agent finished in {result.duration_s:.1f}s (exit code {result.exit_code})")
+    click.echo(
+        f"Agent finished in {result.duration_s:.1f}s (exit code {result.exit_code})"
+    )
     click.echo(f"Session log: {sl.session_path(task_id, attempt)}")
 
     # Merge worktree changes and clean up
@@ -378,32 +460,52 @@ def dispatch(task_id, provider):
             merged = merge_worktree(paths["root"], worktree_path)
             if merged:
                 click.echo(f"Merged worktree changes from {branch_name}")
-                al.log("worktree_merged", task_id=task_id, worktree_path=str(worktree_path))
+                al.log(
+                    "worktree_merged", task_id=task_id, worktree_path=str(worktree_path)
+                )
             else:
-                click.echo("Warning: Merge conflict — manual resolution needed.", err=True)
-                al.log("worktree_merge_conflict", task_id=task_id, worktree_path=str(worktree_path))
+                click.echo(
+                    "Warning: Merge conflict — manual resolution needed.", err=True
+                )
+                al.log(
+                    "worktree_merge_conflict",
+                    task_id=task_id,
+                    worktree_path=str(worktree_path),
+                )
         except Exception as e:
             click.echo(f"Warning: Merge failed ({e})", err=True)
 
         try:
             remove_worktree(paths["root"], worktree_path)
             click.echo(f"Cleaned up worktree: {worktree_path}")
-            al.log("worktree_removed", task_id=task_id, worktree_path=str(worktree_path))
+            al.log(
+                "worktree_removed", task_id=task_id, worktree_path=str(worktree_path)
+            )
         except Exception as e:
             click.echo(f"Warning: Worktree cleanup failed ({e})", err=True)
 
     if result.exit_code != 0:
         click.echo("Agent exited with error.")
-        ml.append("task_failed", {"attempt": attempt, "exit_code": result.exit_code},
-                   reason=f"Agent exited with code {result.exit_code}", task_id=task_id)
-        al.log("task_failed", task_id=task_id, attempt=attempt, exit_code=result.exit_code)
+        ml.append(
+            "task_failed",
+            {"attempt": attempt, "exit_code": result.exit_code},
+            reason=f"Agent exited with code {result.exit_code}",
+            task_id=task_id,
+        )
+        al.log(
+            "task_failed", task_id=task_id, attempt=attempt, exit_code=result.exit_code
+        )
         return
 
     # Output preview
-    output_preview = result.output[:500] + "..." if len(result.output) > 500 else result.output
+    output_preview = (
+        result.output[:500] + "..." if len(result.output) > 500 else result.output
+    )
     click.echo(f"\n--- Output ---\n{output_preview}\n---")
 
-    click.echo(f"\nTask dispatched. Review output and run: corc task complete {task_id}")
+    click.echo(
+        f"\nTask dispatched. Review output and run: corc task complete {task_id}"
+    )
 
 
 @task.command("complete")
@@ -440,6 +542,7 @@ def task_complete(task_id, pr_url, findings):
 
 # --- Context ---
 
+
 @cli.command("context-for-task")
 @click.argument("task_id")
 def context_for_task(task_id):
@@ -454,6 +557,7 @@ def context_for_task(task_id):
 
 
 # --- Pause / Resume ---
+
 
 @cli.command()
 @click.argument("reason")
@@ -501,6 +605,7 @@ def resume():
 
 # --- Status ---
 
+
 @cli.command()
 def status():
     """Show current system state."""
@@ -525,13 +630,31 @@ def status():
 
     total = len(tasks)
     completed = len(by_status.get("completed", []))
-    click.echo(f"Tasks: {completed}/{total} complete ({100*completed//total if total else 0}%)")
+    click.echo(
+        f"Tasks: {completed}/{total} complete ({100 * completed // total if total else 0}%)"
+    )
 
-    for status_name in ["completed", "running", "pending", "failed", "escalated", "blocked", "handed_off"]:
+    for status_name in [
+        "completed",
+        "running",
+        "pending",
+        "failed",
+        "escalated",
+        "blocked",
+        "handed_off",
+    ]:
         group = by_status.get(status_name, [])
         if not group:
             continue
-        icon = {"completed": "✅", "running": "🔄", "pending": "⬚", "failed": "❌", "escalated": "🚨", "blocked": "◻", "handed_off": "↗"}.get(status_name, "?")
+        icon = {
+            "completed": "✅",
+            "running": "🔄",
+            "pending": "⬚",
+            "failed": "❌",
+            "escalated": "🚨",
+            "blocked": "◻",
+            "handed_off": "↗",
+        }.get(status_name, "?")
         names = ", ".join(t["name"] for t in group)
         click.echo(f"  {icon} {status_name}: {names}")
 
@@ -546,8 +669,11 @@ def status():
 
 # --- DAG Visualization ---
 
+
 @cli.command()
-@click.option("--mermaid", is_flag=True, help="Output Mermaid markdown instead of ASCII")
+@click.option(
+    "--mermaid", is_flag=True, help="Output Mermaid markdown instead of ASCII"
+)
 @click.option("--no-color", is_flag=True, help="Disable ANSI colours")
 def dag(mermaid, no_color):
     """Render the task dependency graph."""
@@ -565,6 +691,7 @@ def dag(mermaid, no_color):
 
 # --- Knowledge Store ---
 
+
 @cli.group()
 def knowledge():
     """Knowledge store commands."""
@@ -580,7 +707,9 @@ def knowledge_add(file_path, doc_type, project, tags):
     """Add a document to the knowledge store."""
     _, _, _, _, _, ks = _get_all()
     tag_list = [t.strip() for t in tags.split(",") if t.strip()]
-    doc_id = ks.add(file_path=file_path, doc_type=doc_type, project=project, tags=tag_list)
+    doc_id = ks.add(
+        file_path=file_path, doc_type=doc_type, project=project, tags=tag_list
+    )
     click.echo(f"Added document {doc_id}")
 
 
@@ -589,22 +718,32 @@ def knowledge_add(file_path, doc_type, project, tags):
 @click.option("--limit", default=10)
 @click.option("--type", "doc_type", default=None)
 @click.option("--project", default=None)
-@click.option("--mode", type=click.Choice(["hybrid", "keyword", "semantic"]),
-              default="hybrid", help="Search mode (default: hybrid)")
+@click.option(
+    "--mode",
+    type=click.Choice(["hybrid", "keyword", "semantic"]),
+    default="hybrid",
+    help="Search mode (default: hybrid)",
+)
 def knowledge_search(query, limit, doc_type, project, mode):
     """Search the knowledge store (hybrid search by default)."""
     _, _, _, _, _, ks = _get_all()
     if mode == "keyword":
         results = ks.search(query, limit=limit, doc_type=doc_type, project=project)
     elif mode == "semantic":
-        results = ks.semantic_search(query, limit=limit, doc_type=doc_type, project=project)
+        results = ks.semantic_search(
+            query, limit=limit, doc_type=doc_type, project=project
+        )
     else:
-        results = ks.hybrid_search(query, limit=limit, doc_type=doc_type, project=project)
+        results = ks.hybrid_search(
+            query, limit=limit, doc_type=doc_type, project=project
+        )
     if not results:
         click.echo("No results.")
         return
     for r in results:
-        click.echo(f"  [{r.get('type', '?'):>12}] {r['id']}  {r['title']}  (score: {r.get('score', 'N/A'):.4f})")
+        click.echo(
+            f"  [{r.get('type', '?'):>12}] {r['id']}  {r['title']}  (score: {r.get('score', 'N/A'):.4f})"
+        )
 
 
 @knowledge.command("get")
@@ -644,15 +783,24 @@ def knowledge_stats():
 
 # --- Knowledge Curation ---
 
+
 @cli.command("curate")
 @click.argument("task_id")
-@click.option("--non-interactive", is_flag=True, help="List findings without interactive prompts")
-@click.option("--approve-all", is_flag=True, help="Approve all findings without prompts")
+@click.option(
+    "--non-interactive", is_flag=True, help="List findings without interactive prompts"
+)
+@click.option(
+    "--approve-all", is_flag=True, help="Approve all findings without prompts"
+)
 @click.option("--reject-all", is_flag=True, help="Reject all findings with a reason")
 @click.option("--reject-reason", default="", help="Reason for --reject-all")
-@click.option("--type", "doc_type", default="note", help="Document type for approved findings")
+@click.option(
+    "--type", "doc_type", default="note", help="Document type for approved findings"
+)
 @click.option("--project", default=None, help="Project for approved findings")
-def curate_cmd(task_id, non_interactive, approve_all, reject_all, reject_reason, doc_type, project):
+def curate_cmd(
+    task_id, non_interactive, approve_all, reject_all, reject_reason, doc_type, project
+):
     """Curate agent findings from a completed task.
 
     Shows findings reported by agents during task execution.
@@ -693,7 +841,9 @@ def curate_cmd(task_id, non_interactive, approve_all, reject_all, reject_reason,
 
     if approve_all:
         for f in findings:
-            doc_id = engine.approve_finding(task_id, f, doc_type=doc_type, project=project)
+            doc_id = engine.approve_finding(
+                task_id, f, doc_type=doc_type, project=project
+            )
             click.echo(f"  Approved [{f.index}]: {f.content[:60]}... -> {doc_id}")
             result.approved += 1
     elif reject_all:
@@ -717,7 +867,9 @@ def curate_cmd(task_id, non_interactive, approve_all, reject_all, reject_reason,
                     default="s",
                 )
                 if choice in ("approve", "a"):
-                    doc_id = engine.approve_finding(task_id, f, doc_type=doc_type, project=project)
+                    doc_id = engine.approve_finding(
+                        task_id, f, doc_type=doc_type, project=project
+                    )
                     click.echo(f"  -> Approved, doc_id: {doc_id}")
                     result.approved += 1
                     break
@@ -746,11 +898,12 @@ def curate_cmd(task_id, non_interactive, approve_all, reject_all, reject_reason,
         for s in suggestions:
             click.echo(f"  {s['finding_type']}: {s['rejection_count']} rejections")
             click.echo(f"    {s['suggestion']}")
-            if s['recent_reasons']:
+            if s["recent_reasons"]:
                 click.echo(f"    Recent reasons: {', '.join(s['recent_reasons'][:3])}")
 
 
 # --- Templates ---
+
 
 @cli.command("template")
 @click.argument("type_name")
@@ -783,6 +936,7 @@ def template_cmd(type_name, title, project, render):
 
 # --- Watch (TUI v1 — two-panel dashboard) ---
 
+
 @cli.command()
 @click.option("--last", "last_n", default=20, help="Show last N events")
 def watch(last_n):
@@ -794,6 +948,7 @@ def watch(last_n):
     """
     try:
         from corc.tui import run_dashboard
+
         _watch_dashboard(last_n)
     except ImportError:
         _watch_plain(last_n)
@@ -824,19 +979,31 @@ def _watch_plain(last_n):
         if len(events) > seen_count:
             for e in events[seen_count:]:
                 ts = e.get("timestamp", "")[:19]
-                click.echo(f"{ts} {e.get('event_type', '?'):>25} {e.get('task_id', '')[:8]}")
+                click.echo(
+                    f"{ts} {e.get('event_type', '?'):>25} {e.get('task_id', '')[:8]}"
+                )
             seen_count = len(events)
         time.sleep(2)
 
 
 # --- Daemon ---
 
+
 @cli.command("start")
-@click.option("--parallel", default=1, type=int, help="Max concurrent agents (default: 1)")
-@click.option("--task", "task_id", default=None, help="Run one specific task, then stop")
+@click.option(
+    "--parallel", default=1, type=int, help="Max concurrent agents (default: 1)"
+)
+@click.option(
+    "--task", "task_id", default=None, help="Run one specific task, then stop"
+)
 @click.option("--once", is_flag=True, help="Process one ready task, then stop")
 @click.option("--provider", default="claude-code", help="Dispatch provider")
-@click.option("--poll-interval", default=5.0, type=float, help="Seconds between polls (default: 5)")
+@click.option(
+    "--poll-interval",
+    default=5.0,
+    type=float,
+    help="Seconds between polls (default: 5)",
+)
 def start_cmd(parallel, task_id, once, provider, poll_interval):
     """Start the daemon. Processes all ready work. Idles when empty."""
     paths, ml, ws, al, sl, _ = _get_all()
@@ -847,6 +1014,7 @@ def start_cmd(parallel, task_id, once, provider, poll_interval):
         try:
             pid = int(pid_file.read_text().strip())
             import os
+
             os.kill(pid, 0)  # Check if process exists
             click.echo(f"Daemon already running (PID {pid}). Use 'corc stop' first.")
             return
@@ -881,10 +1049,12 @@ def start_cmd(parallel, task_id, once, provider, poll_interval):
     if summary:
         stale = summary.get("running_found", 0) + summary.get("assigned_found", 0)
         if stale:
-            click.echo(f"  Reconciled {stale} stale task(s): "
-                        f"{summary.get('agents_alive', 0)} alive, "
-                        f"{summary.get('agents_dead_with_output', 0)} processed output, "
-                        f"{summary.get('agents_dead_no_output', 0)} marked failed")
+            click.echo(
+                f"  Reconciled {stale} stale task(s): "
+                f"{summary.get('agents_alive', 0)} alive, "
+                f"{summary.get('agents_dead_with_output', 0)} processed output, "
+                f"{summary.get('agents_dead_no_output', 0)} marked failed"
+            )
         if summary.get("worktrees_cleaned", 0):
             click.echo(f"  Cleaned {summary['worktrees_cleaned']} stale worktree(s)")
 
@@ -903,8 +1073,11 @@ def stop_cmd():
 
 # --- Escalations ---
 
+
 @cli.command("escalations")
-@click.option("--all", "show_all", is_flag=True, help="Show all escalations (including resolved)")
+@click.option(
+    "--all", "show_all", is_flag=True, help="Show all escalations (including resolved)"
+)
 def escalations_cmd(show_all):
     """List pending escalations."""
     _, _, ws, _, _, _ = _get_all()
@@ -920,8 +1093,10 @@ def escalations_cmd(show_all):
 
     for esc in escs:
         status_icon = "🔴" if esc["status"] == "pending" else "✅"
-        click.echo(f"  {status_icon} {esc['id']}  task={esc['task_id']}  {esc.get('task_name', '')}  "
-                    f"attempts={esc.get('attempts', '?')}  status={esc['status']}")
+        click.echo(
+            f"  {status_icon} {esc['id']}  task={esc['task_id']}  {esc.get('task_name', '')}  "
+            f"attempts={esc.get('attempts', '?')}  status={esc['status']}"
+        )
 
 
 @cli.group()
@@ -967,7 +1142,9 @@ def escalation_show(escalation_id):
 @escalation.command("resolve")
 @click.argument("escalation_id")
 @click.option("--resolution", default="", help="Resolution description")
-@click.option("--unblock", is_flag=True, help="Reset the task to pending after resolving")
+@click.option(
+    "--unblock", is_flag=True, help="Reset the task to pending after resolving"
+)
 def escalation_resolve(escalation_id, resolution, unblock):
     """Resolve an escalation and optionally unblock the task."""
     paths, ml, ws, al, _, _ = _get_all()
@@ -1000,6 +1177,7 @@ def escalation_resolve(escalation_id, resolution, unblock):
 
 
 # --- Roles ---
+
 
 @cli.group()
 def role():
@@ -1071,13 +1249,17 @@ def role_validate(name):
 
 # --- Self-test ---
 
+
 @cli.command("self-test")
 def self_test():
     """Run orchestrator self-tests."""
     import subprocess
+
     result = subprocess.run(
         ["python", "-m", "pytest", "tests/", "-x", "-q"],
-        capture_output=True, text=True, cwd=str(get_paths()["root"]),
+        capture_output=True,
+        text=True,
+        cwd=str(get_paths()["root"]),
     )
     click.echo(result.stdout)
     if result.stderr:
@@ -1086,6 +1268,7 @@ def self_test():
 
 
 # --- Log ---
+
 
 @cli.command("log")
 @click.option("--last", "last_n", default=20)
@@ -1108,6 +1291,105 @@ def log_cmd(last_n, task_id):
                 extra_parts.append(f"{k}={e[k]}")
         extra = " ".join(extra_parts)
         click.echo(f"{ts}  {etype:<25} {tid}  {extra}")
+
+
+# --- Analyze ---
+
+
+@cli.group()
+def analyze():
+    """Cost analysis, duration trends, and failure reporting."""
+    pass
+
+
+@analyze.command("costs")
+@click.option("--today", "today_flag", is_flag=True, help="Show today's cost breakdown")
+@click.option("--project", default=None, help="Filter by project name")
+@click.option("--since", default=None, help="Filter events since date (ISO format)")
+@click.option(
+    "--alerts", "alerts_flag", is_flag=True, help="Check cost threshold alerts"
+)
+def analyze_costs(today_flag, project, since, alerts_flag):
+    """Show cost breakdown from audit log data.
+
+    Examples:
+      corc analyze costs --today
+      corc analyze costs --project myapp --since 2026-03-01
+      corc analyze costs --alerts
+    """
+    from corc.analyze import (
+        compute_costs_today,
+        compute_costs_project,
+        aggregate_costs,
+        load_alert_config,
+        check_cost_alerts,
+        format_cost_breakdown,
+        format_alerts,
+    )
+
+    paths, _, _, al, _, _ = _get_all()
+
+    if alerts_flag:
+        config = load_alert_config(paths["corc_dir"])
+        alerts = check_cost_alerts(al, config)
+        click.echo(format_alerts(alerts))
+        return
+
+    if today_flag:
+        breakdown = compute_costs_today(al)
+        click.echo(format_cost_breakdown(breakdown, title="Today's Costs"))
+    elif project:
+        breakdown = compute_costs_project(al, project, since=since)
+        title = f"Costs for project '{project}'"
+        if since:
+            title += f" (since {since})"
+        click.echo(format_cost_breakdown(breakdown, title=title))
+    else:
+        events = al.read_all(since=since)
+        breakdown = aggregate_costs(events)
+        title = "All Costs"
+        if since:
+            title += f" (since {since})"
+        click.echo(format_cost_breakdown(breakdown, title=title))
+
+    # Always check alerts after showing costs
+    config = load_alert_config(paths["corc_dir"])
+    if config.enabled:
+        alerts = check_cost_alerts(al, config)
+        if alerts:
+            click.echo()
+            click.echo(format_alerts(alerts))
+
+
+@analyze.command("duration")
+@click.option("--last", "last_n", default=20, help="Show last N task durations")
+def analyze_duration(last_n):
+    """Show task duration trends.
+
+    Examples:
+      corc analyze duration --last 10
+      corc analyze duration --last 50
+    """
+    from corc.analyze import compute_duration_trends, format_duration_trends
+
+    _, _, _, al, _, _ = _get_all()
+    entries = compute_duration_trends(al, last_n=last_n)
+    click.echo(format_duration_trends(entries))
+
+
+@analyze.command("failures")
+@click.option("--since", default=None, help="Filter failures since date (ISO format)")
+def analyze_failures(since):
+    """Show failure report.
+
+    Examples:
+      corc analyze failures --since 2026-03-01
+    """
+    from corc.analyze import compute_failures, format_failures
+
+    _, _, _, al, _, _ = _get_all()
+    entries = compute_failures(al, since=since)
+    click.echo(format_failures(entries))
 
 
 if __name__ == "__main__":
