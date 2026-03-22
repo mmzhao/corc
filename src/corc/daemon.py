@@ -8,10 +8,16 @@ Loop: scheduler → executor → processor, every poll_interval seconds.
 Retry logic: the processor marks failed tasks with attempt_count. The scheduler
 automatically includes failed tasks that haven't exceeded max_retries. When
 max_retries is exhausted, the processor sets status to 'escalated'.
+
+Hot reload: the daemon watches Python source files in the corc package directory.
+When agents modify the codebase, changed modules are reloaded via importlib.reload()
+before the next dispatch cycle. This preserves in-flight task state while ensuring
+new code is used.
 """
 
 import os
 import signal
+import sys
 import time
 from pathlib import Path
 
@@ -22,10 +28,24 @@ from corc.mutations import MutationLog
 from corc.pause import is_paused
 from corc.processor import process_completed
 from corc.reconcile import _get_agent_pid, _get_last_agent_output, reconcile_on_startup
+from corc.reload import SourceWatcher
 from corc.retry import RetryPolicy
 from corc.scheduler import get_ready_tasks
 from corc.sessions import SessionLogger
 from corc.state import WorkState
+
+# Module-level function references that get rebound after hot reload.
+# Maps module name → list of (global_name, attr_name) pairs.
+_RELOAD_BINDINGS: dict[str, list[tuple[str, str]]] = {
+    "corc.scheduler": [("get_ready_tasks", "get_ready_tasks")],
+    "corc.processor": [("process_completed", "process_completed")],
+    "corc.pause": [("is_paused", "is_paused")],
+    "corc.reconcile": [
+        ("_get_agent_pid", "_get_agent_pid"),
+        ("_get_last_agent_output", "_get_last_agent_output"),
+        ("reconcile_on_startup", "reconcile_on_startup"),
+    ],
+}
 
 
 class Daemon:
@@ -49,6 +69,7 @@ class Daemon:
         once: bool = False,
         retry_policy: RetryPolicy | None = None,
         pid_checker=None,
+        auto_reload: bool = True,
     ):
         self.state = state
         self.mutation_log = mutation_log
@@ -65,6 +86,9 @@ class Daemon:
         self._tasks_completed = 0
         self._pid_checker = pid_checker
         self._reconcile_summary = None
+
+        # Source file watcher for hot-reload
+        self._source_watcher = self._create_source_watcher() if auto_reload else None
 
         self.executor = Executor(
             dispatcher=dispatcher,
@@ -130,6 +154,9 @@ class Daemon:
         with attempt_count <= max_retries are automatically picked up by
         the scheduler on the next tick.
         """
+        # Hot-reload changed source modules before dispatching
+        self._check_source_reload()
+
         # Refresh state to pick up new tasks/mutations
         self.state.refresh()
 
@@ -224,11 +251,14 @@ class Daemon:
 
             # Try merging main into the worktree for retry baseline
             retry_prepared = self.executor.prepare_conflict_retry(
-                task_id, worktree_path,
+                task_id,
+                worktree_path,
             )
 
             if retry_prepared:
-                reason = "Merge conflict with main; retrying with merged state as baseline"
+                reason = (
+                    "Merge conflict with main; retrying with merged state as baseline"
+                )
             else:
                 reason = "Merge conflict unresolvable; retrying from fresh state"
 
@@ -384,6 +414,7 @@ class Daemon:
         Only works from the main thread; silently skips otherwise (e.g. in tests).
         """
         import threading
+
         if threading.current_thread() is threading.main_thread():
             signal.signal(signal.SIGTERM, self._handle_signal)
             signal.signal(signal.SIGINT, self._handle_signal)
@@ -397,6 +428,65 @@ class Daemon:
         end = time.time() + duration
         while time.time() < end and self._running:
             time.sleep(min(0.1, end - time.time()))
+
+    # ------------------------------------------------------------------
+    # Hot reload
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _create_source_watcher() -> SourceWatcher | None:
+        """Create a SourceWatcher for the corc package directory.
+
+        Uses the corc package's __file__ to find the actual source directory
+        that Python loads modules from (works with editable installs).
+
+        Returns None if the package directory can't be determined.
+        """
+        try:
+            import corc as _corc_pkg
+
+            corc_src = Path(_corc_pkg.__file__).resolve().parent
+            return SourceWatcher(corc_src)
+        except (ImportError, AttributeError, TypeError):
+            return None
+
+    def _check_source_reload(self):
+        """Check for source file changes and reload modules if needed.
+
+        Called at the start of each _tick() to ensure the daemon uses the
+        latest code before dispatching new tasks.
+        """
+        if not self._source_watcher:
+            return
+
+        reloaded = self._source_watcher.check_and_reload()
+        if not reloaded:
+            return
+
+        # Re-bind module-level function references used by _tick
+        self._rebind_after_reload(reloaded)
+        self.audit_log.log("modules_reloaded", modules=reloaded)
+
+    @staticmethod
+    def _rebind_after_reload(reloaded_modules: list[str]):
+        """Update module-level function references after hot reload.
+
+        When modules are reloaded via importlib.reload(), existing references
+        to their functions (bound at import time via 'from X import Y') become
+        stale. This method re-binds the specific functions that _tick() and
+        related methods use, so the daemon picks up the new code.
+        """
+        g = globals()
+        for mod_name in reloaded_modules:
+            bindings = _RELOAD_BINDINGS.get(mod_name)
+            if not bindings:
+                continue
+            mod = sys.modules.get(mod_name)
+            if not mod:
+                continue
+            for global_name, attr_name in bindings:
+                if hasattr(mod, attr_name):
+                    g[global_name] = getattr(mod, attr_name)
 
 
 def stop_daemon(project_root: Path) -> bool:
