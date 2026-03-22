@@ -22,6 +22,12 @@ import time
 from pathlib import Path
 
 from corc.audit import AuditLog
+from corc.chaos import (
+    ChaosMonkey,
+    is_chaos_enabled,
+    mark_event_recovered,
+    read_chaos_config,
+)
 from corc.dispatch import AgentDispatcher
 from corc.executor import Executor
 from corc.mutations import MutationLog
@@ -70,6 +76,7 @@ class Daemon:
         retry_policy: RetryPolicy | None = None,
         pid_checker=None,
         auto_reload: bool = True,
+        chaos_monkey: ChaosMonkey | None = None,
     ):
         self.state = state
         self.mutation_log = mutation_log
@@ -86,6 +93,15 @@ class Daemon:
         self._tasks_completed = 0
         self._pid_checker = pid_checker
         self._reconcile_summary = None
+
+        # Chaos monkey — optional, auto-detected from config on disk
+        corc_dir = self.project_root / ".corc"
+        if chaos_monkey is not None:
+            self._chaos_monkey = chaos_monkey
+        elif is_chaos_enabled(corc_dir):
+            self._chaos_monkey = ChaosMonkey(corc_dir)
+        else:
+            self._chaos_monkey = None
 
         # Source file watcher for hot-reload
         self._source_watcher = self._create_source_watcher() if auto_reload else None
@@ -174,6 +190,9 @@ class Daemon:
             for task in ready:
                 self.executor.dispatch(task)
 
+        # 3a. Chaos monkey: randomly kill agents / corrupt state
+        self._chaos_tick()
+
         # 3. Executor: poll for completed dispatches (always — in-flight tasks finish)
         completed = self.executor.poll_completed()
 
@@ -205,6 +224,10 @@ class Daemon:
             task = self.state.get_task(item.task["id"])
             if task and task["status"] in ("completed", "escalated"):
                 self._tasks_completed += 1
+                # Track chaos recovery: if this task had a chaos event, mark it recovered
+                if self._chaos_monkey and task["status"] == "completed":
+                    corc_dir = self.project_root / ".corc"
+                    mark_event_recovered(corc_dir, item.task["id"])
 
         # 5. Reconcile externally-dispatched tasks (e.g. via 'corc dispatch')
         #    These are running tasks with no matching executor handle.
@@ -366,6 +389,64 @@ class Daemon:
             updated_task = self.state.get_task(task_id)
             if updated_task and updated_task["status"] in ("completed", "escalated"):
                 self._tasks_completed += 1
+
+    # ------------------------------------------------------------------
+    # Chaos monkey integration
+    # ------------------------------------------------------------------
+
+    def _chaos_tick(self):
+        """Run chaos monkey checks if enabled.
+
+        Checks each running agent for random kill and optionally
+        corrupts the state DB. The daemon's reconciliation and retry
+        mechanisms handle recovery.
+        """
+        if not self._chaos_monkey:
+            return
+
+        # Re-read config each tick so operator can adjust rates live
+        self._chaos_monkey.reload_config()
+        if not self._chaos_monkey.config.enabled:
+            return
+
+        # Gather running agents with PIDs
+        running_agents = self.state.list_agents(status="idle")
+        # Also check agents from "running" tasks
+        running_tasks = self.state.list_tasks(status="running")
+        for task in running_tasks:
+            agents = self.state.get_agents_for_task(task["id"])
+            for agent in agents:
+                if agent.get("pid"):
+                    running_agents.append(agent)
+
+        # Run chaos on agents
+        for agent in running_agents:
+            pid = agent.get("pid")
+            task_id = agent.get("task_id")
+            if pid:
+                killed = self._chaos_monkey.maybe_kill_agent(pid, task_id)
+                if killed:
+                    self.audit_log.log(
+                        "chaos_agent_killed",
+                        task_id=task_id,
+                        pid=pid,
+                    )
+
+        # Optionally corrupt the state DB (will be rebuilt from mutation log)
+        state_db = self.state.db_path
+        corrupted = self._chaos_monkey.maybe_corrupt_state(state_db)
+        if corrupted:
+            self.audit_log.log("chaos_state_corrupted", file=str(state_db))
+            # Immediately rebuild state from mutation log to recover
+            try:
+                self.state.rebuild()
+                self.audit_log.log("chaos_state_recovered", file=str(state_db))
+            except Exception as e:
+                self.audit_log.log(
+                    "chaos_state_recovery_failed",
+                    file=str(state_db),
+                    error=str(e),
+                )
 
     def _get_target_task(self) -> list[dict]:
         """Get the specific target task if it's ready for dispatch."""
