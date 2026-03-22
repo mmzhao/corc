@@ -49,7 +49,7 @@ class MockDispatcher(AgentDispatcher):
         self.dispatched: list[tuple[str, str, Constraints]] = []
 
     def dispatch(self, prompt: str, system_prompt: str, constraints: Constraints,
-                 pid_callback=None, event_callback=None) -> AgentResult:
+                 pid_callback=None, event_callback=None, cwd=None) -> AgentResult:
         self.dispatched.append((prompt, system_prompt, constraints))
         if self.delay:
             time.sleep(self.delay)

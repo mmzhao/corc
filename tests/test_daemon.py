@@ -47,7 +47,7 @@ class MockDispatcher(AgentDispatcher):
         self._results[prompt_substring] = result
 
     def dispatch(self, prompt: str, system_prompt: str, constraints: Constraints,
-                 pid_callback=None, event_callback=None) -> AgentResult:
+                 pid_callback=None, event_callback=None, cwd=None) -> AgentResult:
         self.dispatched.append((prompt, system_prompt, constraints))
         if self.delay:
             time.sleep(self.delay)
@@ -311,7 +311,7 @@ class TestExecutor:
         """Dispatcher errors are caught and returned as failed results."""
         class FailingDispatcher(AgentDispatcher):
             def dispatch(self, prompt, system_prompt, constraints,
-                         pid_callback=None, event_callback=None):
+                         pid_callback=None, event_callback=None, cwd=None):
                 raise RuntimeError("Connection failed")
 
         _create_task(mutation_log, "t1", "Task 1")
