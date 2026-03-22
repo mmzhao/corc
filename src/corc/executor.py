@@ -141,6 +141,11 @@ class Executor:
         """Number of tasks currently being executed."""
         return len(self._futures)
 
+    @property
+    def in_flight_task_ids(self) -> set[str]:
+        """Set of task IDs currently tracked by the executor."""
+        return {task["id"] for task, _attempt in self._futures.values()}
+
     def shutdown(self, wait: bool = True):
         """Shutdown the thread pool, optionally waiting for in-flight tasks."""
         self._pool.shutdown(wait=wait)

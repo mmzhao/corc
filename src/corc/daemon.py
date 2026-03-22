@@ -21,7 +21,7 @@ from corc.executor import Executor
 from corc.mutations import MutationLog
 from corc.pause import is_paused
 from corc.processor import process_completed
-from corc.reconcile import reconcile_on_startup
+from corc.reconcile import _get_agent_pid, _get_last_agent_output, reconcile_on_startup
 from corc.retry import RetryPolicy
 from corc.scheduler import get_ready_tasks
 from corc.sessions import SessionLogger
@@ -169,6 +169,87 @@ class Daemon:
             self.state.refresh()
             task = self.state.get_task(item.task["id"])
             if task and task["status"] in ("completed", "escalated"):
+                self._tasks_completed += 1
+
+        # 5. Reconcile externally-dispatched tasks (e.g. via 'corc dispatch')
+        #    These are running tasks with no matching executor handle.
+        self._reconcile_external_tasks()
+
+    def _reconcile_external_tasks(self):
+        """Reconcile running tasks not tracked by this daemon's executor.
+
+        Tasks dispatched externally (e.g. via 'corc dispatch') are in 'running'
+        state but have no matching Future in the executor. For each such task:
+        - If the agent PID is still alive: leave it alone
+        - If the agent is dead and has session output: process through the
+          normal validation pipeline (may complete or fail)
+        - If the agent is dead with no output: mark as failed
+        """
+        from corc.reconcile import _default_pid_checker
+
+        pid_checker = self._pid_checker or _default_pid_checker
+
+        running_tasks = self.state.list_tasks(status="running")
+        in_flight_ids = self.executor.in_flight_task_ids
+
+        for task in running_tasks:
+            task_id = task["id"]
+
+            # Skip tasks the executor is actively tracking
+            if task_id in in_flight_ids:
+                continue
+
+            # Check if the agent process is still alive
+            pid = _get_agent_pid(self.state, task_id)
+            if pid and pid_checker(pid):
+                # Agent still running — leave it alone
+                continue
+
+            # Agent is dead (or has no PID) — check for output
+            output = _get_last_agent_output(self.session_logger, task_id)
+
+            if output is not None:
+                # Process output through normal validation pipeline
+                attempt = self.session_logger.get_latest_attempt(task_id)
+                process_completed(
+                    task=task,
+                    result=output,
+                    attempt=attempt,
+                    mutation_log=self.mutation_log,
+                    state=self.state,
+                    audit_log=self.audit_log,
+                    session_logger=self.session_logger,
+                    project_root=self.project_root,
+                )
+                self.audit_log.log(
+                    "reconcile_external_processed",
+                    task_id=task_id,
+                )
+            else:
+                # No output — mark as failed so retry can kick in
+                attempt = self.session_logger.get_latest_attempt(task_id) or 1
+                self.mutation_log.append(
+                    "task_failed",
+                    {
+                        "attempt": attempt,
+                        "attempt_count": attempt,
+                        "exit_code": -1,
+                        "reconciled": True,
+                    },
+                    reason="Reconciliation: externally-dispatched agent finished without output",
+                    task_id=task_id,
+                )
+                self.audit_log.log(
+                    "reconcile_external_marked_failed",
+                    task_id=task_id,
+                )
+
+            # Refresh state after each reconciliation to see updates
+            self.state.refresh()
+
+            # Count terminal completions from reconciliation
+            updated_task = self.state.get_task(task_id)
+            if updated_task and updated_task["status"] in ("completed", "escalated"):
                 self._tasks_completed += 1
 
     def _get_target_task(self) -> list[dict]:

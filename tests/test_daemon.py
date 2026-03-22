@@ -898,6 +898,348 @@ class TestDaemon:
 
 
 # ===========================================================================
+# External dispatch reconciliation tests
+# ===========================================================================
+
+
+def _start_task(mutation_log, task_id, attempt=1):
+    """Helper to mark a task as started (simulating external dispatch)."""
+    mutation_log.append(
+        "task_started",
+        {"attempt": attempt},
+        reason="Externally dispatched",
+        task_id=task_id,
+    )
+
+
+def _create_agent(mutation_log, agent_id, task_id, role="implementer",
+                  pid=None, worktree_path=None):
+    """Helper to create an agent record."""
+    mutation_log.append("agent_created", {
+        "id": agent_id,
+        "role": role,
+        "task_id": task_id,
+        "pid": pid,
+        "worktree_path": worktree_path,
+    }, reason="Test setup")
+
+
+class TestExternalDispatchReconciliation:
+    """Test that the daemon reconciles externally-dispatched tasks during its loop.
+
+    Tasks dispatched via 'corc dispatch' are in 'running' state but have no
+    executor handle. The daemon should detect these and reconcile them.
+
+    Tests simulate external dispatch happening WHILE the daemon is running
+    (by adding mutations after daemon start) to exercise the in-loop
+    reconciliation path rather than the startup reconciliation.
+    """
+
+    def test_daemon_completes_externally_dispatched_task(
+        self, mutation_log, work_state, audit_log, session_logger,
+        mock_dispatcher, tmp_project,
+    ):
+        """Daemon picks up a task dispatched externally with successful output."""
+        daemon = Daemon(
+            state=work_state,
+            mutation_log=mutation_log,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            dispatcher=mock_dispatcher,
+            project_root=tmp_project,
+            poll_interval=0.1,
+            pid_checker=lambda pid: False,  # Agent process is dead
+        )
+
+        thread = threading.Thread(target=daemon.start)
+        thread.start()
+
+        # Simulate external dispatch while daemon is running
+        time.sleep(0.3)
+        _create_task(mutation_log, "ext-1", "External Task", done_when="do it")
+        _start_task(mutation_log, "ext-1")
+        session_logger.log_dispatch("ext-1", 1, "prompt", "system", ["Read"], 3.0)
+        session_logger.log_output("ext-1", 1, "Task completed successfully!", 0, 5.0)
+
+        time.sleep(0.8)
+        daemon.stop()
+        thread.join(timeout=3)
+
+        work_state.refresh()
+        task = work_state.get_task("ext-1")
+        assert task["status"] == "completed"
+
+        # Daemon should NOT have re-dispatched the task — it was reconciled
+        ext_dispatches = [d for d in mock_dispatcher.dispatched
+                          if "External Task" in d[1]]
+        assert len(ext_dispatches) == 0
+
+    def test_daemon_fails_externally_dispatched_task_no_output(
+        self, mutation_log, work_state, audit_log, session_logger,
+        mock_dispatcher, tmp_project,
+    ):
+        """Daemon marks externally-dispatched task as failed when agent died without output."""
+        daemon = Daemon(
+            state=work_state,
+            mutation_log=mutation_log,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            dispatcher=mock_dispatcher,
+            project_root=tmp_project,
+            poll_interval=0.1,
+            pid_checker=lambda pid: False,
+        )
+
+        thread = threading.Thread(target=daemon.start)
+        thread.start()
+
+        # Simulate external dispatch while daemon is running — agent dies without output
+        time.sleep(0.3)
+        _create_task(mutation_log, "ext-2", "Dead External", done_when="do it",
+                     max_retries=0)
+        _start_task(mutation_log, "ext-2")
+
+        time.sleep(0.8)
+        daemon.stop()
+        thread.join(timeout=3)
+
+        work_state.refresh()
+        task = work_state.get_task("ext-2")
+        # Reconciliation marks it as failed; with max_retries=0 the scheduler
+        # won't retry it, so it stays failed.
+        assert task["status"] == "failed"
+
+        # Verify the reconciled flag is set in the mutation log
+        entries = mutation_log.read_all()
+        fail_entries = [e for e in entries if e["type"] == "task_failed"]
+        assert len(fail_entries) >= 1
+        assert any(e["data"].get("reconciled") for e in fail_entries)
+
+    def test_daemon_leaves_alive_external_task_alone(
+        self, mutation_log, work_state, audit_log, session_logger,
+        mock_dispatcher, tmp_project,
+    ):
+        """Daemon leaves externally-dispatched task alone if agent PID is alive."""
+        daemon = Daemon(
+            state=work_state,
+            mutation_log=mutation_log,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            dispatcher=mock_dispatcher,
+            project_root=tmp_project,
+            poll_interval=0.1,
+            pid_checker=lambda pid: True,  # Agent is alive
+        )
+
+        thread = threading.Thread(target=daemon.start)
+        thread.start()
+
+        # Simulate external dispatch with a live agent
+        time.sleep(0.3)
+        _create_task(mutation_log, "ext-3", "Alive External", done_when="do it")
+        _start_task(mutation_log, "ext-3")
+        _create_agent(mutation_log, "agent-ext-3", "ext-3", pid=os.getpid())
+
+        time.sleep(0.8)
+        daemon.stop()
+        thread.join(timeout=3)
+
+        work_state.refresh()
+        task = work_state.get_task("ext-3")
+        assert task["status"] == "running"
+
+    def test_daemon_reconciles_external_task_failed_exit(
+        self, mutation_log, work_state, audit_log, session_logger,
+        mock_dispatcher, tmp_project,
+    ):
+        """Daemon processes externally-dispatched task that exited non-zero."""
+        daemon = Daemon(
+            state=work_state,
+            mutation_log=mutation_log,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            dispatcher=mock_dispatcher,
+            project_root=tmp_project,
+            poll_interval=0.1,
+            pid_checker=lambda pid: False,
+        )
+
+        thread = threading.Thread(target=daemon.start)
+        thread.start()
+
+        # Simulate external dispatch with error exit
+        time.sleep(0.3)
+        _create_task(mutation_log, "ext-4", "Failed External", done_when="do it",
+                     max_retries=0)
+        _start_task(mutation_log, "ext-4")
+        session_logger.log_dispatch("ext-4", 1, "prompt", "system", ["Read"], 3.0)
+        session_logger.log_output("ext-4", 1, "Error: something broke", 1, 5.0)
+
+        time.sleep(0.8)
+        daemon.stop()
+        thread.join(timeout=3)
+
+        work_state.refresh()
+        task = work_state.get_task("ext-4")
+        # exit_code=1 with max_retries=0: processor marks as failed, then
+        # attempt 1 > max_retries 0, so escalated
+        assert task["status"] == "escalated"
+
+    def test_daemon_retries_external_failed_task(
+        self, mutation_log, work_state, audit_log, session_logger,
+        mock_dispatcher, tmp_project,
+    ):
+        """Daemon retries externally-dispatched task after reconciling it as failed."""
+        daemon = Daemon(
+            state=work_state,
+            mutation_log=mutation_log,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            dispatcher=mock_dispatcher,
+            project_root=tmp_project,
+            poll_interval=0.1,
+            pid_checker=lambda pid: False,
+        )
+
+        thread = threading.Thread(target=daemon.start)
+        thread.start()
+
+        # Simulate external dispatch — agent died without output
+        time.sleep(0.3)
+        _create_task(mutation_log, "ext-5", "Retry External", done_when="do it",
+                     max_retries=3)
+        _start_task(mutation_log, "ext-5")
+
+        time.sleep(1.5)
+        daemon.stop()
+        thread.join(timeout=3)
+
+        work_state.refresh()
+        task = work_state.get_task("ext-5")
+        # Should have been retried and completed (mock dispatcher returns exit 0)
+        assert task["status"] == "completed"
+        # Daemon should have dispatched a retry
+        assert len(mock_dispatcher.dispatched) >= 1
+
+    def test_daemon_external_task_unblocks_downstream(
+        self, mutation_log, work_state, audit_log, session_logger,
+        mock_dispatcher, tmp_project,
+    ):
+        """Completing an externally-dispatched task unblocks downstream tasks."""
+        # Create tasks before starting daemon so they're visible
+        _create_task(mutation_log, "ext-6", "External Blocker", done_when="do it")
+        _create_task(mutation_log, "t-downstream", "Downstream Task",
+                     done_when="do it too", depends_on=["ext-6"])
+        work_state.refresh()
+
+        daemon = Daemon(
+            state=work_state,
+            mutation_log=mutation_log,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            dispatcher=mock_dispatcher,
+            project_root=tmp_project,
+            poll_interval=0.1,
+            pid_checker=lambda pid: False,
+        )
+
+        thread = threading.Thread(target=daemon.start)
+        thread.start()
+
+        # Simulate external dispatch of ext-6 while daemon is running
+        time.sleep(0.3)
+        _start_task(mutation_log, "ext-6")
+        session_logger.log_dispatch("ext-6", 1, "prompt", "system", ["Read"], 3.0)
+        session_logger.log_output("ext-6", 1, "Done!", 0, 5.0)
+
+        time.sleep(1.5)
+        daemon.stop()
+        thread.join(timeout=3)
+
+        work_state.refresh()
+        # External task completed via reconciliation
+        assert work_state.get_task("ext-6")["status"] == "completed"
+        # Downstream task was unblocked and completed
+        assert work_state.get_task("t-downstream")["status"] == "completed"
+        # Downstream task was dispatched by daemon
+        assert len(mock_dispatcher.dispatched) >= 1
+
+    def test_daemon_mixed_internal_and_external_tasks(
+        self, mutation_log, work_state, audit_log, session_logger,
+        mock_dispatcher, tmp_project,
+    ):
+        """Daemon handles both internally-dispatched and externally-dispatched tasks."""
+        # Internal task: pending, will be dispatched by daemon
+        _create_task(mutation_log, "internal-1", "Internal Task", done_when="do it")
+        work_state.refresh()
+
+        daemon = Daemon(
+            state=work_state,
+            mutation_log=mutation_log,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            dispatcher=mock_dispatcher,
+            project_root=tmp_project,
+            poll_interval=0.1,
+            pid_checker=lambda pid: False,
+        )
+
+        thread = threading.Thread(target=daemon.start)
+        thread.start()
+
+        # Simulate external dispatch while daemon is running
+        time.sleep(0.3)
+        _create_task(mutation_log, "ext-7", "External Task", done_when="do it")
+        _start_task(mutation_log, "ext-7")
+        session_logger.log_dispatch("ext-7", 1, "prompt", "system", ["Read"], 3.0)
+        session_logger.log_output("ext-7", 1, "External done!", 0, 5.0)
+
+        time.sleep(1.0)
+        daemon.stop()
+        thread.join(timeout=3)
+
+        work_state.refresh()
+        # Both should be completed
+        assert work_state.get_task("internal-1")["status"] == "completed"
+        assert work_state.get_task("ext-7")["status"] == "completed"
+
+    def test_daemon_once_mode_with_external_task(
+        self, mutation_log, work_state, audit_log, session_logger,
+        mock_dispatcher, tmp_project,
+    ):
+        """Daemon in --once mode exits after reconciling an external task."""
+        daemon = Daemon(
+            state=work_state,
+            mutation_log=mutation_log,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            dispatcher=mock_dispatcher,
+            project_root=tmp_project,
+            poll_interval=0.1,
+            once=True,
+            pid_checker=lambda pid: False,
+        )
+
+        thread = threading.Thread(target=daemon.start)
+        thread.start()
+
+        # Simulate external dispatch
+        time.sleep(0.3)
+        _create_task(mutation_log, "ext-8", "Once External", done_when="do it")
+        _start_task(mutation_log, "ext-8")
+        session_logger.log_dispatch("ext-8", 1, "prompt", "system", ["Read"], 3.0)
+        session_logger.log_output("ext-8", 1, "Done!", 0, 5.0)
+
+        thread.join(timeout=5)
+
+        # Daemon should have stopped on its own after reconciling the task
+        assert not thread.is_alive()
+
+        work_state.refresh()
+        assert work_state.get_task("ext-8")["status"] == "completed"
+
+
+# ===========================================================================
 # CLI integration tests
 # ===========================================================================
 
