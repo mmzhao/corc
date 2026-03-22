@@ -638,7 +638,7 @@ def start_cmd(parallel, task_id, once, provider, poll_interval):
         click.echo(f"  Target task: {task_id}")
     if once:
         click.echo(f"  Mode: once (will stop after one task)")
-    click.echo("Press Ctrl+C to stop.\n")
+    click.echo("Reconciling state from mutation log...")
 
     daemon = Daemon(
         state=ws,
@@ -653,6 +653,19 @@ def start_cmd(parallel, task_id, once, provider, poll_interval):
         once=once,
     )
     daemon.start()
+
+    # Show reconciliation results after start (reconcile runs inside start)
+    summary = daemon._reconcile_summary
+    if summary:
+        stale = summary.get("running_found", 0) + summary.get("assigned_found", 0)
+        if stale:
+            click.echo(f"  Reconciled {stale} stale task(s): "
+                        f"{summary.get('agents_alive', 0)} alive, "
+                        f"{summary.get('agents_dead_with_output', 0)} processed output, "
+                        f"{summary.get('agents_dead_no_output', 0)} marked failed")
+        if summary.get("worktrees_cleaned", 0):
+            click.echo(f"  Cleaned {summary['worktrees_cleaned']} stale worktree(s)")
+
     click.echo("Daemon stopped.")
 
 

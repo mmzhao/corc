@@ -17,6 +17,7 @@ from corc.executor import Executor
 from corc.mutations import MutationLog
 from corc.pause import is_paused
 from corc.processor import process_completed
+from corc.reconcile import reconcile_on_startup
 from corc.retry import RetryPolicy, create_escalation
 from corc.scheduler import get_ready_tasks
 from corc.sessions import SessionLogger
@@ -43,6 +44,7 @@ class Daemon:
         task_id: str | None = None,
         once: bool = False,
         retry_policy: RetryPolicy | None = None,
+        pid_checker=None,
     ):
         self.state = state
         self.mutation_log = mutation_log
@@ -57,6 +59,8 @@ class Daemon:
         self._running = False
         self._pid_file = self.project_root / ".corc" / "daemon.pid"
         self._tasks_completed = 0
+        self._pid_checker = pid_checker
+        self._reconcile_summary = None
 
         self.executor = Executor(
             dispatcher=dispatcher,
@@ -69,10 +73,33 @@ class Daemon:
         )
 
     def start(self):
-        """Run the daemon loop until stopped or task complete."""
+        """Run the daemon loop until stopped or task complete.
+
+        On startup, runs reconciliation to recover from any prior crash:
+        rebuilds SQLite from mutation log, checks running tasks for PID
+        liveness, processes dead agent output, and cleans stale worktrees.
+        """
         self._running = True
         self._write_pid()
         self._setup_signals()
+
+        # Reconcile state from mutation log before entering the loop.
+        # This handles daemon restarts after crashes: rebuilds SQLite,
+        # checks if any "running" agents are actually dead, processes
+        # their output or marks them failed.
+        self._reconcile_summary = reconcile_on_startup(
+            state=self.state,
+            mutation_log=self.mutation_log,
+            audit_log=self.audit_log,
+            session_logger=self.session_logger,
+            project_root=self.project_root,
+            pid_checker=self._pid_checker,
+        )
+
+        # Apply retry policy to tasks that were marked failed by reconciliation.
+        # These are tasks whose agents died without output — they should be
+        # retried rather than left in failed state.
+        self._retry_reconciled_failures()
 
         self.audit_log.log("daemon_started", parallel=self.parallel)
 
@@ -171,6 +198,45 @@ class Daemon:
                 attempts=attempt,
             )
             self.state.refresh()
+
+    def _retry_reconciled_failures(self):
+        """Reset reconciled-failed tasks to pending so they get retried.
+
+        After reconciliation marks dead-agent tasks as failed, check the
+        retry policy. If retries are available, reset the task to pending
+        so the normal daemon loop picks it up.
+        """
+        self.state.refresh()
+        failed_tasks = self.state.list_tasks(status="failed")
+
+        for task in failed_tasks:
+            task_id = task["id"]
+            # Check if this task was failed by reconciliation (look at mutation log)
+            entries = self.mutation_log.read_all()
+            reconciled = False
+            attempt = 1
+            for entry in reversed(entries):
+                if (entry.get("task_id") == task_id and
+                        entry["type"] == "task_failed" and
+                        entry["data"].get("reconciled")):
+                    reconciled = True
+                    attempt = entry["data"].get("attempt", 1)
+                    break
+
+            if reconciled and self.retry_policy.should_retry(attempt):
+                self.mutation_log.append(
+                    "task_updated",
+                    {"status": "pending"},
+                    reason=f"Reconciliation retry: resetting to pending (attempt {attempt})",
+                    task_id=task_id,
+                )
+                self.audit_log.log(
+                    "reconcile_retry",
+                    task_id=task_id,
+                    attempt=attempt,
+                )
+
+        self.state.refresh()
 
     def _get_target_task(self) -> list[dict]:
         """Get the specific target task if it's ready for dispatch."""

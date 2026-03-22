@@ -2,9 +2,9 @@
 
 On startup, the daemon must:
 1. Rebuild SQLite from mutation log (ensure consistency)
-2. Check all tasks marked 'running' for PID liveness
+2. Check all tasks marked 'running' or 'assigned' for PID liveness
 3. Process output for dead agents that produced results
-4. Mark dead agents with no output as failed
+4. Mark dead agents with no output as failed (retry policy applies)
 5. Clean up stale git worktrees
 """
 
@@ -30,9 +30,9 @@ def reconcile_on_startup(
 ) -> dict:
     """Run full reconciliation on daemon startup.
 
-    Rebuilds SQLite from the mutation log, checks all running tasks for PID
-    liveness, processes dead agent output or marks tasks failed, and cleans
-    stale worktrees.
+    Rebuilds SQLite from the mutation log, checks all running/assigned tasks
+    for PID liveness, processes dead agent output or marks tasks failed, and
+    cleans stale worktrees.
 
     Args:
         state: The work state (SQLite materialized view).
@@ -52,6 +52,7 @@ def reconcile_on_startup(
     summary = {
         "rebuilt_state": False,
         "running_found": 0,
+        "assigned_found": 0,
         "agents_alive": 0,
         "agents_dead_with_output": 0,
         "agents_dead_no_output": 0,
@@ -63,16 +64,21 @@ def reconcile_on_startup(
     summary["rebuilt_state"] = True
     audit_log.log("reconcile_state_rebuilt")
 
-    # 2. Find tasks marked as running
+    # 2. Find tasks marked as running or assigned
     running_tasks = state.list_tasks(status="running")
+    assigned_tasks = state.list_tasks(status="assigned")
     summary["running_found"] = len(running_tasks)
+    summary["assigned_found"] = len(assigned_tasks)
 
-    if not running_tasks:
+    stale_tasks = running_tasks + assigned_tasks
+    if not stale_tasks:
+        # 3. Still clean worktrees even if no stale tasks
+        summary["worktrees_cleaned"] = clean_stale_worktrees(state, project_root)
         audit_log.log("reconcile_complete", **summary)
         return summary
 
-    # 3. For each running task, check agent liveness
-    for task in running_tasks:
+    # 3. For each stale task, check agent liveness
+    for task in stale_tasks:
         task_id = task["id"]
         pid = _get_agent_pid(state, task_id)
 
@@ -225,21 +231,30 @@ def clean_stale_worktrees(state: WorkState, project_root: Path) -> int:
 
         # Agent is dead and worktree exists — clean up
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["git", "worktree", "remove", "--force", str(worktree)],
                 capture_output=True,
                 timeout=30,
                 cwd=str(project_root),
             )
-            cleaned += 1
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            # If git worktree remove fails, try manual cleanup
-            import shutil
-
-            try:
-                shutil.rmtree(str(worktree), ignore_errors=True)
+            if result.returncode == 0:
                 cleaned += 1
-            except Exception:
-                pass
+            else:
+                # git worktree remove failed — try manual cleanup
+                _remove_dir(worktree)
+                cleaned += 1
+        except (subprocess.SubprocessError, FileNotFoundError, OSError):
+            # If git worktree remove fails, try manual cleanup
+            _remove_dir(worktree)
+            cleaned += 1
 
     return cleaned
+
+
+def _remove_dir(path: Path):
+    """Remove a directory tree, ignoring errors."""
+    import shutil
+    try:
+        shutil.rmtree(str(path), ignore_errors=True)
+    except Exception:
+        pass
