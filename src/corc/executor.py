@@ -22,7 +22,14 @@ from corc.retry import get_retry_context
 from corc.roles import RoleLoader, constraints_from_role, get_system_prompt_for_role
 from corc.sessions import SessionLogger
 from corc.state import WorkState
-from corc.worktree import WorktreeError, create_worktree, merge_worktree, remove_worktree
+from corc.repo_policy import get_repo_policy
+from corc.worktree import (
+    WorktreeError,
+    create_worktree,
+    merge_main_into_worktree,
+    merge_worktree,
+    remove_worktree,
+)
 
 
 @dataclass
@@ -33,10 +40,20 @@ class CompletedTask:
     attempt: int
     worktree_path: Path | None = None
     agent_id: str | None = None
+    merge_status: str | None = None
 
 
 class Executor:
-    """Manages agent dispatch and tracks in-flight tasks."""
+    """Manages agent dispatch and tracks in-flight tasks.
+
+    When defer_merge=True (used by daemon for optimistic merge strategy),
+    poll_completed() does NOT merge worktrees automatically. The caller
+    is responsible for calling try_merge_worktree() after validation passes,
+    and cleanup_worktree() when done.
+
+    When defer_merge=False (default, backward compatible), poll_completed()
+    merges and cleans up worktrees as before.
+    """
 
     def __init__(
         self,
@@ -48,6 +65,7 @@ class Executor:
         project_root: Path,
         max_workers: int = 1,
         role_loader: RoleLoader | None = None,
+        defer_merge: bool = False,
     ):
         self.dispatcher = dispatcher
         self.mutation_log = mutation_log
@@ -56,8 +74,11 @@ class Executor:
         self.session_logger = session_logger
         self.project_root = project_root
         self.role_loader = role_loader or RoleLoader(project_root)
+        self.defer_merge = defer_merge
         self._pool = ThreadPoolExecutor(max_workers=max_workers)
         self._futures: dict[Future, tuple[dict, int, Path | None, str | None]] = {}
+        # Worktrees saved for conflict retry: task_id → worktree_path
+        self._conflict_worktrees: dict[str, Path] = {}
 
     def dispatch(self, task: dict):
         """Dispatch an agent for a task (non-blocking).
@@ -67,26 +88,39 @@ class Executor:
         """
         attempt = self.session_logger.get_latest_attempt(task["id"]) + 1
 
-        # Create git worktree for agent isolation
+        # Check for a saved conflict worktree (from a previous merge conflict)
         worktree_path = None
         agent_id = f"agent-{uuid.uuid4().hex[:8]}"
-        try:
-            worktree_path, branch_name = create_worktree(
-                self.project_root, task["id"], attempt
-            )
+        conflict_worktree = self._conflict_worktrees.pop(task["id"], None)
+
+        if conflict_worktree and conflict_worktree.exists():
+            # Reuse the conflict worktree (already has main merged in)
+            worktree_path = conflict_worktree
             self.audit_log.log(
-                "worktree_created",
+                "worktree_reused",
                 task_id=task["id"],
                 worktree_path=str(worktree_path),
-                branch_name=branch_name,
+                reason="Reusing worktree after merge conflict",
             )
-        except (WorktreeError, Exception) as e:
-            # If worktree creation fails, fall back to running in project root
-            self.audit_log.log(
-                "worktree_creation_failed",
-                task_id=task["id"],
-                error=str(e),
-            )
+        else:
+            # Create git worktree for agent isolation
+            try:
+                worktree_path, branch_name = create_worktree(
+                    self.project_root, task["id"], attempt
+                )
+                self.audit_log.log(
+                    "worktree_created",
+                    task_id=task["id"],
+                    worktree_path=str(worktree_path),
+                    branch_name=branch_name,
+                )
+            except (WorktreeError, Exception) as e:
+                # If worktree creation fails, fall back to running in project root
+                self.audit_log.log(
+                    "worktree_creation_failed",
+                    task_id=task["id"],
+                    error=str(e),
+                )
 
         # Create agent record with worktree path
         self.mutation_log.append(
@@ -207,7 +241,10 @@ class Executor:
         """Check for completed dispatches. Non-blocking.
 
         Returns list of CompletedTask for tasks that have finished since last poll.
-        Attempts to merge worktree changes and cleans up worktrees.
+
+        When defer_merge=False (default): merges worktree changes and cleans up.
+        When defer_merge=True: returns CompletedTask with worktree still alive.
+        Caller must call try_merge_worktree() and cleanup_worktree() explicitly.
         """
         completed = []
         done_futures = [f for f in self._futures if f.done()]
@@ -236,9 +273,34 @@ class Executor:
                 attempt=attempt,
             )
 
-            # Merge worktree changes back and clean up
-            if worktree_path:
-                self._merge_and_cleanup_worktree(task["id"], worktree_path)
+            if not self.defer_merge and worktree_path:
+                # Legacy behavior: merge and clean up immediately
+                # Respect repo merge policy: human-only repos skip the merge
+                policy = get_repo_policy(self.project_root)
+                if policy.is_human_only:
+                    self.audit_log.log(
+                        "worktree_merge_skipped",
+                        task_id=task["id"],
+                        worktree_path=str(worktree_path),
+                        merge_policy="human-only",
+                        reason="Merge policy is human-only; PR left for human review",
+                    )
+                    try:
+                        remove_worktree(self.project_root, worktree_path,
+                                        remove_branch=False)
+                        self.audit_log.log(
+                            "worktree_removed",
+                            task_id=task["id"],
+                            worktree_path=str(worktree_path),
+                        )
+                    except Exception as e:
+                        self.audit_log.log(
+                            "worktree_remove_error",
+                            task_id=task["id"],
+                            error=str(e),
+                        )
+                else:
+                    self._merge_and_cleanup_worktree(task["id"], worktree_path)
 
             completed.append(CompletedTask(
                 task=task, result=result, attempt=attempt,
@@ -283,6 +345,97 @@ class Executor:
                 task_id=task_id,
                 error=str(e),
             )
+
+    def try_merge_worktree(self, task_id: str, worktree_path: Path) -> str:
+        """Try to merge worktree branch into main (optimistic merge).
+
+        Returns merge status:
+        - "merged": successfully merged to main
+        - "no_changes": nothing to merge
+        - "conflict": merge conflict detected (main not modified)
+        - "error": unexpected error
+        """
+        try:
+            merged = merge_worktree(self.project_root, worktree_path)
+            if merged:
+                self.audit_log.log(
+                    "worktree_merged",
+                    task_id=task_id,
+                    worktree_path=str(worktree_path),
+                )
+                return "merged"
+            else:
+                self.audit_log.log(
+                    "worktree_merge_conflict",
+                    task_id=task_id,
+                    worktree_path=str(worktree_path),
+                )
+                return "conflict"
+        except Exception as e:
+            self.audit_log.log(
+                "worktree_merge_error",
+                task_id=task_id,
+                error=str(e),
+            )
+            return "error"
+
+    def prepare_conflict_retry(self, task_id: str, worktree_path: Path) -> bool:
+        """Prepare a worktree for retry after merge conflict.
+
+        Merges main into the worktree so the next agent dispatch sees
+        both its previous work and the latest main state. Saves the
+        worktree for reuse by the next dispatch of this task.
+
+        Returns True if main was successfully merged into worktree.
+        """
+        try:
+            success = merge_main_into_worktree(self.project_root, worktree_path)
+            if success:
+                # Save worktree for reuse by next dispatch
+                self._conflict_worktrees[task_id] = worktree_path
+                self.audit_log.log(
+                    "worktree_conflict_retry_prepared",
+                    task_id=task_id,
+                    worktree_path=str(worktree_path),
+                )
+                return True
+            else:
+                # Both merges failed — clean up and let retry create fresh worktree
+                self.audit_log.log(
+                    "worktree_conflict_unresolvable",
+                    task_id=task_id,
+                    worktree_path=str(worktree_path),
+                )
+                self.cleanup_worktree(task_id, worktree_path)
+                return False
+        except Exception as e:
+            self.audit_log.log(
+                "worktree_conflict_retry_error",
+                task_id=task_id,
+                error=str(e),
+            )
+            self.cleanup_worktree(task_id, worktree_path)
+            return False
+
+    def cleanup_worktree(self, task_id: str, worktree_path: Path):
+        """Remove a worktree and its branch."""
+        try:
+            remove_worktree(self.project_root, worktree_path)
+            self.audit_log.log(
+                "worktree_removed",
+                task_id=task_id,
+                worktree_path=str(worktree_path),
+            )
+        except Exception as e:
+            self.audit_log.log(
+                "worktree_remove_error",
+                task_id=task_id,
+                error=str(e),
+            )
+
+    def set_conflict_worktree(self, task_id: str, worktree_path: Path):
+        """Register a worktree for reuse on the next dispatch of a task."""
+        self._conflict_worktrees[task_id] = worktree_path
 
     @property
     def in_flight_count(self) -> int:

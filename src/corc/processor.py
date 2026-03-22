@@ -11,6 +11,7 @@ from pathlib import Path
 from corc.audit import AuditLog
 from corc.dispatch import AgentResult
 from corc.mutations import MutationLog
+from corc.repo_policy import get_repo_policy
 from corc.retry import create_escalation
 from corc.sessions import SessionLogger
 from corc.state import WorkState
@@ -111,16 +112,39 @@ def process_completed(
     )
 
     if all_passed:
-        mutation_log.append(
-            "task_completed",
-            {
-                "findings": findings,
-                "proof_of_work": {"output_preview": result.output[:1000]},
-            },
-            reason="Validated by processor",
-            task_id=task_id,
-        )
-        audit_log.log("task_completed", task_id=task_id, attempt=attempt)
+        # Check merge policy: human-only repos create PR but do not merge
+        policy = get_repo_policy(project_root)
+
+        if policy.is_human_only:
+            # human-only: mark task as pending_merge (awaiting human merge)
+            mutation_log.append(
+                "task_pending_merge",
+                {
+                    "findings": findings,
+                    "proof_of_work": {"output_preview": result.output[:1000]},
+                    "merge_policy": "human-only",
+                },
+                reason="Validation passed; merge policy is human-only — awaiting human merge",
+                task_id=task_id,
+            )
+            audit_log.log(
+                "task_pending_merge",
+                task_id=task_id,
+                attempt=attempt,
+                merge_policy="human-only",
+            )
+        else:
+            # auto: mark task as completed (merge already happened in executor)
+            mutation_log.append(
+                "task_completed",
+                {
+                    "findings": findings,
+                    "proof_of_work": {"output_preview": result.output[:1000]},
+                },
+                reason="Validated by processor",
+                task_id=task_id,
+            )
+            audit_log.log("task_completed", task_id=task_id, attempt=attempt)
     else:
         failed_details = [d for passed, d in details if not passed]
 

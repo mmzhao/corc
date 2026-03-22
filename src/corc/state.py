@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     findings TEXT DEFAULT '[]',
     micro_deviations TEXT DEFAULT '[]',
     attempt_count INTEGER DEFAULT 0,
-    max_retries INTEGER DEFAULT 3
+    max_retries INTEGER DEFAULT 3,
+    merge_status TEXT
 );
 
 CREATE TABLE IF NOT EXISTS agents (
@@ -167,7 +168,7 @@ class WorkState:
         elif t == "task_updated":
             updates = []
             params = []
-            for field in ("status", "checklist", "pr_url", "proof_of_work", "findings", "micro_deviations", "attempt_count", "max_retries"):
+            for field in ("status", "checklist", "pr_url", "proof_of_work", "findings", "micro_deviations", "attempt_count", "max_retries", "merge_status"):
                 if field in data:
                     val = data[field]
                     if isinstance(val, (list, dict)):
@@ -185,6 +186,17 @@ class WorkState:
             self.conn.execute(
                 "UPDATE tasks SET status='handed_off', updated=? WHERE id=?",
                 (entry["ts"], task_id),
+            )
+        elif t == "task_pending_merge":
+            self.conn.execute(
+                """UPDATE tasks SET status='pending_merge', updated=?,
+                   proof_of_work=?, findings=? WHERE id=?""",
+                (
+                    entry["ts"],
+                    json.dumps(data.get("proof_of_work")) if data.get("proof_of_work") else None,
+                    json.dumps(data.get("findings", [])),
+                    task_id,
+                ),
             )
         elif t == "agent_created":
             self.conn.execute(

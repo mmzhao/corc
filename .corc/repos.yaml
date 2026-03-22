@@ -1,0 +1,25 @@
+# Repo merge policies — controls how agents handle merging.
+#
+# merge_policy:
+#   auto       — Agent merges worktree after validation passes
+#   human-only — Agent creates PR but does NOT merge; human merges
+#
+# protected_branches: list of branches agents cannot push to directly
+# block_direct_push: prevent git push to protected branches (enforced by PreToolUse hook)
+# block_auto_merge: prevent gh pr merge --auto (enforced by PreToolUse hook)
+# require_reviewer_approval: require reviewer approval before merge
+
+repos:
+  # Example: internal tool with auto-merge
+  # internal-tool:
+  #   merge_policy: auto
+  #   protected_branches: [main]
+  #   require_reviewer_approval: true
+
+  # Example: production app with human-only merge
+  # production-app:
+  #   merge_policy: human-only
+  #   protected_branches: [main, staging]
+  #   require_reviewer_approval: true
+  #   block_auto_merge: true
+  #   block_direct_push: true
