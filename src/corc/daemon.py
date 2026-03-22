@@ -15,6 +15,7 @@ from corc.audit import AuditLog
 from corc.dispatch import AgentDispatcher
 from corc.executor import Executor
 from corc.mutations import MutationLog
+from corc.pause import is_paused
 from corc.processor import process_completed
 from corc.scheduler import get_ready_tasks
 from corc.sessions import SessionLogger
@@ -90,17 +91,21 @@ class Daemon:
         # Refresh state to pick up new tasks/mutations
         self.state.refresh()
 
-        # 1. Scheduler: find ready tasks
-        if self.target_task_id:
-            ready = self._get_target_task()
-        else:
-            ready = get_ready_tasks(self.state, self.parallel)
+        # Check for pause lock — skip scheduling new tasks but still process in-flight
+        paused = is_paused(self.project_root / ".corc")
 
-        # 2. Executor: dispatch ready tasks
-        for task in ready:
-            self.executor.dispatch(task)
+        if not paused:
+            # 1. Scheduler: find ready tasks
+            if self.target_task_id:
+                ready = self._get_target_task()
+            else:
+                ready = get_ready_tasks(self.state, self.parallel)
 
-        # 3. Executor: poll for completed dispatches
+            # 2. Executor: dispatch ready tasks
+            for task in ready:
+                self.executor.dispatch(task)
+
+        # 3. Executor: poll for completed dispatches (always — in-flight tasks finish)
         completed = self.executor.poll_completed()
 
         # 4. Processor: validate and update state

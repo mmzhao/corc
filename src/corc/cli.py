@@ -13,6 +13,7 @@ from corc.state import WorkState
 from corc.audit import AuditLog
 from corc.sessions import SessionLogger
 from corc.knowledge import KnowledgeStore
+from corc.pause import write_pause_lock, remove_pause_lock, read_pause_lock, is_paused
 from corc.dag import render_ascii_dag, render_mermaid
 from corc.context import assemble_context
 from corc.daemon import Daemon, stop_daemon
@@ -157,6 +158,14 @@ def task_status(task_id):
 def dispatch(task_id, provider):
     """Dispatch an agent for a task."""
     paths, ml, ws, al, sl, ks = _get_all()
+
+    # Check pause lock
+    if is_paused(paths["corc_dir"]):
+        lock = read_pause_lock(paths["corc_dir"])
+        click.echo(f"System is paused: {lock.get('reason', 'unknown')}")
+        click.echo("Run 'corc resume' to continue dispatch.")
+        return
+
     t = ws.get_task(task_id)
     if not t:
         click.echo(f"Task {task_id} not found.")
@@ -259,12 +268,67 @@ def context_for_task(task_id):
     click.echo(ctx)
 
 
+# --- Pause / Resume ---
+
+@cli.command()
+@click.argument("reason")
+@click.option("--source", default=None, help="Source identifier (default: cli:<pid>)")
+def pause(reason, source):
+    """Pause all new dispatch. In-flight tasks will complete."""
+    paths = get_paths()
+    corc_dir = paths["corc_dir"]
+
+    if is_paused(corc_dir):
+        lock = read_pause_lock(corc_dir)
+        click.echo(f"Already paused: {lock.get('reason', 'unknown')}")
+        click.echo(f"  since: {lock.get('timestamp', 'unknown')}")
+        return
+
+    lock_data = write_pause_lock(corc_dir, reason, source)
+
+    # Log to audit and mutation log
+    _, _, _, al, _, _ = _get_all()
+    al.log("pause", reason=reason, source=lock_data["source"])
+
+    click.echo(f"Paused: {reason}")
+    click.echo("In-flight tasks will complete. No new tasks will be dispatched.")
+
+
+@cli.command()
+def resume():
+    """Resume dispatch after a pause."""
+    paths = get_paths()
+    corc_dir = paths["corc_dir"]
+
+    lock = read_pause_lock(corc_dir)
+    if not lock:
+        click.echo("Not paused.")
+        return
+
+    removed = remove_pause_lock(corc_dir)
+    if removed:
+        _, _, _, al, _, _ = _get_all()
+        al.log("resume", previous_reason=lock.get("reason", ""))
+        click.echo(f"Resumed. Previous pause reason: {lock.get('reason', 'unknown')}")
+    else:
+        click.echo("Not paused.")
+
+
 # --- Status ---
 
 @cli.command()
 def status():
     """Show current system state."""
-    _, _, ws, al, _, _ = _get_all()
+    paths, _, ws, al, _, _ = _get_all()
+
+    # Show pause state first
+    lock = read_pause_lock(paths["corc_dir"])
+    if lock:
+        click.echo(f"PAUSED: {lock.get('reason', 'unknown')}")
+        click.echo(f"  since: {lock.get('timestamp', 'unknown')}")
+        click.echo(f"  source: {lock.get('source', 'unknown')}")
+        click.echo()
+
     tasks = ws.list_tasks()
     if not tasks:
         click.echo("No tasks.")
