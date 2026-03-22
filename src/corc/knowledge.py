@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS documents (
     created TEXT NOT NULL,
     updated TEXT NOT NULL,
     content_hash TEXT NOT NULL,
+    file_mtime REAL,
     supersedes TEXT
 );
 
@@ -255,6 +256,7 @@ class KnowledgeStore:
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
         self._migrate_embedding_column()
+        self._migrate_mtime_column()
         self._embeddings_available = embeddings.is_available()
 
     def _migrate_embedding_column(self) -> None:
@@ -265,12 +267,22 @@ class KnowledgeStore:
             self.conn.execute("ALTER TABLE chunks ADD COLUMN embedding BLOB")
             self.conn.commit()
 
+    def _migrate_mtime_column(self) -> None:
+        """Add file_mtime column to documents table if it doesn't exist (migration)."""
+        cursor = self.conn.execute("PRAGMA table_info(documents)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if "file_mtime" not in columns:
+            self.conn.execute("ALTER TABLE documents ADD COLUMN file_mtime REAL")
+            self.conn.commit()
+
     def add(self, file_path: Path | None = None, content: str | None = None,
             doc_type: str = "note", project: str | None = None, tags: list[str] | None = None) -> str:
         """Add a document. Either from file_path or raw content."""
+        mtime: float | None = None
         if file_path:
             file_path = Path(file_path).resolve()
             content = file_path.read_text()
+            mtime = file_path.stat().st_mtime
             try:
                 rel_path = str(file_path.relative_to(self.knowledge_dir.resolve()))
             except ValueError:
@@ -279,6 +291,7 @@ class KnowledgeStore:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_text(content)
                 rel_path = str(dest.relative_to(self.knowledge_dir.resolve()))
+                mtime = dest.stat().st_mtime
         elif content:
             doc_id = str(uuid.uuid4())[:8]
             filename = f"{time.strftime('%Y-%m-%d')}-{doc_id}.md"
@@ -286,6 +299,7 @@ class KnowledgeStore:
             file_path = self.knowledge_dir / rel_path
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_text(content)
+            mtime = file_path.stat().st_mtime
         else:
             raise ValueError("Either file_path or content must be provided")
 
@@ -297,8 +311,8 @@ class KnowledgeStore:
 
         self.conn.execute(
             """INSERT OR REPLACE INTO documents(id, file_path, type, project, title, status,
-               source, created, updated, content_hash, supersedes)
-               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               source, created, updated, content_hash, file_mtime, supersedes)
+               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 doc_id,
                 rel_path,
@@ -310,6 +324,7 @@ class KnowledgeStore:
                 fm.get("created", now),
                 fm.get("updated", now),
                 ch,
+                mtime,
                 fm.get("supersedes"),
             ),
         )
@@ -353,9 +368,89 @@ class KnowledgeStore:
         self.conn.commit()
         return doc_id
 
+    def _refresh_stale_docs(self) -> int:
+        """Check for stale or new docs and reindex them. Returns count of refreshed docs.
+
+        Compares file mtimes against stored file_mtime values. Files whose mtime
+        is newer than the stored value are candidates for reindexing. A content_hash
+        comparison avoids unnecessary reindexing when mtime changed but content didn't
+        (e.g., after `touch`). New files not yet indexed are also added. Indexed files
+        that no longer exist on disk are removed.
+        """
+        refreshed = 0
+
+        # Build a map of indexed file_path -> (content_hash, file_mtime, id)
+        rows = self.conn.execute(
+            "SELECT id, file_path, content_hash, file_mtime FROM documents"
+        ).fetchall()
+        indexed = {}
+        for row in rows:
+            indexed[row[1]] = {
+                "id": row[0],
+                "content_hash": row[2],
+                "file_mtime": row[3],
+            }
+
+        # Scan all markdown files in knowledge_dir
+        on_disk = set()
+        for md_file in self.knowledge_dir.rglob("*.md"):
+            if md_file.name.startswith("_"):
+                continue
+            try:
+                rel_path = str(md_file.relative_to(self.knowledge_dir.resolve()))
+            except ValueError:
+                continue
+            on_disk.add(rel_path)
+
+            current_mtime = md_file.stat().st_mtime
+            entry = indexed.get(rel_path)
+
+            if entry is None:
+                # New file — not yet indexed
+                try:
+                    self.add(file_path=md_file)
+                    refreshed += 1
+                except Exception:
+                    pass
+            elif entry["file_mtime"] is None or current_mtime > entry["file_mtime"]:
+                # Mtime is newer — check if content actually changed
+                content = md_file.read_text()
+                ch = _content_hash(content)
+                if ch != entry["content_hash"]:
+                    # Content changed — reindex
+                    try:
+                        self.add(file_path=md_file)
+                        refreshed += 1
+                    except Exception:
+                        pass
+                else:
+                    # Content unchanged — just update stored mtime
+                    self.conn.execute(
+                        "UPDATE documents SET file_mtime = ? WHERE id = ?",
+                        (current_mtime, entry["id"]),
+                    )
+                    self.conn.commit()
+
+        # Remove indexed docs whose files no longer exist
+        for rel_path, entry in indexed.items():
+            if rel_path not in on_disk:
+                doc_id = entry["id"]
+                self.conn.execute("DELETE FROM chunks WHERE document_id=?", (doc_id,))
+                self.conn.execute("DELETE FROM document_tags WHERE document_id=?", (doc_id,))
+                self.conn.execute(
+                    "DELETE FROM documents_fts WHERE rowid = (SELECT rowid FROM documents WHERE id=?)",
+                    (doc_id,),
+                )
+                self.conn.execute("DELETE FROM documents WHERE id=?", (doc_id,))
+                self.conn.commit()
+                refreshed += 1
+
+        return refreshed
+
     def search(self, query: str, limit: int = 10, doc_type: str | None = None,
                project: str | None = None) -> list[dict]:
         """FTS5 keyword search with BM25 ranking."""
+        self._refresh_stale_docs()
         sql = """
             SELECT d.*, bm25(documents_fts) as score
             FROM documents_fts fts
@@ -384,6 +479,7 @@ class KnowledgeStore:
         Falls back to FTS5 keyword search if sentence-transformers is unavailable
         or if no chunks have embeddings.
         """
+        self._refresh_stale_docs()
         if not self._embeddings_available:
             return self.search(query, limit=limit, doc_type=doc_type, project=project)
 
@@ -434,13 +530,34 @@ class KnowledgeStore:
         return [item[1] for item in scored[:limit]]
 
     def hybrid_search(self, query: str, limit: int = 10, doc_type: str | None = None,
-                      project: str | None = None, semantic_weight: float = 0.5) -> list[dict]:
+                      project: str | None = None, semantic_weight: float = 0.6,
+                      keyword_weight: float | None = None) -> list[dict]:
         """Hybrid search combining FTS5 keyword and semantic similarity.
 
-        Results are merged by document_id, with scores combined using
-        the semantic_weight parameter (0.0 = pure FTS5, 1.0 = pure semantic).
+        Runs both FTS5 keyword search and semantic search, normalizes each
+        score set to [0, 1] via min-max normalization, then combines them
+        with configurable weights (default: 0.4 keyword + 0.6 semantic).
+
+        Args:
+            query: Search query string.
+            limit: Maximum number of results to return.
+            doc_type: Optional document type filter.
+            project: Optional project filter.
+            semantic_weight: Weight for semantic scores (default 0.6).
+            keyword_weight: Weight for keyword scores.  If None, computed as
+                ``1.0 - semantic_weight``.
+
+        Returns:
+            List of result dicts, deduplicated by document, sorted by combined
+            score descending.  Each result includes ``score``, ``fts_score``,
+            and ``semantic_score`` keys (all in [0, 1]).
+
         Falls back to FTS5 if semantic search is unavailable.
         """
+        kw_weight = keyword_weight if keyword_weight is not None else (1.0 - semantic_weight)
+
+        # Note: freshness check happens inside search() and semantic_search()
+        # Run both FTS5 keyword and semantic searches with expanded limits
         fts_results = self.search(query, limit=limit * 2, doc_type=doc_type, project=project)
 
         if not self._embeddings_available:
@@ -453,22 +570,27 @@ class KnowledgeStore:
         if sem_results and "chunk_id" not in sem_results[0]:
             return fts_results[:limit]
 
-        # Normalize FTS scores (BM25 scores are negative, lower = better match)
-        fts_weight = 1.0 - semantic_weight
+        # --- Normalize FTS scores to [0, 1] ---
+        # BM25 scores are negative; more negative = better match.
         fts_by_doc: dict[str, float] = {}
         fts_data: dict[str, dict] = {}
         if fts_results:
-            # BM25 scores are negative; convert to 0-1 range
-            min_score = min(r["score"] for r in fts_results)
-            max_score = max(r["score"] for r in fts_results)
-            score_range = max_score - min_score if max_score != min_score else 1.0
+            raw_fts = [r["score"] for r in fts_results]
+            min_fts = min(raw_fts)
+            max_fts = max(raw_fts)
+            fts_range = max_fts - min_fts
             for r in fts_results:
-                # Invert and normalize: best BM25 (most negative) → highest score
-                normalized = (max_score - r["score"]) / score_range if score_range else 1.0
+                # Invert and normalize: most negative BM25 → 1.0, least negative → 0.0
+                if fts_range != 0:
+                    normalized = (max_fts - r["score"]) / fts_range
+                else:
+                    # Single result or all identical scores → give full score
+                    normalized = 1.0
                 fts_by_doc[r["id"]] = normalized
                 fts_data[r["id"]] = r
 
-        # Normalize semantic scores (already 0-1 range, higher = better)
+        # --- Normalize semantic scores to [0, 1] ---
+        # First, deduplicate by document keeping best chunk score.
         sem_by_doc: dict[str, float] = {}
         sem_data: dict[str, dict] = {}
         for r in sem_results:
@@ -478,14 +600,29 @@ class KnowledgeStore:
                 sem_by_doc[doc_id] = r["score"]
                 sem_data[doc_id] = r
 
-        # Merge scores
+        # Min-max normalize per-document semantic scores to [0, 1].
+        if sem_by_doc:
+            raw_sem = list(sem_by_doc.values())
+            min_sem = min(raw_sem)
+            max_sem = max(raw_sem)
+            sem_range = max_sem - min_sem
+            if sem_range != 0:
+                sem_by_doc = {
+                    doc_id: (score - min_sem) / sem_range
+                    for doc_id, score in sem_by_doc.items()
+                }
+            else:
+                # All identical scores → give full score
+                sem_by_doc = {doc_id: 1.0 for doc_id in sem_by_doc}
+
+        # --- Merge scores ---
         all_doc_ids = set(fts_by_doc.keys()) | set(sem_by_doc.keys())
         merged: list[tuple[float, dict]] = []
 
         for doc_id in all_doc_ids:
             fts_score = fts_by_doc.get(doc_id, 0.0)
             sem_score = sem_by_doc.get(doc_id, 0.0)
-            combined = fts_weight * fts_score + semantic_weight * sem_score
+            combined = kw_weight * fts_score + semantic_weight * sem_score
 
             # Use FTS result data if available, else reconstruct from semantic data
             if doc_id in fts_data:
