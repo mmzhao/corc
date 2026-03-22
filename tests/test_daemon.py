@@ -476,6 +476,44 @@ class TestProcessor:
         assert len(pr.findings) == 2
         assert "Uses SQLite WAL mode" in pr.findings
 
+    def test_process_rejects_double_completion(self, mutation_log, work_state, audit_log,
+                                                session_logger, tmp_project):
+        """Processor skips tasks that are already in completed state."""
+        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing")
+        mutation_log.append("task_started", {"attempt": 1}, reason="test", task_id="t1")
+        work_state.refresh()
+        task = work_state.get_task("t1")
+
+        result = AgentResult(output="Done!", exit_code=0, duration_s=1.0)
+
+        # First completion — should succeed
+        pr1 = process_completed(
+            task=task, result=result, attempt=1,
+            mutation_log=mutation_log, state=work_state,
+            audit_log=audit_log, session_logger=session_logger,
+            project_root=tmp_project,
+        )
+        assert pr1.passed is True
+        work_state.refresh()
+        assert work_state.get_task("t1")["status"] == "completed"
+
+        # Count mutations before second attempt
+        mutations_before = len(mutation_log.read_all())
+
+        # Second completion — should be skipped without writing a mutation
+        pr2 = process_completed(
+            task=task, result=result, attempt=2,
+            mutation_log=mutation_log, state=work_state,
+            audit_log=audit_log, session_logger=session_logger,
+            project_root=tmp_project,
+        )
+        assert pr2.passed is True
+        assert "already completed" in pr2.details[0][1]
+
+        # No new mutations should have been written
+        mutations_after = len(mutation_log.read_all())
+        assert mutations_after == mutations_before
+
 
 # ===========================================================================
 # Daemon loop tests

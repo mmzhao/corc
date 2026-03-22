@@ -48,6 +48,18 @@ def process_completed(
     task_id = task["id"]
     max_retries = task.get("max_retries", 3)
 
+    # Guard: skip if already completed (prevents duplicate completion mutations)
+    state.refresh()
+    current = state.get_task(task_id)
+    if current and current["status"] == "completed":
+        audit_log.log("task_completion_skipped", task_id=task_id,
+                      reason="already completed")
+        return ProcessResult(
+            task_id=task_id,
+            passed=True,
+            details=[(True, "Task already completed — skipped duplicate completion")],
+        )
+
     # Agent crashed or errored
     if result.exit_code != 0:
         error_msg = f"Agent exited with code {result.exit_code}"

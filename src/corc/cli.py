@@ -308,6 +308,10 @@ def task_complete(task_id, pr_url, findings):
         click.echo(f"Task {task_id} not found.")
         return
 
+    if t["status"] == "completed":
+        click.echo(f"Error: task {task_id} is already completed.", err=True)
+        sys.exit(1)
+
     parsed_findings = json.loads(findings) if findings else []
     data = {"pr_url": pr_url, "findings": parsed_findings}
 
