@@ -8,6 +8,8 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
+import json
+
 from corc.audit import AuditLog
 from corc.context import assemble_context
 from corc.dispatch import AgentDispatcher, AgentResult, Constraints
@@ -94,11 +96,56 @@ class Executor:
             constraints.allowed_tools, constraints.max_budget_usd,
         )
 
+        # Build streaming event callback for real-time logging
+        event_callback = self._make_event_callback(task["id"], attempt)
+
         # Submit to thread pool (non-blocking)
         future = self._pool.submit(
             self.dispatcher.dispatch, prompt, system_prompt, constraints,
+            event_callback=event_callback,
         )
         self._futures[future] = (task, attempt)
+
+    def _make_event_callback(self, task_id: str, attempt: int):
+        """Create a streaming event callback for a dispatch.
+
+        The returned callback:
+        1. Writes every event to the session log immediately (crash-safe).
+        2. Writes tool_use events to the audit log with task_id.
+        3. Writes assistant message events to the audit log for TUI visibility.
+        """
+        def callback(event):
+            event_type = event.get("type", "unknown")
+
+            # 1. Write every event to session log immediately
+            self.session_logger.log_stream_event(task_id, attempt, event)
+
+            # 2. Write tool_use events to audit log
+            if event_type == "tool_use":
+                tool = event.get("tool", {})
+                self.audit_log.log(
+                    "tool_use",
+                    task_id=task_id,
+                    tool_name=tool.get("name", "unknown"),
+                    tool_input=json.dumps(tool.get("input", {}), separators=(",", ":")),
+                )
+
+            # 3. Write assistant messages to audit log for TUI visibility
+            elif event_type == "assistant":
+                message = event.get("message", {})
+                content_blocks = message.get("content", [])
+                text_parts = []
+                for block in content_blocks:
+                    if block.get("type") == "text":
+                        text_parts.append(block["text"])
+                if text_parts:
+                    self.audit_log.log(
+                        "assistant_message",
+                        task_id=task_id,
+                        content="\n".join(text_parts),
+                    )
+
+        return callback
 
     def poll_completed(self) -> list[CompletedTask]:
         """Check for completed dispatches. Non-blocking.

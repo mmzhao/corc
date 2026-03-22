@@ -36,6 +36,19 @@ class SessionLogger:
         self.log_entry(task_id, attempt, "output", output,
                        exit_code=exit_code, duration_s=duration_s)
 
+    def log_stream_event(self, task_id: str, attempt: int, event: dict):
+        """Log a single streaming event to the session log.
+
+        Each event is written immediately (one JSONL line per call) for
+        crash safety — if the process dies mid-stream, all previously
+        written events are preserved.
+        """
+        self.log_entry(
+            task_id, attempt, "stream_event",
+            json.dumps(event, separators=(",", ":")),
+            stream_type=event.get("type", "unknown"),
+        )
+
     def log_validation(self, task_id: str, attempt: int, passed: bool, details: str):
         self.log_entry(task_id, attempt, "validation", details, passed=passed)
 

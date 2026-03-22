@@ -37,7 +37,7 @@ class FailNTimesDispatcher(AgentDispatcher):
         self.dispatched: list[tuple[str, str]] = []
 
     def dispatch(self, prompt: str, system_prompt: str, constraints: Constraints,
-                 pid_callback=None) -> AgentResult:
+                 pid_callback=None, event_callback=None) -> AgentResult:
         self.call_count += 1
         self.dispatched.append((prompt, system_prompt))
         if self.call_count <= self.fail_count:
@@ -62,7 +62,7 @@ class AlwaysFailDispatcher(AgentDispatcher):
         self.dispatched: list[tuple[str, str]] = []
 
     def dispatch(self, prompt: str, system_prompt: str, constraints: Constraints,
-                 pid_callback=None) -> AgentResult:
+                 pid_callback=None, event_callback=None) -> AgentResult:
         self.call_count += 1
         self.dispatched.append((prompt, system_prompt))
         return AgentResult(
@@ -80,7 +80,7 @@ class TimeoutDispatcher(AgentDispatcher):
         self.dispatched: list[tuple[str, str]] = []
 
     def dispatch(self, prompt: str, system_prompt: str, constraints: Constraints,
-                 pid_callback=None) -> AgentResult:
+                 pid_callback=None, event_callback=None) -> AgentResult:
         self.call_count += 1
         self.dispatched.append((prompt, system_prompt))
         return AgentResult(

@@ -139,7 +139,8 @@ class MockDispatcher(AgentDispatcher):
     def set_result_for(self, prompt_substring, result):
         self._results[prompt_substring] = result
 
-    def dispatch(self, prompt, system_prompt, constraints, pid_callback=None):
+    def dispatch(self, prompt, system_prompt, constraints,
+                 pid_callback=None, event_callback=None):
         self.dispatched.append((prompt, system_prompt, constraints))
         if self.delay:
             time.sleep(self.delay)

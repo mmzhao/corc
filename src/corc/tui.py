@@ -32,6 +32,9 @@ EVENT_STYLES = {
     "escalation": "red bold",
     "pause": "red",
     "resume": "green",
+    # Streaming event types — real-time agent visibility
+    "tool_use": "magenta",
+    "assistant_message": "blue",
 }
 
 
@@ -81,6 +84,11 @@ def build_event_panel(events: list[dict], max_events: int = 20) -> Panel:
                 extra_parts.append(f"exit={e['exit_code']}")
             if e.get("name"):
                 extra_parts.append(e["name"])
+            # Streaming event extras: tool name and assistant content
+            if e.get("tool_name"):
+                extra_parts.append(f"-> {e['tool_name']}")
+            if e.get("tool_input"):
+                extra_parts.append(e["tool_input"])
             extra = " ".join(extra_parts)
 
             line = Text()
@@ -90,6 +98,15 @@ def build_event_panel(events: list[dict], max_events: int = 20) -> Panel:
             if extra:
                 line.append(f"  {extra}", style="dim")
             lines.append(line)
+
+            # Show full assistant message content on subsequent lines
+            # (verbose output — no truncation)
+            if e.get("content") and etype == "assistant_message":
+                for content_line in e["content"].split("\n"):
+                    detail = Text()
+                    detail.append("                           ", style="dim")
+                    detail.append(content_line, style="blue dim")
+                    lines.append(detail)
 
         content = Text("\n").join(lines)
 

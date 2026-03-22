@@ -2,14 +2,20 @@
 
 Abstracts agent dispatch behind an interface so the underlying LLM CLI
 can be swapped (Claude Code → Gemini → Codex) by implementing one class.
+
+Streaming dispatch: ClaudeCodeDispatcher uses --output-format stream-json
+to parse stdout line-by-line as JSON events, enabling real-time visibility
+into agent reasoning and tool calls.
 """
 
 import json
 import subprocess
+import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 
 @dataclass
@@ -28,24 +34,31 @@ class AgentResult:
     duration_s: float
 
 
+# Type alias for the streaming event callback
+EventCallback = Callable[[dict], None]
+
+
 class AgentDispatcher(ABC):
     @abstractmethod
     def dispatch(self, prompt: str, system_prompt: str, constraints: Constraints,
-                 pid_callback=None) -> AgentResult:
+                 pid_callback=None, event_callback: EventCallback | None = None) -> AgentResult:
         """Dispatch an agent with the given prompt and constraints.
 
         Args:
             pid_callback: Optional callable(pid: int) called with the process
                 PID once the agent subprocess starts. Used for PID tracking
                 during reconciliation on restart.
+            event_callback: Optional callable(event: dict) called for each
+                streaming event parsed from the agent's stdout. Enables
+                real-time session logging, audit logging, and TUI updates.
         """
         ...
 
 
 class ClaudeCodeDispatcher(AgentDispatcher):
     def dispatch(self, prompt: str, system_prompt: str, constraints: Constraints,
-                 pid_callback=None) -> AgentResult:
-        cmd = ["claude", "-p", prompt]
+                 pid_callback=None, event_callback: EventCallback | None = None) -> AgentResult:
+        cmd = ["claude", "-p", prompt, "--output-format", "stream-json"]
 
         if system_prompt:
             cmd.extend(["--system-prompt", system_prompt])
@@ -57,37 +70,88 @@ class ClaudeCodeDispatcher(AgentDispatcher):
             cmd.extend(["--max-turns", str(constraints.max_turns)])
 
         start = time.time()
+        timed_out = False
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        # Report PID so it can be tracked for reconciliation
+        if pid_callback:
+            pid_callback(proc.pid)
+
+        # Read stderr in a background thread to prevent pipe deadlock
+        # (stdout is read line-by-line in the main loop; if stderr fills
+        # its pipe buffer the process would block writing to it)
+        stderr_chunks: list[str] = []
+
+        def _drain_stderr():
+            for line in proc.stderr:
+                stderr_chunks.append(line)
+
+        stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        stderr_thread.start()
+
+        # Watchdog: kill process if it exceeds timeout
+        def _kill_on_timeout():
+            nonlocal timed_out
+            timed_out = True
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+        timer = threading.Timer(1800, _kill_on_timeout)
+        timer.start()
+
+        result_text = ""
         try:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
+            # Read stdout line-by-line for real-time streaming.
+            # iter(readline, '') avoids internal buffering that
+            # `for line in proc.stdout` can introduce.
+            for line in iter(proc.stdout.readline, ""):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
 
-            # Report PID so it can be tracked for reconciliation
-            if pid_callback:
-                pid_callback(proc.pid)
+                if event_callback:
+                    event_callback(event)
 
-            stdout, stderr = proc.communicate(timeout=1800)
-            duration = time.time() - start
-            output = stdout or ""
-            if stderr:
-                output += "\n--- STDERR ---\n" + stderr
-            return AgentResult(
-                output=output,
-                exit_code=proc.returncode,
-                duration_s=duration,
-            )
-        except subprocess.TimeoutExpired:
-            proc.kill()
+                # Extract final output from the result event
+                if event.get("type") == "result":
+                    result_text = event.get("result", "")
+
             proc.wait()
-            duration = time.time() - start
+        finally:
+            timer.cancel()
+
+        stderr_thread.join(timeout=5)
+
+        if timed_out:
             return AgentResult(
                 output="[TIMEOUT: agent exceeded 1800s limit]",
                 exit_code=-1,
-                duration_s=duration,
+                duration_s=time.time() - start,
             )
+
+        duration = time.time() - start
+        output = result_text
+        stderr = "".join(stderr_chunks)
+        if stderr:
+            output += "\n--- STDERR ---\n" + stderr
+
+        return AgentResult(
+            output=output,
+            exit_code=proc.returncode,
+            duration_s=duration,
+        )
 
 
 def get_dispatcher(provider: str = "claude-code") -> AgentDispatcher:

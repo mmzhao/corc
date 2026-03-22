@@ -270,9 +270,36 @@ def dispatch(task_id, provider):
 
     click.echo(f"Dispatching {task_id} (attempt {attempt}) via {provider}...")
 
-    # Dispatch
+    # Build streaming event callback for real-time CLI output
+    def event_callback(event):
+        event_type = event.get("type", "unknown")
+
+        # Write every event to session log immediately
+        sl.log_stream_event(task_id, attempt, event)
+
+        # Write tool_use events to audit log
+        if event_type == "tool_use":
+            tool = event.get("tool", {})
+            al.log("tool_use", task_id=task_id,
+                   tool_name=tool.get("name", "unknown"),
+                   tool_input=json.dumps(tool.get("input", {}), separators=(",", ":")))
+            click.echo(f"  > {tool.get('name', '?')}: {json.dumps(tool.get('input', {}))}")
+
+        elif event_type == "assistant":
+            message = event.get("message", {})
+            for block in message.get("content", []):
+                if block.get("type") == "text":
+                    click.echo(block["text"])
+
+        elif event_type == "tool_result":
+            content = event.get("content", event.get("tool", {}).get("content", ""))
+            if isinstance(content, str) and content:
+                click.echo(f"  < {content}")
+
+    # Dispatch with streaming
     dispatcher = get_dispatcher(provider)
-    result = dispatcher.dispatch(prompt, system_prompt, constraints)
+    result = dispatcher.dispatch(prompt, system_prompt, constraints,
+                                  event_callback=event_callback)
 
     # Log result
     sl.log_output(task_id, attempt, result.output, result.exit_code, result.duration_s)
@@ -289,9 +316,9 @@ def dispatch(task_id, provider):
         al.log("task_failed", task_id=task_id, attempt=attempt, exit_code=result.exit_code)
         return
 
-    # Output truncated preview
+    # Output preview
     output_preview = result.output[:500] + "..." if len(result.output) > 500 else result.output
-    click.echo(f"\n--- Output preview ---\n{output_preview}\n---")
+    click.echo(f"\n--- Output ---\n{output_preview}\n---")
 
     click.echo(f"\nTask dispatched. Review output and run: corc task complete {task_id}")
 
