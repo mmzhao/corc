@@ -21,3 +21,6 @@ data/knowledge.db
 
 # OS
 .DS_Store
+.corc/daemon.pid
+data/state.db-shm
+data/state.db-wal
