@@ -1,8 +1,10 @@
-"""Knowledge store — markdown files + FTS5 SQLite index.
+"""Knowledge store — markdown files + FTS5 SQLite index + semantic search.
 
 Markdown files in knowledge/ are the source of truth.
 SQLite is a derived index, rebuildable via reindex.
-Phase 0: FTS5 keyword search only. Semantic search added in Phase 1A.
+FTS5 keyword search is always available.
+Semantic search (sentence-transformers) is used when available, with
+graceful fallback to FTS5-only when not installed.
 """
 
 import hashlib
@@ -13,6 +15,8 @@ import uuid
 from pathlib import Path
 
 import yaml
+
+from corc import embeddings
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (
@@ -47,6 +51,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     heading TEXT,
     content TEXT NOT NULL,
     token_estimate INTEGER NOT NULL,
+    embedding BLOB,
     FOREIGN KEY (document_id) REFERENCES documents(id),
     UNIQUE(document_id, chunk_index)
 );
@@ -249,6 +254,16 @@ class KnowledgeStore:
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self._migrate_embedding_column()
+        self._embeddings_available = embeddings.is_available()
+
+    def _migrate_embedding_column(self) -> None:
+        """Add embedding column to chunks table if it doesn't exist (migration)."""
+        cursor = self.conn.execute("PRAGMA table_info(chunks)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if "embedding" not in columns:
+            self.conn.execute("ALTER TABLE chunks ADD COLUMN embedding BLOB")
+            self.conn.commit()
 
     def add(self, file_path: Path | None = None, content: str | None = None,
             doc_type: str = "note", project: str | None = None, tags: list[str] | None = None) -> str:
@@ -317,10 +332,22 @@ class KnowledgeStore:
         # Chunks
         self.conn.execute("DELETE FROM chunks WHERE document_id=?", (doc_id,))
         chunks = chunk_markdown(body)
+
+        # Generate embeddings if sentence-transformers is available
+        chunk_embeddings: list[bytes | None] = [None] * len(chunks)
+        if self._embeddings_available:
+            try:
+                texts = [c["content"] for c in chunks]
+                vecs = embeddings.encode(texts)
+                chunk_embeddings = [embeddings.embedding_to_blob(v) for v in vecs]
+            except Exception:
+                # If embedding fails for any reason, continue without embeddings
+                chunk_embeddings = [None] * len(chunks)
+
         for idx, chunk in enumerate(chunks):
             self.conn.execute(
-                "INSERT INTO chunks(document_id, chunk_index, heading, content, token_estimate) VALUES(?, ?, ?, ?, ?)",
-                (doc_id, idx, chunk["heading"], chunk["content"], chunk["token_estimate"]),
+                "INSERT INTO chunks(document_id, chunk_index, heading, content, token_estimate, embedding) VALUES(?, ?, ?, ?, ?, ?)",
+                (doc_id, idx, chunk["heading"], chunk["content"], chunk["token_estimate"], chunk_embeddings[idx]),
             )
 
         self.conn.commit()
@@ -349,6 +376,143 @@ class KnowledgeStore:
 
         rows = self.conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
+
+    def semantic_search(self, query: str, limit: int = 10, doc_type: str | None = None,
+                        project: str | None = None) -> list[dict]:
+        """Semantic search using sentence-transformers embeddings and cosine similarity.
+
+        Falls back to FTS5 keyword search if sentence-transformers is unavailable
+        or if no chunks have embeddings.
+        """
+        if not self._embeddings_available:
+            return self.search(query, limit=limit, doc_type=doc_type, project=project)
+
+        try:
+            query_vec = embeddings.encode_single(query)
+        except Exception:
+            # Encoding failed — fall back to FTS5
+            return self.search(query, limit=limit, doc_type=doc_type, project=project)
+
+        # Fetch all chunks that have embeddings, with document metadata
+        sql = """
+            SELECT c.id as chunk_id, c.document_id, c.chunk_index, c.heading,
+                   c.content as chunk_content, c.token_estimate, c.embedding,
+                   d.type, d.project, d.title, d.status, d.file_path, d.source,
+                   d.created, d.updated
+            FROM chunks c
+            JOIN documents d ON c.document_id = d.id
+            WHERE c.embedding IS NOT NULL AND d.status = 'active'
+        """
+        params: list = []
+        if doc_type:
+            sql += " AND d.type = ?"
+            params.append(doc_type)
+        if project:
+            sql += " AND d.project = ?"
+            params.append(project)
+
+        rows = self.conn.execute(sql, params).fetchall()
+
+        if not rows:
+            # No embeddings stored — fall back to FTS5
+            return self.search(query, limit=limit, doc_type=doc_type, project=project)
+
+        # Compute cosine similarity for each chunk
+        scored: list[tuple[float, dict]] = []
+        for row in rows:
+            row_dict = dict(row)
+            chunk_vec = embeddings.blob_to_embedding(row_dict["embedding"])
+            sim = embeddings.cosine_similarity(query_vec, chunk_vec)
+            row_dict["score"] = sim
+            # Remove the raw embedding blob from results
+            del row_dict["embedding"]
+            scored.append((sim, row_dict))
+
+        # Sort by similarity descending, take top-N
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        return [item[1] for item in scored[:limit]]
+
+    def hybrid_search(self, query: str, limit: int = 10, doc_type: str | None = None,
+                      project: str | None = None, semantic_weight: float = 0.5) -> list[dict]:
+        """Hybrid search combining FTS5 keyword and semantic similarity.
+
+        Results are merged by document_id, with scores combined using
+        the semantic_weight parameter (0.0 = pure FTS5, 1.0 = pure semantic).
+        Falls back to FTS5 if semantic search is unavailable.
+        """
+        fts_results = self.search(query, limit=limit * 2, doc_type=doc_type, project=project)
+
+        if not self._embeddings_available:
+            return fts_results[:limit]
+
+        sem_results = self.semantic_search(query, limit=limit * 2, doc_type=doc_type, project=project)
+
+        # If semantic search fell back to FTS5, just return FTS results
+        # (detected by checking if results have 'chunk_id' key)
+        if sem_results and "chunk_id" not in sem_results[0]:
+            return fts_results[:limit]
+
+        # Normalize FTS scores (BM25 scores are negative, lower = better match)
+        fts_weight = 1.0 - semantic_weight
+        fts_by_doc: dict[str, float] = {}
+        fts_data: dict[str, dict] = {}
+        if fts_results:
+            # BM25 scores are negative; convert to 0-1 range
+            min_score = min(r["score"] for r in fts_results)
+            max_score = max(r["score"] for r in fts_results)
+            score_range = max_score - min_score if max_score != min_score else 1.0
+            for r in fts_results:
+                # Invert and normalize: best BM25 (most negative) → highest score
+                normalized = (max_score - r["score"]) / score_range if score_range else 1.0
+                fts_by_doc[r["id"]] = normalized
+                fts_data[r["id"]] = r
+
+        # Normalize semantic scores (already 0-1 range, higher = better)
+        sem_by_doc: dict[str, float] = {}
+        sem_data: dict[str, dict] = {}
+        for r in sem_results:
+            doc_id = r["document_id"]
+            # Keep best chunk score per document
+            if doc_id not in sem_by_doc or r["score"] > sem_by_doc[doc_id]:
+                sem_by_doc[doc_id] = r["score"]
+                sem_data[doc_id] = r
+
+        # Merge scores
+        all_doc_ids = set(fts_by_doc.keys()) | set(sem_by_doc.keys())
+        merged: list[tuple[float, dict]] = []
+
+        for doc_id in all_doc_ids:
+            fts_score = fts_by_doc.get(doc_id, 0.0)
+            sem_score = sem_by_doc.get(doc_id, 0.0)
+            combined = fts_weight * fts_score + semantic_weight * sem_score
+
+            # Use FTS result data if available, else reconstruct from semantic data
+            if doc_id in fts_data:
+                result = dict(fts_data[doc_id])
+                result["score"] = combined
+                result["fts_score"] = fts_score
+                result["semantic_score"] = sem_score
+            else:
+                sr = sem_data[doc_id]
+                result = {
+                    "id": doc_id,
+                    "file_path": sr["file_path"],
+                    "type": sr["type"],
+                    "project": sr["project"],
+                    "title": sr["title"],
+                    "status": sr["status"],
+                    "source": sr["source"],
+                    "created": sr["created"],
+                    "updated": sr["updated"],
+                    "score": combined,
+                    "fts_score": fts_score,
+                    "semantic_score": sem_score,
+                }
+            merged.append((combined, result))
+
+        merged.sort(key=lambda x: x[0], reverse=True)
+        return [item[1] for item in merged[:limit]]
 
     def get(self, doc_id: str) -> dict | None:
         row = self.conn.execute("SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone()
