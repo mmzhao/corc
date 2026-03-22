@@ -28,5 +28,8 @@ corc = "corc.cli:cli"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+corc = ["_builtin_roles/*.yaml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

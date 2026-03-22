@@ -18,6 +18,8 @@ from corc.dag import render_ascii_dag, render_mermaid
 from corc.context import assemble_context
 from corc.daemon import Daemon, stop_daemon
 from corc.dispatch import get_dispatcher, Constraints
+from corc.roles import RoleLoader, constraints_from_role, get_system_prompt_for_role
+from corc.worktree import WorktreeError, create_worktree, merge_worktree, remove_worktree
 from corc.validate import run_validations
 from corc.templates import get_template, render_template, list_types
 from corc.lint_done_when import lint_done_when
@@ -250,10 +252,19 @@ def dispatch(task_id, provider):
     context = assemble_context(t, paths["root"])
     click.echo(f"Assembled context: {len(context)} chars")
 
-    # Determine constraints from role
-    constraints = Constraints()
-    role = t.get("role", "implementer")
-    system_prompt = f"You are a {role} working on task '{t['name']}'.\n\n{context}"
+    # Determine constraints from role config
+    role_name = t.get("role", "implementer")
+    role_loader = RoleLoader(paths["root"])
+    try:
+        role_config = role_loader.load(role_name)
+        constraints = constraints_from_role(role_config)
+        system_prompt = get_system_prompt_for_role(role_config, t, context)
+        click.echo(f"Role: {role_config.name} ({role_config.description})")
+    except ValueError:
+        # Fallback if role YAML not found
+        constraints = Constraints()
+        system_prompt = f"You are a {role_name} working on task '{t['name']}'.\n\n{context}"
+        click.echo(f"Role: {role_name} (no YAML config found, using defaults)")
 
     prompt = (
         f"Complete the following task.\n\n"
@@ -265,9 +276,30 @@ def dispatch(task_id, provider):
     # Update state
     attempt = sl.get_latest_attempt(task_id) + 1
     ml.append("task_started", {"attempt": attempt}, reason="Dispatched via CLI", task_id=task_id)
-    al.log("task_dispatched", task_id=task_id, role=role, attempt=attempt)
+    al.log("task_dispatched", task_id=task_id, role=role_name, attempt=attempt)
     sl.log_dispatch(task_id, attempt, prompt, system_prompt, constraints.allowed_tools, constraints.max_budget_usd)
 
+    # Create git worktree for agent isolation
+    worktree_path = None
+    try:
+        worktree_path, branch_name = create_worktree(paths["root"], task_id, attempt)
+        click.echo(f"Created worktree: {worktree_path} (branch: {branch_name})")
+        al.log("worktree_created", task_id=task_id,
+               worktree_path=str(worktree_path), branch_name=branch_name)
+    except (WorktreeError, Exception) as e:
+        click.echo(f"Warning: Could not create worktree ({e}), running in project root.", err=True)
+
+    # Create agent record
+    import uuid as _uuid
+    agent_id = f"agent-{_uuid.uuid4().hex[:8]}"
+    ml.append("agent_created", {
+        "id": agent_id,
+        "role": role,
+        "task_id": task_id,
+        "worktree_path": str(worktree_path) if worktree_path else None,
+    }, reason="Agent created for CLI dispatch")
+
+    cwd = str(worktree_path) if worktree_path else None
     click.echo(f"Dispatching {task_id} (attempt {attempt}) via {provider}...")
 
     # Build streaming event callback for real-time CLI output
@@ -296,10 +328,10 @@ def dispatch(task_id, provider):
             if isinstance(content, str) and content:
                 click.echo(f"  < {content}")
 
-    # Dispatch with streaming
+    # Dispatch with streaming — agent runs in worktree if available
     dispatcher = get_dispatcher(provider)
     result = dispatcher.dispatch(prompt, system_prompt, constraints,
-                                  event_callback=event_callback)
+                                  event_callback=event_callback, cwd=cwd)
 
     # Log result
     sl.log_output(task_id, attempt, result.output, result.exit_code, result.duration_s)
@@ -308,6 +340,26 @@ def dispatch(task_id, provider):
 
     click.echo(f"Agent finished in {result.duration_s:.1f}s (exit code {result.exit_code})")
     click.echo(f"Session log: {sl.session_path(task_id, attempt)}")
+
+    # Merge worktree changes and clean up
+    if worktree_path:
+        try:
+            merged = merge_worktree(paths["root"], worktree_path)
+            if merged:
+                click.echo(f"Merged worktree changes from {branch_name}")
+                al.log("worktree_merged", task_id=task_id, worktree_path=str(worktree_path))
+            else:
+                click.echo("Warning: Merge conflict — manual resolution needed.", err=True)
+                al.log("worktree_merge_conflict", task_id=task_id, worktree_path=str(worktree_path))
+        except Exception as e:
+            click.echo(f"Warning: Merge failed ({e})", err=True)
+
+        try:
+            remove_worktree(paths["root"], worktree_path)
+            click.echo(f"Cleaned up worktree: {worktree_path}")
+            al.log("worktree_removed", task_id=task_id, worktree_path=str(worktree_path))
+        except Exception as e:
+            click.echo(f"Warning: Worktree cleanup failed ({e})", err=True)
 
     if result.exit_code != 0:
         click.echo("Agent exited with error.")
@@ -806,6 +858,76 @@ def escalation_resolve(escalation_id, resolution, unblock):
 
     ws.refresh()
     click.echo(f"Escalation {escalation_id} resolved.")
+
+
+# --- Roles ---
+
+@cli.group()
+def role():
+    """Manage agent roles."""
+    pass
+
+
+@role.command("list")
+def role_list():
+    """List all available roles."""
+    paths = get_paths()
+    loader = RoleLoader(paths["root"])
+    roles = loader.list_roles()
+
+    if not roles:
+        click.echo("No roles found.")
+        return
+
+    for r in roles:
+        click.echo(f"  {r['name']:<25} {r['description']:<60} [{r['source']}]")
+
+
+@role.command("show")
+@click.argument("name")
+def role_show(name):
+    """Show full details of a role."""
+    paths = get_paths()
+    loader = RoleLoader(paths["root"])
+
+    try:
+        rc = loader.load(name)
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Name: {rc.name}")
+    click.echo(f"Description: {rc.description}")
+    click.echo(f"Extends: {rc.extends or '(none)'}")
+    click.echo(f"Knowledge write access: {rc.knowledge_write_access}")
+    click.echo(f"Allowed tools: {', '.join(rc.allowed_tools)}")
+    click.echo(f"Max budget (USD): {rc.max_budget_usd}")
+    click.echo(f"Max turns: {rc.max_turns}")
+    if rc.source_path:
+        click.echo(f"Source: {rc.source_path}")
+    click.echo(f"\nSystem prompt:\n{rc.system_prompt}")
+
+
+@role.command("validate")
+@click.argument("name")
+def role_validate(name):
+    """Validate a role configuration."""
+    paths = get_paths()
+    loader = RoleLoader(paths["root"])
+
+    result = loader.validate(name)
+    if result.valid:
+        click.echo(f"Role '{name}' is valid.")
+    else:
+        click.echo(f"Role '{name}' has errors:", err=True)
+        for err in result.errors:
+            click.echo(f"  ERROR: {err}", err=True)
+
+    for warn in result.warnings:
+        click.echo(f"  WARNING: {warn}", err=True)
+
+    if not result.valid:
+        sys.exit(1)
 
 
 # --- Self-test ---
