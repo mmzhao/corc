@@ -16,6 +16,7 @@ from corc.knowledge import KnowledgeStore
 from corc.context import assemble_context
 from corc.dispatch import get_dispatcher, Constraints
 from corc.validate import run_validations
+from corc.templates import get_template, render_template, list_types
 
 
 def _get_all():
@@ -307,15 +308,22 @@ def knowledge_add(file_path, doc_type, project, tags):
 @click.option("--limit", default=10)
 @click.option("--type", "doc_type", default=None)
 @click.option("--project", default=None)
-def knowledge_search(query, limit, doc_type, project):
-    """Search the knowledge store."""
+@click.option("--mode", type=click.Choice(["hybrid", "keyword", "semantic"]),
+              default="hybrid", help="Search mode (default: hybrid)")
+def knowledge_search(query, limit, doc_type, project, mode):
+    """Search the knowledge store (hybrid search by default)."""
     _, _, _, _, _, ks = _get_all()
-    results = ks.search(query, limit=limit, doc_type=doc_type, project=project)
+    if mode == "keyword":
+        results = ks.search(query, limit=limit, doc_type=doc_type, project=project)
+    elif mode == "semantic":
+        results = ks.semantic_search(query, limit=limit, doc_type=doc_type, project=project)
+    else:
+        results = ks.hybrid_search(query, limit=limit, doc_type=doc_type, project=project)
     if not results:
         click.echo("No results.")
         return
     for r in results:
-        click.echo(f"  [{r.get('type', '?'):>12}] {r['id']}  {r['title']}  (score: {r.get('score', 'N/A')})")
+        click.echo(f"  [{r.get('type', '?'):>12}] {r['id']}  {r['title']}  (score: {r.get('score', 'N/A'):.4f})")
 
 
 @knowledge.command("get")
@@ -351,6 +359,37 @@ def knowledge_stats():
     click.echo(f"Total: {stats['total']} documents")
     for t, c in stats.get("by_type", {}).items():
         click.echo(f"  {t}: {c}")
+
+
+# --- Templates ---
+
+@cli.command("template")
+@click.argument("type_name")
+@click.option("--title", default=None, help="Document title for rendered template")
+@click.option("--project", default=None, help="Project name for rendered template")
+@click.option("--render", is_flag=True, help="Render with generated ID and timestamps")
+def template_cmd(type_name, title, project, render):
+    """Output a document template for TYPE.
+
+    TYPE is one of: decision, task-outcome, architecture, repo-context, research.
+    """
+    try:
+        if render:
+            output = render_template(
+                type_name,
+                title=title or "Untitled",
+                project=project or "",
+                project_root=get_paths()["root"],
+            )
+        else:
+            output = get_template(type_name, project_root=get_paths()["root"])
+        click.echo(output, nl=False)
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    except FileNotFoundError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
 
 
 # --- Watch (TUI v0) ---
