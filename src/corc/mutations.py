@@ -25,6 +25,8 @@ MUTATION_TYPES = {
     "agent_updated",
     "pause",
     "resume",
+    "escalation_created",
+    "escalation_resolved",
 }
 
 REQUIRED_FIELDS = {"seq", "ts", "type", "data", "reason"}

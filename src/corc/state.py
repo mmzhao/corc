@@ -42,6 +42,21 @@ CREATE TABLE IF NOT EXISTS agents (
     last_activity TEXT
 );
 
+CREATE TABLE IF NOT EXISTS escalations (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    task_name TEXT,
+    error TEXT,
+    attempts INTEGER,
+    session_log_path TEXT,
+    suggested_actions TEXT DEFAULT '[]',
+    done_when TEXT,
+    status TEXT DEFAULT 'pending',
+    resolution TEXT,
+    created TEXT NOT NULL,
+    resolved TEXT
+);
+
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT
@@ -49,6 +64,7 @@ CREATE TABLE IF NOT EXISTS meta (
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
+CREATE INDEX IF NOT EXISTS idx_escalations_status ON escalations(status);
 """
 
 
@@ -167,6 +183,28 @@ class WorkState:
                 self.conn.execute(
                     f"UPDATE agents SET {', '.join(updates)} WHERE id=?", params
                 )
+        elif t == "escalation_created":
+            self.conn.execute(
+                """INSERT OR REPLACE INTO escalations(id, task_id, task_name, error,
+                   attempts, session_log_path, suggested_actions, done_when, status, created)
+                   VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
+                (
+                    data["escalation_id"],
+                    data["task_id"],
+                    data.get("task_name", ""),
+                    data.get("error", ""),
+                    data.get("attempts", 0),
+                    data.get("session_log_path", ""),
+                    json.dumps(data.get("suggested_actions", [])),
+                    data.get("done_when", ""),
+                    entry["ts"],
+                ),
+            )
+        elif t == "escalation_resolved":
+            self.conn.execute(
+                "UPDATE escalations SET status='resolved', resolution=?, resolved=? WHERE id=?",
+                (data.get("resolution", ""), entry["ts"], data["escalation_id"]),
+            )
         elif t in ("pause", "resume"):
             pass  # Pause state tracked via .corc/pause.lock, not SQLite
 
@@ -230,6 +268,36 @@ class WorkState:
             rows = self.conn.execute("SELECT * FROM agents").fetchall()
         return [dict(r) for r in rows]
 
+    def list_escalations(self, status: str | None = None) -> list[dict]:
+        """List escalations, optionally filtered by status."""
+        if status:
+            rows = self.conn.execute(
+                "SELECT * FROM escalations WHERE status=? ORDER BY created", (status,)
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM escalations ORDER BY created"
+            ).fetchall()
+        return [self._escalation_to_dict(r) for r in rows]
+
+    def get_escalation(self, escalation_id: str) -> dict | None:
+        """Get an escalation by ID."""
+        row = self.conn.execute(
+            "SELECT * FROM escalations WHERE id=?", (escalation_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return self._escalation_to_dict(row)
+
+    def _escalation_to_dict(self, row: sqlite3.Row) -> dict:
+        d = dict(row)
+        if d.get("suggested_actions") and isinstance(d["suggested_actions"], str):
+            try:
+                d["suggested_actions"] = json.loads(d["suggested_actions"])
+            except json.JSONDecodeError:
+                pass
+        return d
+
     def rebuild(self):
         """Full rebuild: clear all data and replay entire mutation log.
 
@@ -238,6 +306,7 @@ class WorkState:
         """
         self.conn.execute("DELETE FROM tasks")
         self.conn.execute("DELETE FROM agents")
+        self.conn.execute("DELETE FROM escalations")
         self.conn.execute("DELETE FROM meta")
         self.conn.commit()
 

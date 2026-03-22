@@ -17,6 +17,7 @@ from corc.executor import Executor
 from corc.mutations import MutationLog
 from corc.pause import is_paused
 from corc.processor import process_completed
+from corc.retry import RetryPolicy, create_escalation
 from corc.scheduler import get_ready_tasks
 from corc.sessions import SessionLogger
 from corc.state import WorkState
@@ -41,6 +42,7 @@ class Daemon:
         poll_interval: float = 5.0,
         task_id: str | None = None,
         once: bool = False,
+        retry_policy: RetryPolicy | None = None,
     ):
         self.state = state
         self.mutation_log = mutation_log
@@ -51,6 +53,7 @@ class Daemon:
         self.poll_interval = poll_interval
         self.target_task_id = task_id
         self.once = once
+        self.retry_policy = retry_policy or RetryPolicy()
         self._running = False
         self._pid_file = self.project_root / ".corc" / "daemon.pid"
         self._tasks_completed = 0
@@ -110,7 +113,7 @@ class Daemon:
 
         # 4. Processor: validate and update state
         for item in completed:
-            process_completed(
+            proc_result = process_completed(
                 task=item.task,
                 result=item.result,
                 attempt=item.attempt,
@@ -120,7 +123,54 @@ class Daemon:
                 session_logger=self.session_logger,
                 project_root=self.project_root,
             )
+
+            if not proc_result.passed:
+                # Handle retry or escalation
+                self._handle_failure(item.task, item.attempt, item.result)
+
             self._tasks_completed += 1
+
+    def _handle_failure(self, task: dict, attempt: int, result):
+        """Handle a failed task: retry if allowed, otherwise escalate.
+
+        If the retry policy allows more attempts, resets the task to pending
+        so it will be picked up by the scheduler on the next tick.
+        If retries are exhausted, creates an escalation record.
+        """
+        task_id = task["id"]
+
+        if self.retry_policy.should_retry(attempt):
+            # Reset task to pending for retry
+            self.mutation_log.append(
+                "task_updated",
+                {"status": "pending"},
+                reason=f"Retry {attempt + 1}/{self.retry_policy.max_retries + 1}: resetting to pending",
+                task_id=task_id,
+            )
+            self.audit_log.log(
+                "task_retry",
+                task_id=task_id,
+                attempt=attempt,
+                next_attempt=attempt + 1,
+            )
+            self.state.refresh()
+        else:
+            # Retries exhausted — create escalation
+            error = result.output[:1000] if result.output else f"Exit code {result.exit_code}"
+            escalation = create_escalation(
+                task=task,
+                attempt=attempt,
+                error=error,
+                session_logger=self.session_logger,
+                mutation_log=self.mutation_log,
+            )
+            self.audit_log.log(
+                "escalation",
+                task_id=task_id,
+                escalation_id=escalation["escalation_id"],
+                attempts=attempt,
+            )
+            self.state.refresh()
 
     def _get_target_task(self) -> list[dict]:
         """Get the specific target task if it's ready for dispatch."""

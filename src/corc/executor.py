@@ -12,6 +12,7 @@ from corc.audit import AuditLog
 from corc.context import assemble_context
 from corc.dispatch import AgentDispatcher, AgentResult, Constraints
 from corc.mutations import MutationLog
+from corc.retry import get_retry_context
 from corc.sessions import SessionLogger
 from corc.state import WorkState
 
@@ -78,6 +79,12 @@ class Executor:
             f"Work in the current directory. Write tests alongside implementation. "
             f"Commit your changes with a clear message referencing the task."
         )
+
+        # Enrich prompt with previous session context for retries
+        if attempt > 1:
+            retry_context = get_retry_context(task["id"], attempt, self.session_logger)
+            if retry_context:
+                prompt = prompt + "\n" + retry_context
 
         constraints = Constraints()
 

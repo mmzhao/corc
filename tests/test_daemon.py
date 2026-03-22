@@ -714,9 +714,11 @@ class TestDaemon:
         assert len(mock_dispatcher.dispatched) == 1
         assert "Task 2" in mock_dispatcher.dispatched[0][1]  # system prompt contains task name
 
-    def test_daemon_failed_task_not_retried_immediately(self, mutation_log, work_state,
+    def test_daemon_failed_task_not_retried_when_disabled(self, mutation_log, work_state,
                                                          audit_log, session_logger, tmp_project):
-        """A failed task is not immediately re-dispatched (stays in failed status)."""
+        """A failed task with max_retries=0 is not re-dispatched (stays in failed status)."""
+        from corc.retry import RetryPolicy
+
         fail_result = AgentResult(output="Error!", exit_code=1, duration_s=0.1)
         dispatcher = MockDispatcher(default_result=fail_result)
 
@@ -731,6 +733,7 @@ class TestDaemon:
             dispatcher=dispatcher,
             project_root=tmp_project,
             poll_interval=0.1,
+            retry_policy=RetryPolicy(max_retries=0),
         )
 
         thread = threading.Thread(target=daemon.start)
