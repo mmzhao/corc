@@ -1,0 +1,7 @@
+# CORC Configuration
+# See SPEC.md for full documentation of each section.
+
+audit:
+  backup_path: ~/.corc-backups/audit/      # Configurable backup location
+  backup_interval: daily                    # daily | weekly
+  rotate_after_days: 90                     # Rotate log files older than this

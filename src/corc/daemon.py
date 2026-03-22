@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 
 from corc.audit import AuditLog
+from corc.backup import run_daily_backup
 from corc.chaos import (
     ChaosMonkey,
     is_chaos_enabled,
@@ -233,6 +234,9 @@ class Daemon:
         #    These are running tasks with no matching executor handle.
         self._reconcile_external_tasks()
 
+        # 6. Daily maintenance: audit log backup and rotation
+        self._check_daily_backup()
+
     def _handle_worktree_merge(self, item, proc_result):
         """Handle worktree merge after agent completion and validation.
 
@@ -389,6 +393,40 @@ class Daemon:
             updated_task = self.state.get_task(task_id)
             if updated_task and updated_task["status"] in ("completed", "escalated"):
                 self._tasks_completed += 1
+
+    # ------------------------------------------------------------------
+    # Daily maintenance: audit log backup
+    # ------------------------------------------------------------------
+
+    def _check_daily_backup(self):
+        """Run audit log backup and rotation if due.
+
+        Called every tick but only performs work when the configured
+        interval (daily/weekly) has elapsed since the last backup.
+        Copies data/events/ and data/sessions/ to the backup path,
+        then rotates files older than the configured retention period.
+        """
+        corc_dir = self.project_root / ".corc"
+        events_dir = self.project_root / "data" / "events"
+        sessions_dir = self.project_root / "data" / "sessions"
+
+        try:
+            result = run_daily_backup(corc_dir, events_dir, sessions_dir)
+            if result is not None:
+                self.audit_log.log(
+                    "backup_completed",
+                    backup_path=result["backup"]["backup_path"],
+                    events_copied=result["backup"]["events_copied"],
+                    sessions_copied=result["backup"]["sessions_copied"],
+                    events_rotated=result["rotation"]["events_rotated"],
+                    sessions_rotated=result["rotation"]["sessions_rotated"],
+                    source_events_rotated=result["source_rotation"]["events_rotated"],
+                    source_sessions_rotated=result["source_rotation"][
+                        "sessions_rotated"
+                    ],
+                )
+        except OSError as e:
+            self.audit_log.log("backup_failed", error=str(e))
 
     # ------------------------------------------------------------------
     # Chaos monkey integration
