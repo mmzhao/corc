@@ -1549,6 +1549,44 @@ def analyze_planning_cmd():
     click.echo(format_planning_report(report))
 
 
+@analyze.command("retries")
+@click.option(
+    "--flagged-only",
+    is_flag=True,
+    help="Show only task types flagged for investigation",
+)
+def analyze_retries_cmd(flagged_only):
+    """Show retry statistics and adaptive retry settings.
+
+    Displays first-attempt success rate by task type and role,
+    current adaptive retry counts, and flagged task types.
+
+    Examples:
+      corc analyze retries
+      corc analyze retries --flagged-only
+    """
+    from corc.adaptive_retry import (
+        AdaptiveRetryTracker,
+        compute_retry_statistics,
+        format_retry_statistics,
+    )
+
+    paths = get_paths()
+    tracker = AdaptiveRetryTracker(paths["retry_outcomes"])
+    report = compute_retry_statistics(tracker)
+
+    if flagged_only:
+        flagged = report["flagged"]
+        if not flagged:
+            click.echo("No task types flagged for investigation.")
+            return
+        # Show only flagged subset
+        report["stats"] = flagged
+        click.echo(format_retry_statistics(report))
+    else:
+        click.echo(format_retry_statistics(report))
+
+
 # --- Rating ---
 
 

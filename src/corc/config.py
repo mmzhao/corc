@@ -16,6 +16,7 @@ def get_paths(root: Path | None = None) -> dict:
     root = root or get_project_root()
     return {
         "root": root,
+        "data_dir": root / "data",
         "mutations": root / "data" / "mutations.jsonl",
         "state_db": root / "data" / "state.db",
         "events_dir": root / "data" / "events",
@@ -24,4 +25,5 @@ def get_paths(root: Path | None = None) -> dict:
         "knowledge_db": root / "data" / "knowledge.db",
         "corc_dir": root / ".corc",
         "ratings_dir": root / "data" / "ratings",
+        "retry_outcomes": root / "data" / "retry_outcomes.jsonl",
     }
