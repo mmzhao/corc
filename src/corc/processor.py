@@ -8,6 +8,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from corc.adaptive_retry import AdaptiveRetryTracker, TaskOutcome
 from corc.audit import AuditLog
 from corc.dispatch import AgentResult
 from corc.mutations import MutationLog
@@ -43,6 +44,7 @@ def process_completed(
     session_logger: SessionLogger,
     project_root: Path,
     notification_manager: NotificationManager | None = None,
+    adaptive_tracker: AdaptiveRetryTracker | None = None,
 ) -> ProcessResult:
     """Validate task output and update state.
 
@@ -55,6 +57,9 @@ def process_completed(
 
     When notification_manager is provided, sends notifications on
     escalation and task failure events.
+
+    When adaptive_tracker is provided, records the task outcome for
+    adaptive retry policy adjustments.
     """
     task_id = task["id"]
     max_retries = task.get("max_retries", 3)
@@ -109,6 +114,20 @@ def process_completed(
             # Notify on task failure
             if notification_manager:
                 notify_task_failure(notification_manager, task, attempt, error_detail)
+
+        # Record failure outcome for adaptive retry tracking
+        if adaptive_tracker is not None:
+            task_type = task.get("task_type", task.get("type", "general"))
+            role = task.get("role", "unknown")
+            adaptive_tracker.record_outcome(
+                TaskOutcome(
+                    task_type=task_type,
+                    role=role,
+                    attempt=attempt,
+                    success=False,
+                    task_id=task_id,
+                )
+            )
 
         state.refresh()
         return ProcessResult(
@@ -204,6 +223,20 @@ def process_completed(
             if notification_manager:
                 error_msg = f"Validation failed: {'; '.join(failed_details[:3])}"
                 notify_task_failure(notification_manager, task, attempt, error_msg)
+
+    # Record outcome for adaptive retry tracking
+    if adaptive_tracker is not None:
+        task_type = task.get("task_type", task.get("type", "general"))
+        role = task.get("role", "unknown")
+        adaptive_tracker.record_outcome(
+            TaskOutcome(
+                task_type=task_type,
+                role=role,
+                attempt=attempt,
+                success=all_passed,
+                task_id=task_id,
+            )
+        )
 
     # Refresh state so subsequent reads see the update
     state.refresh()
