@@ -74,6 +74,7 @@ class Daemon:
             session_logger=session_logger,
             project_root=project_root,
             max_workers=parallel,
+            defer_merge=True,
         )
 
     def start(self):
@@ -149,11 +150,11 @@ class Daemon:
         # 3. Executor: poll for completed dispatches (always — in-flight tasks finish)
         completed = self.executor.poll_completed()
 
-        # 4. Processor: validate and update state
+        # 4. Processor: validate and update state, then optimistic merge
         #    The processor handles failed vs escalated decisions based on
         #    attempt count and max_retries per task.
         for item in completed:
-            process_completed(
+            proc_result = process_completed(
                 task=item.task,
                 result=item.result,
                 attempt=item.attempt,
@@ -163,6 +164,13 @@ class Daemon:
                 session_logger=self.session_logger,
                 project_root=self.project_root,
             )
+
+            # 5. Optimistic merge: merge worktree → main after validation passes
+            if item.worktree_path:
+                self._handle_worktree_merge(item, proc_result)
+            elif proc_result.passed:
+                # No worktree (fallback mode) — just count completion
+                pass
 
             # Only count terminal completions (completed or escalated)
             # Retriable failures don't count — they'll be retried.
@@ -174,6 +182,83 @@ class Daemon:
         # 5. Reconcile externally-dispatched tasks (e.g. via 'corc dispatch')
         #    These are running tasks with no matching executor handle.
         self._reconcile_external_tasks()
+
+    def _handle_worktree_merge(self, item, proc_result):
+        """Handle worktree merge after agent completion and validation.
+
+        Implements the optimistic merge strategy:
+        1. If validation passed: try merging worktree → main
+           - Success: record merge_status="merged", clean up worktree
+           - Conflict: merge main → worktree, mark task failed for retry
+        2. If validation failed: clean up worktree (processor already handled status)
+        """
+        task_id = item.task["id"]
+        worktree_path = item.worktree_path
+
+        if not proc_result.passed:
+            # Validation failed — clean up worktree, processor already marked failed/escalated
+            self.executor.cleanup_worktree(task_id, worktree_path)
+            return
+
+        # Validation passed — try optimistic merge to main
+        merge_status = self.executor.try_merge_worktree(task_id, worktree_path)
+
+        if merge_status in ("merged", "no_changes"):
+            # Success! Record merge status and clean up
+            self.mutation_log.append(
+                "task_updated",
+                {"merge_status": merge_status},
+                reason=f"Worktree {merge_status} to main",
+                task_id=task_id,
+            )
+            self.executor.cleanup_worktree(task_id, worktree_path)
+
+        elif merge_status == "conflict":
+            # Merge conflict — prepare worktree for retry
+            self.mutation_log.append(
+                "task_updated",
+                {"merge_status": "conflict"},
+                reason="Merge conflict detected, preparing retry with merged state",
+                task_id=task_id,
+            )
+
+            # Try merging main into the worktree for retry baseline
+            retry_prepared = self.executor.prepare_conflict_retry(
+                task_id, worktree_path,
+            )
+
+            if retry_prepared:
+                reason = "Merge conflict with main; retrying with merged state as baseline"
+            else:
+                reason = "Merge conflict unresolvable; retrying from fresh state"
+
+            # Revert task from completed to failed so scheduler retries it
+            self.mutation_log.append(
+                "task_failed",
+                {
+                    "attempt": item.attempt,
+                    "attempt_count": item.attempt,
+                    "merge_conflict": True,
+                },
+                reason=reason,
+                task_id=task_id,
+            )
+            self.audit_log.log(
+                "merge_conflict_retry",
+                task_id=task_id,
+                attempt=item.attempt,
+                retry_prepared=retry_prepared,
+            )
+
+        else:
+            # Error during merge — clean up, leave task as completed
+            self.mutation_log.append(
+                "task_updated",
+                {"merge_status": "error"},
+                reason="Merge error, task marked completed without merge",
+                task_id=task_id,
+            )
+            self.executor.cleanup_worktree(task_id, worktree_path)
 
     def _reconcile_external_tasks(self):
         """Reconcile running tasks not tracked by this daemon's executor.

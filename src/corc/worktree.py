@@ -170,6 +170,73 @@ def merge_worktree(project_root: Path, worktree_path: Path) -> bool:
     return True
 
 
+def merge_main_into_worktree(project_root: Path, worktree_path: Path) -> bool:
+    """Merge current main HEAD into a worktree branch.
+
+    Used after an optimistic merge to main fails due to conflicts.
+    Incorporates the latest main branch changes into the worktree so
+    the agent can be retried with the merged state as baseline.
+
+    The worktree will contain both the agent's changes and the latest
+    main branch state, allowing the next agent to resolve any conflicts.
+
+    Args:
+        project_root: The main repository root directory.
+        worktree_path: Path to the worktree to merge into.
+
+    Returns:
+        True if merge succeeded, False if conflicts prevent merge.
+
+    Raises:
+        WorktreeError: If the branch cannot be determined.
+    """
+    project_root = Path(project_root)
+    worktree_path = Path(worktree_path)
+
+    # Get the current branch in the main repo (main/master/etc)
+    main_branch = _get_current_branch(project_root)
+    if not main_branch:
+        raise WorktreeError("Cannot determine main branch for merge into worktree")
+
+    # Merge main into the worktree branch (run in worktree directory)
+    result = subprocess.run(
+        ["git", "merge", main_branch, "-m", f"Merge {main_branch} for conflict resolution"],
+        capture_output=True,
+        text=True,
+        cwd=str(worktree_path),
+        timeout=60,
+    )
+
+    if result.returncode != 0:
+        # Conflict — abort the merge
+        subprocess.run(
+            ["git", "merge", "--abort"],
+            capture_output=True,
+            cwd=str(worktree_path),
+            timeout=30,
+        )
+        return False
+
+    return True
+
+
+def _get_current_branch(project_root: Path) -> str | None:
+    """Get the name of the current branch in the main repo."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=str(project_root),
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+        return None
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return None
+
+
 def _force_remove_worktree(project_root: Path, worktree_path: Path):
     """Remove a worktree, falling back to manual removal if git fails."""
     try:
