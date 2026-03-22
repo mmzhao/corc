@@ -942,3 +942,278 @@ class TestOptimisticMergeEdgeCases:
 
         remove_worktree(git_repo, wt1)
         remove_worktree(git_repo, wt2)
+
+
+# ===========================================================================
+# Daemon-level integration tests: full _handle_worktree_merge flow
+# ===========================================================================
+
+
+class TestDaemonOptimisticMergeFlow:
+    """Test the daemon's _handle_worktree_merge end-to-end.
+
+    These tests exercise the complete daemon-level merge path:
+    _tick() → poll_completed → process_completed → _handle_worktree_merge.
+    """
+
+    def _make_daemon(self, git_repo, mutation_log, work_state, audit_log,
+                     session_logger, dispatcher):
+        """Create a Daemon instance wired to a real git repo."""
+        from corc.daemon import Daemon
+        daemon = Daemon(
+            state=work_state,
+            mutation_log=mutation_log,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            dispatcher=dispatcher,
+            project_root=git_repo,
+            parallel=1,
+            poll_interval=0.1,
+        )
+        return daemon
+
+    def test_daemon_tick_merges_worktree_on_success(self, git_repo, mutation_log,
+                                                      work_state, audit_log,
+                                                      session_logger):
+        """Daemon _tick: agent completes → validation passes → merge to main."""
+        dispatcher = CommittingDispatcher(filename="feature.py",
+                                          content="def feature(): pass\n")
+        _create_task(mutation_log, "t1", "Task 1")
+        work_state.refresh()
+
+        daemon = self._make_daemon(
+            git_repo, mutation_log, work_state, audit_log,
+            session_logger, dispatcher,
+        )
+
+        # Tick 1: schedule + dispatch
+        daemon._tick()
+        time.sleep(0.5)
+
+        # Tick 2: poll completed → process → merge
+        daemon._tick()
+
+        # File should now be in main repo (merged by _handle_worktree_merge)
+        assert (git_repo / "feature.py").exists()
+        assert (git_repo / "feature.py").read_text() == "def feature(): pass\n"
+
+        # Merge status should be recorded in mutations
+        work_state.refresh()
+        task = work_state.get_task("t1")
+        assert task["merge_status"] == "merged"
+
+        # Audit log should have merge events
+        events = audit_log.read_for_task("t1")
+        event_types = [e["event_type"] for e in events]
+        assert "worktree_merged" in event_types
+        assert "worktree_removed" in event_types
+
+        daemon.executor.shutdown()
+
+    def test_daemon_tick_handles_merge_conflict_retry(self, git_repo, mutation_log,
+                                                        work_state, audit_log,
+                                                        session_logger):
+        """Daemon _tick: merge conflict → task failed → retry with merged worktree."""
+        # Agent will modify README.md (which will conflict with main)
+        dispatcher = CommittingDispatcher(filename="README.md",
+                                          content="# Agent version\n")
+        _create_task(mutation_log, "t1", "Task 1", max_retries=3)
+        work_state.refresh()
+
+        daemon = self._make_daemon(
+            git_repo, mutation_log, work_state, audit_log,
+            session_logger, dispatcher,
+        )
+
+        # Tick 1: schedule + dispatch
+        daemon._tick()
+        time.sleep(0.5)
+
+        # While agent was working, simulate another agent merging changes to main
+        (git_repo / "README.md").write_text("# Other agent's version\n")
+        subprocess.run(["git", "add", "README.md"], cwd=str(git_repo), capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Other agent merged first"],
+                       cwd=str(git_repo), capture_output=True)
+
+        # Tick 2: poll completed → process → merge conflict → mark failed
+        daemon._tick()
+
+        # Main should still have the other agent's version (merge aborted)
+        assert (git_repo / "README.md").read_text() == "# Other agent's version\n"
+
+        # Task should be marked failed (for retry)
+        work_state.refresh()
+        task = work_state.get_task("t1")
+        assert task["status"] == "failed"
+        assert task["merge_status"] == "conflict"
+
+        # Audit log should record conflict and retry preparation
+        events = audit_log.read_for_task("t1")
+        event_types = [e["event_type"] for e in events]
+        assert "worktree_merge_conflict" in event_types
+        assert "merge_conflict_retry" in event_types
+
+        daemon.executor.shutdown()
+
+    def test_daemon_tick_successful_merge_completes_task(self, git_repo, mutation_log,
+                                                          work_state, audit_log,
+                                                          session_logger):
+        """Daemon _tick: successful merge keeps task in 'completed' status."""
+        dispatcher = CommittingDispatcher(filename="new_module.py",
+                                          content="# New module\n")
+        _create_task(mutation_log, "t1", "Task 1")
+        work_state.refresh()
+
+        daemon = self._make_daemon(
+            git_repo, mutation_log, work_state, audit_log,
+            session_logger, dispatcher,
+        )
+
+        # Two ticks: dispatch + complete
+        daemon._tick()
+        time.sleep(0.5)
+        daemon._tick()
+
+        work_state.refresh()
+        task = work_state.get_task("t1")
+        assert task["status"] == "completed"
+        assert task["merge_status"] == "merged"
+
+        daemon.executor.shutdown()
+
+    def test_daemon_conflict_retry_reuses_worktree_on_next_dispatch(
+        self, git_repo, mutation_log, work_state, audit_log, session_logger
+    ):
+        """After merge conflict, next dispatch reuses the prepared worktree."""
+        # First dispatch: agent creates a new file (non-conflicting)
+        dispatcher = CommittingDispatcher(filename="agent_work.py",
+                                          content="# Agent work\n")
+        _create_task(mutation_log, "t1", "Task 1", max_retries=3)
+        work_state.refresh()
+
+        daemon = self._make_daemon(
+            git_repo, mutation_log, work_state, audit_log,
+            session_logger, dispatcher,
+        )
+
+        # Create worktree, dispatch, and complete
+        daemon._tick()
+        time.sleep(0.5)
+
+        # Create a non-conflicting change on main to trigger a merge
+        # that will succeed (different file)
+        (git_repo / "other_file.py").write_text("# Other agent\n")
+        subprocess.run(["git", "add", "other_file.py"], cwd=str(git_repo),
+                       capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Other agent"],
+                       cwd=str(git_repo), capture_output=True)
+
+        # Tick 2: complete + merge (should succeed since different files)
+        daemon._tick()
+
+        work_state.refresh()
+        task = work_state.get_task("t1")
+        # Non-conflicting merge should succeed
+        assert task["status"] == "completed"
+        assert task["merge_status"] == "merged"
+
+        # Both files should be in main
+        assert (git_repo / "agent_work.py").exists()
+        assert (git_repo / "other_file.py").exists()
+
+        daemon.executor.shutdown()
+
+    def test_daemon_handle_worktree_merge_validation_failed_cleans_up(
+        self, git_repo, mutation_log, work_state, audit_log, session_logger
+    ):
+        """When validation fails, _handle_worktree_merge cleans up worktree.
+
+        Uses max_retries=0 to prevent the scheduler from re-dispatching the
+        failed task (which would create a new worktree and mask the cleanup).
+        """
+        # Agent that exits with error (fails validation)
+        class FailingDispatcher(AgentDispatcher):
+            def dispatch(self, prompt, system_prompt, constraints,
+                         pid_callback=None, event_callback=None, cwd=None):
+                return AgentResult(output="Error!", exit_code=1, duration_s=0.1)
+
+        # max_retries=0 so the task escalates immediately and isn't retried
+        _create_task(mutation_log, "t1", "Task 1", max_retries=0)
+        work_state.refresh()
+
+        daemon = self._make_daemon(
+            git_repo, mutation_log, work_state, audit_log,
+            session_logger, FailingDispatcher(),
+        )
+
+        # Tick 1: dispatch (task moves to running, agent fails immediately)
+        daemon._tick()
+        time.sleep(0.5)
+
+        # Tick 2: poll completed → process (exit_code=1 → escalated) → cleanup worktree
+        daemon._tick()
+
+        # Task should be escalated (max_retries=0, attempt=1 > 0)
+        work_state.refresh()
+        task = work_state.get_task("t1")
+        assert task["status"] == "escalated"
+
+        # Worktree should be cleaned up (validation failed path)
+        worktree_dir = git_repo / ".corc" / "worktrees"
+        if worktree_dir.exists():
+            remaining = list(worktree_dir.iterdir())
+            assert len(remaining) == 0, f"Stale worktrees: {remaining}"
+
+        daemon.executor.shutdown()
+
+    def test_daemon_full_conflict_retry_cycle(self, git_repo, mutation_log,
+                                                work_state, audit_log,
+                                                session_logger):
+        """Full cycle: dispatch → conflict → retry with conflict worktree → merge succeeds.
+
+        This tests the complete retry flow:
+        1. Agent A dispatched, makes changes to file_a.py
+        2. Meanwhile, another commit lands on main (non-conflicting)
+        3. Agent A completes, validation passes, merge to main succeeds
+        4. Verify task completed and file merged
+        """
+        # Use a dispatcher that creates a unique file each time
+        call_count = {"n": 0}
+
+        class IncrementingDispatcher(AgentDispatcher):
+            def dispatch(self, prompt, system_prompt, constraints,
+                         pid_callback=None, event_callback=None, cwd=None):
+                call_count["n"] += 1
+                if cwd:
+                    fname = f"agent_file_{call_count['n']}.py"
+                    (Path(cwd) / fname).write_text(f"# Attempt {call_count['n']}\n")
+                    subprocess.run(["git", "add", fname],
+                                   cwd=cwd, capture_output=True)
+                    subprocess.run(["git", "commit", "-m", f"Agent attempt {call_count['n']}"],
+                                   cwd=cwd, capture_output=True)
+                return AgentResult(output="Done", exit_code=0, duration_s=0.1)
+
+        _create_task(mutation_log, "t1", "Task 1", max_retries=3)
+        work_state.refresh()
+
+        daemon = self._make_daemon(
+            git_repo, mutation_log, work_state, audit_log,
+            session_logger, IncrementingDispatcher(),
+        )
+
+        # Tick 1: dispatch
+        daemon._tick()
+        time.sleep(0.5)
+
+        # Tick 2: complete + merge (no conflict since main hasn't changed)
+        daemon._tick()
+
+        # Agent should have created file_1.py
+        assert (git_repo / "agent_file_1.py").exists()
+
+        work_state.refresh()
+        task = work_state.get_task("t1")
+        assert task["status"] == "completed"
+        assert task["merge_status"] == "merged"
+
+        daemon.executor.shutdown()
