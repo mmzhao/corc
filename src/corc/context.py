@@ -9,11 +9,27 @@ Same task + same files on disk = same context output.
 from pathlib import Path
 
 
+def _load_blacklist(project_root: Path) -> str | None:
+    """Load the agent blacklist from .corc/blacklist.md.
+
+    Returns the file contents if the blacklist exists, None otherwise.
+    Handles missing files and read errors gracefully.
+    """
+    blacklist_path = project_root / ".corc" / "blacklist.md"
+    try:
+        if blacklist_path.exists():
+            return blacklist_path.read_text()
+    except OSError:
+        pass
+    return None
+
+
 def assemble_context(task: dict, project_root: Path) -> str:
     """Assemble the full context for a task dispatch.
 
     Returns the concatenated content of all files in the context bundle,
-    prefixed with the task definition.
+    prefixed with the task definition and suffixed with the agent blacklist.
+    The blacklist is always appended (when present) regardless of context bundle.
     """
     parts = []
 
@@ -36,9 +52,6 @@ def assemble_context(task: dict, project_root: Path) -> str:
     parts.append("=== END TASK DEFINITION ===\n")
 
     bundle = task.get("context_bundle", [])
-    if not bundle:
-        return "\n".join(parts)
-
     for ref in bundle:
         ref_str = str(ref)
         section = None
@@ -60,6 +73,13 @@ def assemble_context(task: dict, project_root: Path) -> str:
         parts.append(f"=== CONTEXT: {ref} ===")
         parts.append(content.strip())
         parts.append(f"=== END CONTEXT ===\n")
+
+    # Always inject the blacklist at the end of assembled context
+    blacklist = _load_blacklist(project_root)
+    if blacklist:
+        parts.append("=== AGENT BLACKLIST ===")
+        parts.append(blacklist.strip())
+        parts.append("=== END AGENT BLACKLIST ===\n")
 
     return "\n".join(parts)
 
