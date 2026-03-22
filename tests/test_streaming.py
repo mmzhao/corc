@@ -102,6 +102,55 @@ SAMPLE_EVENTS = [
 ]
 
 
+# Real events captured from `claude -p --output-format stream-json --verbose`
+# Used to verify the parser handles the actual CLI output format (which
+# includes extra fields like session_id, uuid, parent_tool_use_id, etc.).
+REAL_FORMAT_EVENTS = [
+    {"type": "system", "subtype": "init", "cwd": "/tmp/test",
+     "session_id": "866b421f-2c52-418d-93a9-4c6481efc10f",
+     "tools": ["Bash", "Read", "Write", "Edit", "Grep", "Glob"],
+     "model": "claude-sonnet-4-20250514", "permissionMode": "default",
+     "uuid": "26a8ca40-917d-48ed-87b4-66866d845b05"},
+    {"type": "assistant", "message": {
+        "model": "claude-sonnet-4-20250514",
+        "id": "msg_01CKpMXE8xMyRhjjw9NU9zB6", "type": "message",
+        "role": "assistant",
+        "content": [{"type": "text", "text": "I'll read the file first."}],
+        "stop_reason": None, "stop_sequence": None,
+        "usage": {"input_tokens": 100, "output_tokens": 10},
+     }, "parent_tool_use_id": None,
+     "session_id": "866b421f-2c52-418d-93a9-4c6481efc10f",
+     "uuid": "b570c34f-eef4-4662-9287-887250a4dafe"},
+    {"type": "tool_use", "tool": {
+        "type": "tool_use", "id": "toolu_01abc", "name": "Read",
+        "input": {"file_path": "/src/main.py"},
+     }, "session_id": "866b421f-2c52-418d-93a9-4c6481efc10f",
+     "uuid": "c1d2e3f4-5678-9abc-def0-123456789012"},
+    {"type": "tool_result", "tool": {
+        "type": "tool_result", "tool_use_id": "toolu_01abc",
+        "content": "def main():\n    pass\n",
+     }, "session_id": "866b421f-2c52-418d-93a9-4c6481efc10f",
+     "uuid": "d4e5f6a7-8901-2bcd-ef34-567890123456"},
+    {"type": "assistant", "message": {
+        "model": "claude-sonnet-4-20250514",
+        "id": "msg_02XYZ", "type": "message",
+        "role": "assistant",
+        "content": [{"type": "text", "text": "Done implementing."}],
+        "stop_reason": "end_turn", "stop_sequence": None,
+        "usage": {"input_tokens": 200, "output_tokens": 20},
+     }, "parent_tool_use_id": None,
+     "session_id": "866b421f-2c52-418d-93a9-4c6481efc10f",
+     "uuid": "e5f6a7b8-0123-4cde-f567-890123456789"},
+    {"type": "result", "subtype": "success", "is_error": False,
+     "duration_ms": 5000, "duration_api_ms": 4800, "num_turns": 2,
+     "result": "Implementation complete.",
+     "stop_reason": "end_turn",
+     "session_id": "866b421f-2c52-418d-93a9-4c6481efc10f",
+     "total_cost_usd": 0.05,
+     "uuid": "f6a7b8c9-1234-5def-a678-901234567890"},
+]
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -159,7 +208,7 @@ class TestStreamingDispatch:
     """Test ClaudeCodeDispatcher with --output-format stream-json."""
 
     def test_command_includes_stream_json(self, monkeypatch):
-        """Verify the command includes --output-format stream-json."""
+        """Verify the command includes --output-format stream-json --verbose."""
         captured_cmd = {}
 
         def mock_popen(cmd, **kwargs):
@@ -176,6 +225,9 @@ class TestStreamingDispatch:
         cmd = captured_cmd["cmd"]
         assert "--output-format" in cmd
         assert "stream-json" in cmd
+        assert "--verbose" in cmd, (
+            "--verbose is required for --output-format stream-json in claude -p mode"
+        )
         assert "claude" == cmd[0]
         assert "-p" == cmd[1]
         assert "test prompt" == cmd[2]
@@ -377,6 +429,75 @@ class TestStreamingDispatch:
         assert "--max-turns" in cmd
         idx = cmd.index("--max-turns")
         assert cmd[idx + 1] == "10"
+
+    def test_real_format_events_parsed(self, monkeypatch):
+        """Events matching the real claude CLI stream-json format are parsed correctly.
+
+        The real output includes extra fields (session_id, uuid, parent_tool_use_id)
+        that the simplified SAMPLE_EVENTS don't have. Verify these are handled.
+        """
+        monkeypatch.setattr(
+            "corc.dispatch.subprocess.Popen",
+            _make_mock_popen(REAL_FORMAT_EVENTS),
+        )
+
+        received = []
+        dispatcher = ClaudeCodeDispatcher()
+        result = dispatcher.dispatch(
+            "test", "system", Constraints(),
+            event_callback=lambda e: received.append(e),
+        )
+
+        assert len(received) == len(REAL_FORMAT_EVENTS)
+        types = [e["type"] for e in received]
+        assert types == ["system", "assistant", "tool_use", "tool_result",
+                         "assistant", "result"]
+        assert result.output == "Implementation complete."
+
+    def test_real_format_assistant_has_extra_fields(self, monkeypatch):
+        """Real assistant events include model, usage, parent_tool_use_id, session_id."""
+        monkeypatch.setattr(
+            "corc.dispatch.subprocess.Popen",
+            _make_mock_popen(REAL_FORMAT_EVENTS),
+        )
+
+        received = []
+        dispatcher = ClaudeCodeDispatcher()
+        dispatcher.dispatch(
+            "test", "system", Constraints(),
+            event_callback=lambda e: received.append(e),
+        )
+
+        # First assistant event
+        assistant = received[1]
+        assert assistant["type"] == "assistant"
+        assert assistant["message"]["model"] == "claude-sonnet-4-20250514"
+        assert "session_id" in assistant
+        assert "uuid" in assistant
+
+    def test_non_json_error_line_logged_and_skipped(self, monkeypatch):
+        """When claude outputs a non-JSON error (e.g. missing --verbose), it is skipped."""
+        def mock_popen(cmd, **kwargs):
+            # Simulate what happens without --verbose: error message on stdout
+            lines = (
+                "Error: When using --print, --output-format=stream-json requires --verbose\n"
+            )
+            proc = MockPopen([], exit_code=1)
+            proc.stdout = io.StringIO(lines)
+            return proc
+
+        monkeypatch.setattr("corc.dispatch.subprocess.Popen", mock_popen)
+
+        received = []
+        dispatcher = ClaudeCodeDispatcher()
+        result = dispatcher.dispatch(
+            "test", "system", Constraints(),
+            event_callback=lambda e: received.append(e),
+        )
+
+        # No events should be received (error line is not valid JSON)
+        assert len(received) == 0
+        assert result.output == ""
 
 
 # ===========================================================================
@@ -600,7 +721,7 @@ class MockStreamingDispatcher(AgentDispatcher):
         self.received_event_callback = None
 
     def dispatch(self, prompt: str, system_prompt: str, constraints: Constraints,
-                 pid_callback=None, event_callback=None) -> AgentResult:
+                 pid_callback=None, event_callback=None, cwd=None) -> AgentResult:
         self.received_event_callback = event_callback
         if event_callback:
             for event in self.events:
@@ -834,6 +955,75 @@ class TestExecutorStreamingIntegration:
         tool_result_entry = [e for e in stream_entries if e["stream_type"] == "tool_result"][0]
         parsed = json.loads(tool_result_entry["content"])
         assert "file1.py" in parsed["tool"]["content"]
+
+        executor.shutdown()
+
+    def test_real_format_events_in_session_log(self, mutation_log,
+                                                 work_state, audit_log,
+                                                 session_logger, tmp_project):
+        """Real-format events (with session_id, uuid, etc.) are captured in session log.
+
+        Verifies the full pipeline: REAL_FORMAT_EVENTS flow through
+        MockStreamingDispatcher → event_callback → session_logger, producing
+        stream_event entries with correct stream_type values.
+        """
+        mock_dispatcher = MockStreamingDispatcher(
+            events=REAL_FORMAT_EVENTS,
+            result=AgentResult(
+                output="Implementation complete.",
+                exit_code=0,
+                duration_s=5.0,
+            ),
+        )
+
+        _create_task(mutation_log, "t1", "Task 1")
+        work_state.refresh()
+        task = work_state.get_task("t1")
+
+        executor = Executor(
+            dispatcher=mock_dispatcher,
+            mutation_log=mutation_log,
+            state=work_state,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            project_root=tmp_project,
+        )
+
+        executor.dispatch(task)
+        time.sleep(0.5)
+        completed = executor.poll_completed()
+
+        assert len(completed) == 1
+
+        # Session log should contain stream_event entries
+        session = session_logger.read_session("t1", 1)
+        stream_entries = [e for e in session if e["type"] == "stream_event"]
+        assert len(stream_entries) == len(REAL_FORMAT_EVENTS)
+
+        # Verify stream_type values from real format
+        stream_types = [e["stream_type"] for e in stream_entries]
+        assert "assistant" in stream_types
+        assert "tool_use" in stream_types
+        assert "tool_result" in stream_types
+        assert "system" in stream_types
+        assert "result" in stream_types
+
+        # Verify content preserves extra fields (session_id, uuid)
+        system_entry = [e for e in stream_entries if e["stream_type"] == "system"][0]
+        parsed = json.loads(system_entry["content"])
+        assert "session_id" in parsed
+        assert "uuid" in parsed
+
+        # Audit log should have tool_use and assistant_message entries
+        all_audit = audit_log.read_today()
+        tool_events = [e for e in all_audit if e["event_type"] == "tool_use"]
+        assert len(tool_events) == 1  # One Read tool use
+        assert tool_events[0]["tool_name"] == "Read"
+
+        msg_events = [e for e in all_audit if e["event_type"] == "assistant_message"]
+        assert len(msg_events) == 2  # Two assistant messages
+        assert "read the file first" in msg_events[0]["content"]
+        assert "Done implementing" in msg_events[1]["content"]
 
         executor.shutdown()
 

@@ -9,6 +9,7 @@ into agent reasoning and tool calls.
 """
 
 import json
+import logging
 import subprocess
 import threading
 import time
@@ -16,6 +17,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -41,7 +44,8 @@ EventCallback = Callable[[dict], None]
 class AgentDispatcher(ABC):
     @abstractmethod
     def dispatch(self, prompt: str, system_prompt: str, constraints: Constraints,
-                 pid_callback=None, event_callback: EventCallback | None = None) -> AgentResult:
+                 pid_callback=None, event_callback: EventCallback | None = None,
+                 cwd: str | None = None) -> AgentResult:
         """Dispatch an agent with the given prompt and constraints.
 
         Args:
@@ -51,14 +55,18 @@ class AgentDispatcher(ABC):
             event_callback: Optional callable(event: dict) called for each
                 streaming event parsed from the agent's stdout. Enables
                 real-time session logging, audit logging, and TUI updates.
+            cwd: Optional working directory for the agent subprocess.
+                Used for git worktree isolation — each agent runs in its
+                own worktree so parallel agents don't conflict.
         """
         ...
 
 
 class ClaudeCodeDispatcher(AgentDispatcher):
     def dispatch(self, prompt: str, system_prompt: str, constraints: Constraints,
-                 pid_callback=None, event_callback: EventCallback | None = None) -> AgentResult:
-        cmd = ["claude", "-p", prompt, "--output-format", "stream-json"]
+                 pid_callback=None, event_callback: EventCallback | None = None,
+                 cwd: str | None = None) -> AgentResult:
+        cmd = ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose"]
 
         if system_prompt:
             cmd.extend(["--system-prompt", system_prompt])
@@ -77,6 +85,7 @@ class ClaudeCodeDispatcher(AgentDispatcher):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            cwd=cwd,
         )
 
         # Report PID so it can be tracked for reconciliation
@@ -108,6 +117,7 @@ class ClaudeCodeDispatcher(AgentDispatcher):
         timer.start()
 
         result_text = ""
+        event_count = 0
         try:
             # Read stdout line-by-line for real-time streaming.
             # iter(readline, '') avoids internal buffering that
@@ -116,16 +126,22 @@ class ClaudeCodeDispatcher(AgentDispatcher):
                 line = line.strip()
                 if not line:
                     continue
+                logger.debug("stream raw stdout: %s", line[:500])
                 try:
                     event = json.loads(line)
                 except json.JSONDecodeError:
+                    logger.warning("stream non-JSON line (skipped): %s", line[:200])
                     continue
+
+                event_type = event.get("type", "unknown")
+                logger.debug("stream event #%d type=%s", event_count, event_type)
+                event_count += 1
 
                 if event_callback:
                     event_callback(event)
 
                 # Extract final output from the result event
-                if event.get("type") == "result":
+                if event_type == "result":
                     result_text = event.get("result", "")
 
             proc.wait()
@@ -133,6 +149,8 @@ class ClaudeCodeDispatcher(AgentDispatcher):
             timer.cancel()
 
         stderr_thread.join(timeout=5)
+        logger.info("stream dispatch finished: %d events parsed, exit_code=%s",
+                     event_count, proc.returncode)
 
         if timed_out:
             return AgentResult(
