@@ -1392,5 +1392,117 @@ def analyze_failures(since):
     click.echo(format_failures(entries))
 
 
+# --- Rating ---
+
+
+@cli.command()
+@click.argument("task_id", required=False)
+@click.option(
+    "--auto", "auto_flag", is_flag=True, help="Score all unscored completed tasks"
+)
+@click.option(
+    "--no-claude",
+    "no_claude",
+    is_flag=True,
+    help="Use heuristic scoring instead of claude -p",
+)
+def rate(task_id, auto_flag, no_claude):
+    """Score a completed task across 7 dimensions.
+
+    Examples:
+      corc rate TASK_ID                  Score a specific task
+      corc rate TASK_ID --no-claude      Score using heuristics only
+      corc rate --auto                   Score all unscored completed tasks
+      corc rate --auto --no-claude       Batch score without claude -p
+    """
+    from corc.rating import RatingEngine, RatingStore, format_rating
+
+    paths, _, ws, al, sl, _ = _get_all()
+    rs = RatingStore(paths["ratings_dir"])
+    spec_path = paths["root"] / "SPEC.md"
+
+    engine = RatingEngine(
+        store=rs,
+        work_state=ws,
+        audit_log=al,
+        session_logger=sl,
+        spec_path=spec_path if spec_path.exists() else None,
+    )
+
+    if auto_flag:
+        use_claude = not no_claude
+        # For auto mode, we use evaluator by default but fall back per-task
+        all_tasks = ws.list_tasks(status="completed")
+        new_ratings = []
+        for task in all_tasks:
+            tid = task["id"]
+            if not rs.is_rated(tid):
+                try:
+                    rating = engine.rate_task(tid, use_claude=use_claude)
+                    new_ratings.append(rating)
+                    click.echo(format_rating(rating))
+                    click.echo()
+                except ValueError as e:
+                    click.echo(f"Skipping {tid}: {e}", err=True)
+
+        click.echo(f"Rated {len(new_ratings)} task(s).")
+        return
+
+    if not task_id:
+        click.echo("Error: provide a TASK_ID or use --auto.", err=True)
+        sys.exit(1)
+
+    try:
+        rating = engine.rate_task(task_id, use_claude=not no_claude)
+        click.echo(format_rating(rating))
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@cli.group()
+def ratings():
+    """View rating trends and drill-downs."""
+    pass
+
+
+@ratings.command("trend")
+@click.option("--last", "last_n", default=30, help="Show last N ratings")
+def ratings_trend(last_n):
+    """Show quality trends over time.
+
+    Examples:
+      corc ratings trend
+      corc ratings trend --last 10
+    """
+    from corc.rating import RatingStore, format_trend
+
+    paths = get_paths()
+    rs = RatingStore(paths["ratings_dir"])
+    trend = rs.get_trend(last_n=last_n)
+    click.echo(format_trend(trend))
+
+
+@ratings.command("dimension")
+@click.argument("name")
+def ratings_dimension(name):
+    """Drill-down into a specific scoring dimension.
+
+    Examples:
+      corc ratings dimension correctness
+      corc ratings dimension efficiency
+    """
+    from corc.rating import RatingStore, format_dimension_drilldown
+
+    paths = get_paths()
+    rs = RatingStore(paths["ratings_dir"])
+    try:
+        entries = rs.get_by_dimension(name)
+        click.echo(format_dimension_drilldown(name, entries))
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     cli()
