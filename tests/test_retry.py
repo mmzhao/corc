@@ -72,6 +72,24 @@ class AlwaysFailDispatcher(AgentDispatcher):
         )
 
 
+class TimeoutDispatcher(AgentDispatcher):
+    """Dispatcher that simulates timeout failures."""
+
+    def __init__(self):
+        self.call_count = 0
+        self.dispatched: list[tuple[str, str]] = []
+
+    def dispatch(self, prompt: str, system_prompt: str, constraints: Constraints,
+                 pid_callback=None) -> AgentResult:
+        self.call_count += 1
+        self.dispatched.append((prompt, system_prompt))
+        return AgentResult(
+            output="[TIMEOUT: agent exceeded 1800s limit]",
+            exit_code=-1,
+            duration_s=1800.0,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -107,7 +125,8 @@ def session_logger(tmp_project):
     return SessionLogger(tmp_project / "data" / "sessions")
 
 
-def _create_task(mutation_log, task_id, name, done_when="do the thing", depends_on=None, role="implementer"):
+def _create_task(mutation_log, task_id, name, done_when="do the thing",
+                 depends_on=None, role="implementer", max_retries=3):
     """Helper to create a task via mutation log."""
     mutation_log.append("task_created", {
         "id": task_id,
@@ -118,6 +137,7 @@ def _create_task(mutation_log, task_id, name, done_when="do the thing", depends_
         "done_when": done_when,
         "checklist": [],
         "context_bundle": [],
+        "max_retries": max_retries,
     }, reason="Test setup")
 
 
@@ -128,31 +148,37 @@ def _create_task(mutation_log, task_id, name, done_when="do the thing", depends_
 
 class TestRetryPolicy:
     def test_default_max_retries(self):
-        """Default policy allows 2 retries (3 total attempts)."""
+        """Default policy allows 3 retries (4 total attempts)."""
         policy = RetryPolicy()
-        assert policy.max_retries == 2
+        assert policy.max_retries == 3
 
     def test_should_retry_after_first_attempt(self):
         """After first attempt (attempt=1), should retry."""
-        policy = RetryPolicy(max_retries=2)
+        policy = RetryPolicy(max_retries=3)
         assert policy.should_retry(1) is True
 
     def test_should_retry_after_second_attempt(self):
         """After second attempt (attempt=2), should retry."""
-        policy = RetryPolicy(max_retries=2)
+        policy = RetryPolicy(max_retries=3)
         assert policy.should_retry(2) is True
 
-    def test_should_not_retry_after_third_attempt(self):
-        """After third attempt (attempt=3), retries exhausted."""
-        policy = RetryPolicy(max_retries=2)
-        assert policy.should_retry(3) is False
+    def test_should_retry_after_third_attempt(self):
+        """After third attempt (attempt=3), should retry."""
+        policy = RetryPolicy(max_retries=3)
+        assert policy.should_retry(3) is True
+
+    def test_should_not_retry_after_fourth_attempt(self):
+        """After fourth attempt (attempt=4), retries exhausted."""
+        policy = RetryPolicy(max_retries=3)
+        assert policy.should_retry(4) is False
 
     def test_retries_exhausted(self):
         """retries_exhausted returns True when max attempts reached."""
-        policy = RetryPolicy(max_retries=2)
+        policy = RetryPolicy(max_retries=3)
         assert policy.retries_exhausted(1) is False
         assert policy.retries_exhausted(2) is False
-        assert policy.retries_exhausted(3) is True
+        assert policy.retries_exhausted(3) is False
+        assert policy.retries_exhausted(4) is True
 
     def test_custom_max_retries(self):
         """Custom max_retries changes the limit."""
@@ -355,6 +381,168 @@ class TestEscalation:
 
 
 # ===========================================================================
+# Task attempt tracking tests
+# ===========================================================================
+
+
+class TestAttemptTracking:
+    def test_task_starts_with_zero_attempts(self, mutation_log, work_state):
+        """New task has attempt_count=0 and max_retries=3 by default."""
+        _create_task(mutation_log, "t1", "Task 1")
+        work_state.refresh()
+        task = work_state.get_task("t1")
+
+        assert task["attempt_count"] == 0
+        assert task["max_retries"] == 3
+
+    def test_custom_max_retries_on_task(self, mutation_log, work_state):
+        """Task can be created with custom max_retries."""
+        _create_task(mutation_log, "t1", "Task 1", max_retries=5)
+        work_state.refresh()
+        task = work_state.get_task("t1")
+
+        assert task["max_retries"] == 5
+
+    def test_attempt_count_incremented_on_failure(self, mutation_log, work_state,
+                                                    audit_log, session_logger, tmp_project):
+        """Processor increments attempt_count when task fails."""
+        _create_task(mutation_log, "t1", "Task 1")
+        mutation_log.append("task_started", {"attempt": 1}, reason="test", task_id="t1")
+        work_state.refresh()
+        task = work_state.get_task("t1")
+
+        result = AgentResult(output="Error!", exit_code=1, duration_s=1.0)
+        process_completed(
+            task=task, result=result, attempt=1,
+            mutation_log=mutation_log, state=work_state,
+            audit_log=audit_log, session_logger=session_logger,
+            project_root=tmp_project,
+        )
+
+        task = work_state.get_task("t1")
+        assert task["attempt_count"] == 1
+        assert task["status"] == "failed"
+
+    def test_attempt_count_incremented_each_failure(self, mutation_log, work_state,
+                                                      audit_log, session_logger, tmp_project):
+        """attempt_count increases with each failure."""
+        _create_task(mutation_log, "t1", "Task 1")
+
+        for attempt_num in range(1, 4):
+            mutation_log.append("task_started", {"attempt": attempt_num}, reason="test", task_id="t1")
+            work_state.refresh()
+            task = work_state.get_task("t1")
+
+            result = AgentResult(output="Error!", exit_code=1, duration_s=1.0)
+            process_completed(
+                task=task, result=result, attempt=attempt_num,
+                mutation_log=mutation_log, state=work_state,
+                audit_log=audit_log, session_logger=session_logger,
+                project_root=tmp_project,
+            )
+
+            task = work_state.get_task("t1")
+            assert task["attempt_count"] == attempt_num
+
+    def test_escalated_after_max_retries(self, mutation_log, work_state,
+                                           audit_log, session_logger, tmp_project):
+        """Task status becomes 'escalated' after exceeding max_retries."""
+        _create_task(mutation_log, "t1", "Task 1", max_retries=2)
+
+        # Attempts 1 and 2 should result in 'failed' (retriable)
+        for attempt_num in range(1, 3):
+            mutation_log.append("task_started", {"attempt": attempt_num}, reason="test", task_id="t1")
+            work_state.refresh()
+            task = work_state.get_task("t1")
+
+            result = AgentResult(output="Error!", exit_code=1, duration_s=1.0)
+            process_completed(
+                task=task, result=result, attempt=attempt_num,
+                mutation_log=mutation_log, state=work_state,
+                audit_log=audit_log, session_logger=session_logger,
+                project_root=tmp_project,
+            )
+
+            task = work_state.get_task("t1")
+            assert task["status"] == "failed"
+
+        # Attempt 3 (> max_retries=2) should escalate
+        mutation_log.append("task_started", {"attempt": 3}, reason="test", task_id="t1")
+        work_state.refresh()
+        task = work_state.get_task("t1")
+
+        result = AgentResult(output="Error!", exit_code=1, duration_s=1.0)
+        process_completed(
+            task=task, result=result, attempt=3,
+            mutation_log=mutation_log, state=work_state,
+            audit_log=audit_log, session_logger=session_logger,
+            project_root=tmp_project,
+        )
+
+        task = work_state.get_task("t1")
+        assert task["status"] == "escalated"
+        assert task["attempt_count"] == 3
+
+    def test_failed_task_included_in_ready_tasks(self, mutation_log, work_state):
+        """Failed tasks with retries remaining appear in get_ready_tasks."""
+        _create_task(mutation_log, "t1", "Task 1", max_retries=3)
+        mutation_log.append("task_started", {"attempt": 1}, reason="test", task_id="t1")
+        mutation_log.append("task_failed", {"attempt": 1, "attempt_count": 1},
+                            reason="test failure", task_id="t1")
+        work_state.refresh()
+
+        ready = work_state.get_ready_tasks()
+        assert len(ready) == 1
+        assert ready[0]["id"] == "t1"
+
+    def test_escalated_task_not_in_ready_tasks(self, mutation_log, work_state):
+        """Escalated tasks are not returned by get_ready_tasks."""
+        _create_task(mutation_log, "t1", "Task 1", max_retries=1)
+        mutation_log.append("task_started", {"attempt": 1}, reason="test", task_id="t1")
+        mutation_log.append("task_escalated", {"attempt": 2, "attempt_count": 2},
+                            reason="max retries exhausted", task_id="t1")
+        work_state.refresh()
+
+        ready = work_state.get_ready_tasks()
+        assert len(ready) == 0
+
+    def test_max_retries_zero_escalates_immediately(self, mutation_log, work_state,
+                                                      audit_log, session_logger, tmp_project):
+        """With max_retries=0, first failure escalates immediately."""
+        _create_task(mutation_log, "t1", "Task 1", max_retries=0)
+        mutation_log.append("task_started", {"attempt": 1}, reason="test", task_id="t1")
+        work_state.refresh()
+        task = work_state.get_task("t1")
+
+        result = AgentResult(output="Error!", exit_code=1, duration_s=1.0)
+        process_completed(
+            task=task, result=result, attempt=1,
+            mutation_log=mutation_log, state=work_state,
+            audit_log=audit_log, session_logger=session_logger,
+            project_root=tmp_project,
+        )
+
+        task = work_state.get_task("t1")
+        assert task["status"] == "escalated"
+
+        # Escalation record should exist
+        escs = work_state.list_escalations()
+        assert len(escs) == 1
+
+    def test_attempt_count_survives_rebuild(self, mutation_log, work_state):
+        """attempt_count is preserved through state rebuild."""
+        _create_task(mutation_log, "t1", "Task 1", max_retries=3)
+        mutation_log.append("task_started", {"attempt": 1}, reason="test", task_id="t1")
+        mutation_log.append("task_failed", {"attempt": 1, "attempt_count": 1},
+                            reason="test failure", task_id="t1")
+
+        work_state.rebuild()
+        task = work_state.get_task("t1")
+        assert task["attempt_count"] == 1
+        assert task["max_retries"] == 3
+
+
+# ===========================================================================
 # Daemon retry integration tests
 # ===========================================================================
 
@@ -365,7 +553,7 @@ class TestDaemonRetry:
         """Task fails once, retries, and succeeds on second attempt."""
         dispatcher = FailNTimesDispatcher(fail_count=1)
 
-        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing")
+        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=3)
         work_state.refresh()
 
         daemon = Daemon(
@@ -376,7 +564,6 @@ class TestDaemonRetry:
             dispatcher=dispatcher,
             project_root=tmp_project,
             poll_interval=0.1,
-            retry_policy=RetryPolicy(max_retries=2),
         )
 
         thread = threading.Thread(target=daemon.start)
@@ -402,7 +589,7 @@ class TestDaemonRetry:
         """Retry attempt includes previous session log in the prompt."""
         dispatcher = FailNTimesDispatcher(fail_count=1, fail_output="Error: missing file.txt")
 
-        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing")
+        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=3)
         work_state.refresh()
 
         daemon = Daemon(
@@ -413,7 +600,6 @@ class TestDaemonRetry:
             dispatcher=dispatcher,
             project_root=tmp_project,
             poll_interval=0.1,
-            retry_policy=RetryPolicy(max_retries=2),
         )
 
         thread = threading.Thread(target=daemon.start)
@@ -431,10 +617,10 @@ class TestDaemonRetry:
 
     def test_escalation_after_retries_exhausted(self, mutation_log, work_state, audit_log,
                                                  session_logger, tmp_project):
-        """Escalation is created when all retries are exhausted."""
+        """Escalation is created when all retries are exhausted, status is 'escalated'."""
         dispatcher = AlwaysFailDispatcher(fail_output="Error: persistent failure")
 
-        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing")
+        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=2)
         work_state.refresh()
 
         daemon = Daemon(
@@ -445,7 +631,6 @@ class TestDaemonRetry:
             dispatcher=dispatcher,
             project_root=tmp_project,
             poll_interval=0.1,
-            retry_policy=RetryPolicy(max_retries=2),
         )
 
         thread = threading.Thread(target=daemon.start)
@@ -457,10 +642,11 @@ class TestDaemonRetry:
         # Dispatcher should have been called 3 times (1 original + 2 retries)
         assert dispatcher.call_count == 3
 
-        # Task should be failed
+        # Task should be escalated (not failed)
         work_state.refresh()
         task = work_state.get_task("t1")
-        assert task["status"] == "failed"
+        assert task["status"] == "escalated"
+        assert task["attempt_count"] == 3
 
         # An escalation should exist
         escs = work_state.list_escalations()
@@ -472,10 +658,10 @@ class TestDaemonRetry:
 
     def test_no_retry_when_max_retries_zero(self, mutation_log, work_state, audit_log,
                                               session_logger, tmp_project):
-        """With max_retries=0, task fails immediately and escalation is created."""
+        """With max_retries=0, task escalates immediately and escalation is created."""
         dispatcher = AlwaysFailDispatcher()
 
-        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing")
+        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=0)
         work_state.refresh()
 
         daemon = Daemon(
@@ -486,7 +672,6 @@ class TestDaemonRetry:
             dispatcher=dispatcher,
             project_root=tmp_project,
             poll_interval=0.1,
-            retry_policy=RetryPolicy(max_retries=0),
         )
 
         thread = threading.Thread(target=daemon.start)
@@ -498,8 +683,12 @@ class TestDaemonRetry:
         # Only dispatched once
         assert dispatcher.call_count == 1
 
-        # Escalation should exist
+        # Task should be escalated
         work_state.refresh()
+        task = work_state.get_task("t1")
+        assert task["status"] == "escalated"
+
+        # Escalation should exist
         escs = work_state.list_escalations()
         assert len(escs) == 1
 
@@ -508,7 +697,7 @@ class TestDaemonRetry:
         """Task fails twice, succeeds on third attempt (exactly at the retry limit)."""
         dispatcher = FailNTimesDispatcher(fail_count=2)
 
-        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing")
+        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=2)
         work_state.refresh()
 
         daemon = Daemon(
@@ -519,7 +708,6 @@ class TestDaemonRetry:
             dispatcher=dispatcher,
             project_root=tmp_project,
             poll_interval=0.1,
-            retry_policy=RetryPolicy(max_retries=2),
         )
 
         thread = threading.Thread(target=daemon.start)
@@ -543,7 +731,7 @@ class TestDaemonRetry:
         """Custom max_retries=1 allows only one retry."""
         dispatcher = AlwaysFailDispatcher()
 
-        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing")
+        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=1)
         work_state.refresh()
 
         daemon = Daemon(
@@ -554,7 +742,6 @@ class TestDaemonRetry:
             dispatcher=dispatcher,
             project_root=tmp_project,
             poll_interval=0.1,
-            retry_policy=RetryPolicy(max_retries=1),
         )
 
         thread = threading.Thread(target=daemon.start)
@@ -567,6 +754,9 @@ class TestDaemonRetry:
         assert dispatcher.call_count == 2
 
         work_state.refresh()
+        task = work_state.get_task("t1")
+        assert task["status"] == "escalated"
+
         escs = work_state.list_escalations()
         assert len(escs) == 1
         assert escs[0]["attempts"] == 2
@@ -576,7 +766,7 @@ class TestDaemonRetry:
         """Escalation record includes the path to the session log."""
         dispatcher = AlwaysFailDispatcher()
 
-        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing")
+        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=0)
         work_state.refresh()
 
         daemon = Daemon(
@@ -587,7 +777,6 @@ class TestDaemonRetry:
             dispatcher=dispatcher,
             project_root=tmp_project,
             poll_interval=0.1,
-            retry_policy=RetryPolicy(max_retries=0),
         )
 
         thread = threading.Thread(target=daemon.start)
@@ -606,7 +795,7 @@ class TestDaemonRetry:
         """Escalation record has suggested actions."""
         dispatcher = AlwaysFailDispatcher()
 
-        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing")
+        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=0)
         work_state.refresh()
 
         daemon = Daemon(
@@ -617,7 +806,6 @@ class TestDaemonRetry:
             dispatcher=dispatcher,
             project_root=tmp_project,
             poll_interval=0.1,
-            retry_policy=RetryPolicy(max_retries=0),
         )
 
         thread = threading.Thread(target=daemon.start)
@@ -631,6 +819,78 @@ class TestDaemonRetry:
         assert len(escs) == 1
         assert isinstance(escs[0]["suggested_actions"], list)
         assert len(escs[0]["suggested_actions"]) > 0
+
+    def test_timeout_failure_retried_same_as_other_failures(self, mutation_log, work_state,
+                                                              audit_log, session_logger,
+                                                              tmp_project):
+        """Timeout failures (exit_code=-1) are retried like any other failure."""
+        dispatcher = TimeoutDispatcher()
+
+        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=2)
+        work_state.refresh()
+
+        daemon = Daemon(
+            state=work_state,
+            mutation_log=mutation_log,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            dispatcher=dispatcher,
+            project_root=tmp_project,
+            poll_interval=0.1,
+        )
+
+        thread = threading.Thread(target=daemon.start)
+        thread.start()
+        time.sleep(2.5)
+        daemon.stop()
+        thread.join(timeout=3)
+
+        # Should have been retried: 1 original + 2 retries = 3 total
+        assert dispatcher.call_count == 3
+
+        # Task should be escalated (all retries exhausted)
+        work_state.refresh()
+        task = work_state.get_task("t1")
+        assert task["status"] == "escalated"
+        assert task["attempt_count"] == 3
+
+        # Escalation should mention timeout
+        escs = work_state.list_escalations()
+        assert len(escs) == 1
+        assert "TIMEOUT" in escs[0]["error"]
+
+    def test_default_max_retries_is_three(self, mutation_log, work_state, audit_log,
+                                            session_logger, tmp_project):
+        """Default max_retries=3 allows 4 total attempts before escalation."""
+        dispatcher = AlwaysFailDispatcher()
+
+        # Use default max_retries (3)
+        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing")
+        work_state.refresh()
+
+        daemon = Daemon(
+            state=work_state,
+            mutation_log=mutation_log,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            dispatcher=dispatcher,
+            project_root=tmp_project,
+            poll_interval=0.1,
+        )
+
+        thread = threading.Thread(target=daemon.start)
+        thread.start()
+        time.sleep(3.5)
+        daemon.stop()
+        thread.join(timeout=3)
+
+        # 1 original + 3 retries = 4 total
+        assert dispatcher.call_count == 4
+
+        work_state.refresh()
+        task = work_state.get_task("t1")
+        assert task["status"] == "escalated"
+        assert task["attempt_count"] == 4
 
 
 # ===========================================================================
@@ -783,13 +1043,13 @@ class TestEscalationCLI:
         from corc.cli import cli
 
         _create_task(mutation_log, "t1", "Task 1")
-        # Mark task as failed
+        # Mark task as escalated
         mutation_log.append("task_started", {"attempt": 1}, reason="test", task_id="t1")
-        mutation_log.append("task_failed", {"attempt": 1, "exit_code": 1},
-                            reason="test failure", task_id="t1")
+        mutation_log.append("task_escalated", {"attempt": 1, "attempt_count": 1},
+                            reason="test escalation", task_id="t1")
         work_state.refresh()
         task = work_state.get_task("t1")
-        assert task["status"] == "failed"
+        assert task["status"] == "escalated"
 
         esc = create_escalation(
             task=task, attempt=3, error="test error",
@@ -910,3 +1170,19 @@ class TestStateRebuild:
         work_state.rebuild()
         escs = work_state.list_escalations()
         assert len(escs) == 2
+
+    def test_escalated_status_survives_rebuild(self, mutation_log, work_state, session_logger):
+        """Task with 'escalated' status survives state rebuild."""
+        _create_task(mutation_log, "t1", "Task 1", max_retries=1)
+        mutation_log.append("task_started", {"attempt": 1}, reason="test", task_id="t1")
+        mutation_log.append("task_failed", {"attempt": 1, "attempt_count": 1},
+                            reason="test failure", task_id="t1")
+        mutation_log.append("task_started", {"attempt": 2}, reason="retry", task_id="t1")
+        mutation_log.append("task_escalated", {"attempt": 2, "attempt_count": 2},
+                            reason="max retries exhausted", task_id="t1")
+
+        work_state.rebuild()
+        task = work_state.get_task("t1")
+        assert task["status"] == "escalated"
+        assert task["attempt_count"] == 2
+        assert task["max_retries"] == 1

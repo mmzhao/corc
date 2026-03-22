@@ -106,13 +106,14 @@ def reconcile_on_startup(
                 )
                 audit_log.log("reconcile_processed_output", task_id=task_id)
             else:
-                # No output — mark as failed so retry policy can kick in
+                # No output — mark as failed so scheduler retry can kick in
                 summary["agents_dead_no_output"] += 1
                 attempt = session_logger.get_latest_attempt(task_id) or 1
                 mutation_log.append(
                     "task_failed",
                     {
                         "attempt": attempt,
+                        "attempt_count": attempt,
                         "exit_code": -1,
                         "reconciled": True,
                     },

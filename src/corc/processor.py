@@ -11,6 +11,7 @@ from pathlib import Path
 from corc.audit import AuditLog
 from corc.dispatch import AgentResult
 from corc.mutations import MutationLog
+from corc.retry import create_escalation
 from corc.sessions import SessionLogger
 from corc.state import WorkState
 from corc.validate import run_validations
@@ -37,28 +38,44 @@ def process_completed(
 ) -> ProcessResult:
     """Validate task output and update state.
 
-    If the agent exited with error, marks task as failed.
+    If the agent exited with error, marks task as failed or escalated.
     Otherwise, runs done_when validations. If all pass, marks completed.
-    If validations fail, marks task as failed.
+    If validations fail, marks task as failed or escalated.
+
+    After max_retries are exhausted, sets status to 'escalated' instead
+    of 'failed' and creates an escalation record.
     """
     task_id = task["id"]
+    max_retries = task.get("max_retries", 3)
 
     # Agent crashed or errored
     if result.exit_code != 0:
-        mutation_log.append(
-            "task_failed",
-            {"attempt": attempt, "exit_code": result.exit_code},
-            reason=f"Agent exited with code {result.exit_code}",
-            task_id=task_id,
-        )
-        audit_log.log(
-            "task_failed", task_id=task_id,
-            attempt=attempt, exit_code=result.exit_code,
-        )
+        error_msg = f"Agent exited with code {result.exit_code}"
+        error_detail = result.output[:1000] if result.output else error_msg
+
+        if attempt > max_retries:
+            # Retries exhausted — escalate
+            _escalate_task(
+                task, attempt, error_detail, mutation_log, audit_log, session_logger,
+            )
+        else:
+            # Mark as failed (retriable — scheduler will pick it up)
+            mutation_log.append(
+                "task_failed",
+                {"attempt": attempt, "exit_code": result.exit_code, "attempt_count": attempt},
+                reason=error_msg,
+                task_id=task_id,
+            )
+            audit_log.log(
+                "task_failed", task_id=task_id,
+                attempt=attempt, exit_code=result.exit_code,
+            )
+
+        state.refresh()
         return ProcessResult(
             task_id=task_id,
             passed=False,
-            details=[(False, f"Agent exited with code {result.exit_code}")],
+            details=[(False, error_msg)],
         )
 
     # Parse and run done_when validations
@@ -94,13 +111,21 @@ def process_completed(
         audit_log.log("task_completed", task_id=task_id, attempt=attempt)
     else:
         failed_details = [d for passed, d in details if not passed]
-        mutation_log.append(
-            "task_failed",
-            {"attempt": attempt, "findings": failed_details},
-            reason="Validation failed",
-            task_id=task_id,
-        )
-        audit_log.log("task_validation_failed", task_id=task_id, attempt=attempt)
+
+        if attempt > max_retries:
+            # Retries exhausted — escalate
+            error_msg = f"Validation failed: {'; '.join(failed_details[:3])}"
+            _escalate_task(
+                task, attempt, error_msg, mutation_log, audit_log, session_logger,
+            )
+        else:
+            mutation_log.append(
+                "task_failed",
+                {"attempt": attempt, "findings": failed_details, "attempt_count": attempt},
+                reason="Validation failed",
+                task_id=task_id,
+            )
+            audit_log.log("task_validation_failed", task_id=task_id, attempt=attempt)
 
     # Refresh state so subsequent reads see the update
     state.refresh()
@@ -110,6 +135,48 @@ def process_completed(
         passed=all_passed,
         details=details,
         findings=findings,
+    )
+
+
+def _escalate_task(
+    task: dict,
+    attempt: int,
+    error: str,
+    mutation_log: MutationLog,
+    audit_log: AuditLog,
+    session_logger: SessionLogger,
+) -> None:
+    """Mark a task as escalated and create an escalation record.
+
+    Called when max_retries are exhausted. Sets task status to 'escalated'
+    and creates a structured escalation for operator review.
+    """
+    task_id = task["id"]
+
+    # Mark task as escalated
+    mutation_log.append(
+        "task_escalated",
+        {"attempt": attempt, "attempt_count": attempt},
+        reason=f"Max retries exhausted after {attempt} attempts",
+        task_id=task_id,
+    )
+    audit_log.log(
+        "task_escalated", task_id=task_id, attempt=attempt,
+    )
+
+    # Create escalation record for operator
+    escalation = create_escalation(
+        task=task,
+        attempt=attempt,
+        error=error,
+        session_logger=session_logger,
+        mutation_log=mutation_log,
+    )
+    audit_log.log(
+        "escalation",
+        task_id=task_id,
+        escalation_id=escalation["escalation_id"],
+        attempts=attempt,
     )
 
 

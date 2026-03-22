@@ -97,7 +97,8 @@ def mock_dispatcher():
     return MockDispatcher()
 
 
-def _create_task(mutation_log, task_id, name, done_when="tests_pass", depends_on=None, role="implementer"):
+def _create_task(mutation_log, task_id, name, done_when="tests_pass", depends_on=None,
+                 role="implementer", max_retries=3):
     """Helper to create a task via mutation log."""
     mutation_log.append("task_created", {
         "id": task_id,
@@ -108,6 +109,7 @@ def _create_task(mutation_log, task_id, name, done_when="tests_pass", depends_on
         "done_when": done_when,
         "checklist": [],
         "context_bundle": [],
+        "max_retries": max_retries,
     }, reason="Test setup")
 
 
@@ -716,13 +718,11 @@ class TestDaemon:
 
     def test_daemon_failed_task_not_retried_when_disabled(self, mutation_log, work_state,
                                                          audit_log, session_logger, tmp_project):
-        """A failed task with max_retries=0 is not re-dispatched (stays in failed status)."""
-        from corc.retry import RetryPolicy
-
+        """A failed task with max_retries=0 is not re-dispatched (escalated immediately)."""
         fail_result = AgentResult(output="Error!", exit_code=1, duration_s=0.1)
         dispatcher = MockDispatcher(default_result=fail_result)
 
-        _create_task(mutation_log, "t1", "Task 1", done_when="thing 1")
+        _create_task(mutation_log, "t1", "Task 1", done_when="thing 1", max_retries=0)
         work_state.refresh()
 
         daemon = Daemon(
@@ -733,7 +733,6 @@ class TestDaemon:
             dispatcher=dispatcher,
             project_root=tmp_project,
             poll_interval=0.1,
-            retry_policy=RetryPolicy(max_retries=0),
         )
 
         thread = threading.Thread(target=daemon.start)
@@ -747,7 +746,7 @@ class TestDaemon:
 
         work_state.refresh()
         task = work_state.get_task("t1")
-        assert task["status"] == "failed"
+        assert task["status"] == "escalated"
 
     def test_stop_daemon_via_pid(self, mutation_log, work_state, audit_log,
                                    session_logger, mock_dispatcher, tmp_project):

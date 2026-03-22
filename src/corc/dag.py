@@ -17,6 +17,7 @@ STATUS_ICONS = {
     "ready": "⬚",
     "blocked": "◻",
     "failed": "❌",
+    "escalated": "🚨",
     "assigned": "🔄",
     "handed_off": "↗",
     "pending": "⬚",
@@ -28,6 +29,7 @@ STATUS_ANSI = {
     "ready": "\033[0m",        # default/white
     "blocked": "\033[90m",     # gray
     "failed": "\033[31m",      # red
+    "escalated": "\033[31m",   # red
     "assigned": "\033[33m",    # yellow
     "handed_off": "\033[33m",  # yellow
     "pending": "\033[0m",      # default

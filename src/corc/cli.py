@@ -242,7 +242,7 @@ def dispatch(task_id, provider):
         click.echo(f"Task {task_id} not found.")
         return
 
-    if t["status"] not in ("pending", "failed"):
+    if t["status"] not in ("pending", "failed", "escalated"):
         click.echo(f"Task {task_id} is {t['status']}, cannot dispatch.")
         return
 
@@ -413,11 +413,11 @@ def status():
     completed = len(by_status.get("completed", []))
     click.echo(f"Tasks: {completed}/{total} complete ({100*completed//total if total else 0}%)")
 
-    for status_name in ["completed", "running", "pending", "failed", "blocked", "handed_off"]:
+    for status_name in ["completed", "running", "pending", "failed", "escalated", "blocked", "handed_off"]:
         group = by_status.get(status_name, [])
         if not group:
             continue
-        icon = {"completed": "✅", "running": "🔄", "pending": "⬚", "failed": "❌", "blocked": "◻", "handed_off": "↗"}.get(status_name, "?")
+        icon = {"completed": "✅", "running": "🔄", "pending": "⬚", "failed": "❌", "escalated": "🚨", "blocked": "◻", "handed_off": "↗"}.get(status_name, "?")
         names = ", ".join(t["name"] for t in group)
         click.echo(f"  {icon} {status_name}: {names}")
 

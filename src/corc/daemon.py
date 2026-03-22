@@ -4,6 +4,10 @@ The daemon is a minimal polling loop that delegates to three independent modules
 Each module reads from and writes to the work state — they do not call each other.
 
 Loop: scheduler → executor → processor, every poll_interval seconds.
+
+Retry logic: the processor marks failed tasks with attempt_count. The scheduler
+automatically includes failed tasks that haven't exceeded max_retries. When
+max_retries is exhausted, the processor sets status to 'escalated'.
 """
 
 import os
@@ -18,7 +22,7 @@ from corc.mutations import MutationLog
 from corc.pause import is_paused
 from corc.processor import process_completed
 from corc.reconcile import reconcile_on_startup
-from corc.retry import RetryPolicy, create_escalation
+from corc.retry import RetryPolicy
 from corc.scheduler import get_ready_tasks
 from corc.sessions import SessionLogger
 from corc.state import WorkState
@@ -78,6 +82,9 @@ class Daemon:
         On startup, runs reconciliation to recover from any prior crash:
         rebuilds SQLite from mutation log, checks running tasks for PID
         liveness, processes dead agent output, and cleans stale worktrees.
+
+        Failed tasks from reconciliation are automatically picked up by the
+        scheduler if they haven't exceeded max_retries (no manual reset needed).
         """
         self._running = True
         self._write_pid()
@@ -96,10 +103,9 @@ class Daemon:
             pid_checker=self._pid_checker,
         )
 
-        # Apply retry policy to tasks that were marked failed by reconciliation.
-        # These are tasks whose agents died without output — they should be
-        # retried rather than left in failed state.
-        self._retry_reconciled_failures()
+        # No need to manually retry reconciled failures — the scheduler
+        # automatically includes failed tasks that haven't exceeded
+        # max_retries in its ready queue.
 
         self.audit_log.log("daemon_started", parallel=self.parallel)
 
@@ -117,7 +123,12 @@ class Daemon:
             self._cleanup()
 
     def _tick(self):
-        """One iteration of the daemon loop: schedule → execute → process."""
+        """One iteration of the daemon loop: schedule → execute → process.
+
+        The processor handles retry vs escalation decisions. Failed tasks
+        with attempt_count <= max_retries are automatically picked up by
+        the scheduler on the next tick.
+        """
         # Refresh state to pick up new tasks/mutations
         self.state.refresh()
 
@@ -125,7 +136,7 @@ class Daemon:
         paused = is_paused(self.project_root / ".corc")
 
         if not paused:
-            # 1. Scheduler: find ready tasks
+            # 1. Scheduler: find ready tasks (includes retriable failed tasks)
             if self.target_task_id:
                 ready = self._get_target_task()
             else:
@@ -139,8 +150,10 @@ class Daemon:
         completed = self.executor.poll_completed()
 
         # 4. Processor: validate and update state
+        #    The processor handles failed vs escalated decisions based on
+        #    attempt count and max_retries per task.
         for item in completed:
-            proc_result = process_completed(
+            process_completed(
                 task=item.task,
                 result=item.result,
                 attempt=item.attempt,
@@ -151,97 +164,23 @@ class Daemon:
                 project_root=self.project_root,
             )
 
-            if not proc_result.passed:
-                # Handle retry or escalation
-                self._handle_failure(item.task, item.attempt, item.result)
-
-            self._tasks_completed += 1
-
-    def _handle_failure(self, task: dict, attempt: int, result):
-        """Handle a failed task: retry if allowed, otherwise escalate.
-
-        If the retry policy allows more attempts, resets the task to pending
-        so it will be picked up by the scheduler on the next tick.
-        If retries are exhausted, creates an escalation record.
-        """
-        task_id = task["id"]
-
-        if self.retry_policy.should_retry(attempt):
-            # Reset task to pending for retry
-            self.mutation_log.append(
-                "task_updated",
-                {"status": "pending"},
-                reason=f"Retry {attempt + 1}/{self.retry_policy.max_retries + 1}: resetting to pending",
-                task_id=task_id,
-            )
-            self.audit_log.log(
-                "task_retry",
-                task_id=task_id,
-                attempt=attempt,
-                next_attempt=attempt + 1,
-            )
+            # Only count terminal completions (completed or escalated)
+            # Retriable failures don't count — they'll be retried.
             self.state.refresh()
-        else:
-            # Retries exhausted — create escalation
-            error = result.output[:1000] if result.output else f"Exit code {result.exit_code}"
-            escalation = create_escalation(
-                task=task,
-                attempt=attempt,
-                error=error,
-                session_logger=self.session_logger,
-                mutation_log=self.mutation_log,
-            )
-            self.audit_log.log(
-                "escalation",
-                task_id=task_id,
-                escalation_id=escalation["escalation_id"],
-                attempts=attempt,
-            )
-            self.state.refresh()
-
-    def _retry_reconciled_failures(self):
-        """Reset reconciled-failed tasks to pending so they get retried.
-
-        After reconciliation marks dead-agent tasks as failed, check the
-        retry policy. If retries are available, reset the task to pending
-        so the normal daemon loop picks it up.
-        """
-        self.state.refresh()
-        failed_tasks = self.state.list_tasks(status="failed")
-
-        for task in failed_tasks:
-            task_id = task["id"]
-            # Check if this task was failed by reconciliation (look at mutation log)
-            entries = self.mutation_log.read_all()
-            reconciled = False
-            attempt = 1
-            for entry in reversed(entries):
-                if (entry.get("task_id") == task_id and
-                        entry["type"] == "task_failed" and
-                        entry["data"].get("reconciled")):
-                    reconciled = True
-                    attempt = entry["data"].get("attempt", 1)
-                    break
-
-            if reconciled and self.retry_policy.should_retry(attempt):
-                self.mutation_log.append(
-                    "task_updated",
-                    {"status": "pending"},
-                    reason=f"Reconciliation retry: resetting to pending (attempt {attempt})",
-                    task_id=task_id,
-                )
-                self.audit_log.log(
-                    "reconcile_retry",
-                    task_id=task_id,
-                    attempt=attempt,
-                )
-
-        self.state.refresh()
+            task = self.state.get_task(item.task["id"])
+            if task and task["status"] in ("completed", "escalated"):
+                self._tasks_completed += 1
 
     def _get_target_task(self) -> list[dict]:
         """Get the specific target task if it's ready for dispatch."""
         task = self.state.get_task(self.target_task_id)
-        if task and task["status"] == "pending":
+        if task and task["status"] in ("pending", "failed"):
+            # For failed tasks, check retry eligibility
+            if task["status"] == "failed":
+                attempt_count = task.get("attempt_count", 0)
+                max_retries = task.get("max_retries", 3)
+                if attempt_count > max_retries:
+                    return []
             return [task]
         return []
 
@@ -250,9 +189,9 @@ class Daemon:
         if self.once and self._tasks_completed > 0:
             return True
         if self.target_task_id and self._tasks_completed > 0:
-            # Check if the target task is done
+            # Check if the target task is done (terminal state)
             task = self.state.get_task(self.target_task_id)
-            if task and task["status"] in ("completed", "failed"):
+            if task and task["status"] in ("completed", "escalated"):
                 return True
         return False
 

@@ -19,6 +19,7 @@ MUTATION_TYPES = {
     "task_started",
     "task_completed",
     "task_failed",
+    "task_escalated",
     "task_handed_off",
     "task_paused",
     "agent_created",

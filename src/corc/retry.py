@@ -17,7 +17,7 @@ from corc.sessions import SessionLogger
 @dataclass
 class RetryPolicy:
     """Configurable retry policy for task dispatch."""
-    max_retries: int = 2  # Default: 2 retries (so up to 3 total attempts)
+    max_retries: int = 3  # Default: 3 retries (so up to 4 total attempts)
 
     def should_retry(self, attempt: int) -> bool:
         """Check if the task should be retried given the current attempt number."""

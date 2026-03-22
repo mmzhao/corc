@@ -28,7 +28,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     updated TEXT NOT NULL,
     completed TEXT,
     findings TEXT DEFAULT '[]',
-    micro_deviations TEXT DEFAULT '[]'
+    micro_deviations TEXT DEFAULT '[]',
+    attempt_count INTEGER DEFAULT 0,
+    max_retries INTEGER DEFAULT 3
 );
 
 CREATE TABLE IF NOT EXISTS agents (
@@ -100,8 +102,8 @@ class WorkState:
         if t == "task_created":
             self.conn.execute(
                 """INSERT OR REPLACE INTO tasks(id, name, description, status, role, depends_on,
-                   done_when, checklist, context_bundle, created, updated)
-                   VALUES(?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)""",
+                   done_when, checklist, context_bundle, created, updated, max_retries)
+                   VALUES(?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     data["id"],
                     data["name"],
@@ -113,6 +115,7 @@ class WorkState:
                     json.dumps(data.get("context_bundle", [])),
                     entry["ts"],
                     entry["ts"],
+                    data.get("max_retries", 3),
                 ),
             )
         elif t == "task_assigned":
@@ -140,13 +143,19 @@ class WorkState:
             )
         elif t == "task_failed":
             self.conn.execute(
-                "UPDATE tasks SET status='failed', updated=?, findings=? WHERE id=?",
-                (entry["ts"], json.dumps(data.get("findings", [])), task_id),
+                "UPDATE tasks SET status='failed', updated=?, findings=?, attempt_count=? WHERE id=?",
+                (entry["ts"], json.dumps(data.get("findings", [])),
+                 data.get("attempt_count", data.get("attempt", 0)), task_id),
+            )
+        elif t == "task_escalated":
+            self.conn.execute(
+                "UPDATE tasks SET status='escalated', updated=?, attempt_count=? WHERE id=?",
+                (entry["ts"], data.get("attempt_count", data.get("attempt", 0)), task_id),
             )
         elif t == "task_updated":
             updates = []
             params = []
-            for field in ("status", "checklist", "pr_url", "proof_of_work", "findings", "micro_deviations"):
+            for field in ("status", "checklist", "pr_url", "proof_of_work", "findings", "micro_deviations", "attempt_count", "max_retries"):
                 if field in data:
                     val = data[field]
                     if isinstance(val, (list, dict)):
@@ -224,16 +233,25 @@ class WorkState:
         return [self._row_to_dict(r) for r in rows]
 
     def get_ready_tasks(self) -> list[dict]:
-        """Tasks whose dependencies are all completed."""
+        """Tasks whose dependencies are all completed, including retriable failed tasks.
+
+        Returns pending tasks with satisfied dependencies, plus failed tasks
+        that haven't exceeded their max_retries limit.
+        """
         all_tasks = self.list_tasks()
         completed_ids = {t["id"] for t in all_tasks if t["status"] == "completed"}
         ready = []
         for task in all_tasks:
-            if task["status"] != "pending":
-                continue
-            deps = json.loads(task["depends_on"]) if isinstance(task["depends_on"], str) else task["depends_on"]
-            if all(dep in completed_ids for dep in deps):
-                ready.append(task)
+            if task["status"] == "pending":
+                deps = json.loads(task["depends_on"]) if isinstance(task["depends_on"], str) else task["depends_on"]
+                if all(dep in completed_ids for dep in deps):
+                    ready.append(task)
+            elif task["status"] == "failed":
+                # Include failed tasks that haven't exceeded max_retries
+                attempt_count = task.get("attempt_count", 0)
+                max_retries = task.get("max_retries", 3)
+                if attempt_count <= max_retries:
+                    ready.append(task)
         return ready
 
     def _row_to_dict(self, row: sqlite3.Row) -> dict:
