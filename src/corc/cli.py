@@ -89,6 +89,11 @@ def task():
     ),
     help="Task type (default: implementation)",
 )
+@click.option(
+    "--draft",
+    is_flag=True,
+    help="Create task in draft status (not scheduled until approved)",
+)
 def task_create(
     name,
     done_when,
@@ -100,6 +105,7 @@ def task_create(
     strict,
     priority,
     task_type,
+    draft,
 ):
     """Create a new task."""
     # Lint done_when criteria (with type-specific rules)
@@ -139,37 +145,47 @@ def task_create(
     # Record file mtimes at creation time for staleness detection
     bundle_mtimes = record_context_mtimes(bundle, project_root)
 
+    task_data = {
+        "id": task_id,
+        "name": name,
+        "description": description,
+        "role": role,
+        "depends_on": deps,
+        "done_when": done_when,
+        "checklist": cl,
+        "context_bundle": bundle,
+        "context_bundle_mtimes": bundle_mtimes,
+        "priority": priority,
+        "task_type": task_type,
+    }
+    if draft:
+        task_data["status"] = "draft"
+
     ml.append(
         "task_created",
-        {
-            "id": task_id,
-            "name": name,
-            "description": description,
-            "role": role,
-            "depends_on": deps,
-            "done_when": done_when,
-            "checklist": cl,
-            "context_bundle": bundle,
-            "context_bundle_mtimes": bundle_mtimes,
-            "priority": priority,
-            "task_type": task_type,
-        },
+        task_data,
         reason=f"Task created via CLI",
     )
 
     al.log("task_created", task_id=task_id, name=name)
     type_str = f" [{task_type}]" if task_type != "implementation" else ""
-    click.echo(f"Created task {task_id}: {name}{type_str} (priority {priority})")
+    status_str = " [draft]" if draft else ""
+    click.echo(
+        f"Created task {task_id}: {name}{type_str}{status_str} (priority {priority})"
+    )
 
 
 @task.command("list")
 @click.option("--status", default=None, help="Filter by status")
 @click.option("--ready", is_flag=True, help="Show only ready tasks")
-def task_list(status, ready):
+@click.option("--draft", "draft_only", is_flag=True, help="Show only draft tasks")
+def task_list(status, ready, draft_only):
     """List tasks."""
     _, _, ws, _, _, _ = _get_all()
     if ready:
         tasks = ws.get_ready_tasks()
+    elif draft_only:
+        tasks = ws.list_tasks(status="draft")
     elif status:
         tasks = ws.list_tasks(status=status)
     else:
@@ -211,6 +227,53 @@ def task_prioritize(task_id, priority):
     )
     al.log("task_prioritized", task_id=task_id, priority=priority)
     click.echo(f"Task {task_id} priority updated to {priority}.")
+
+
+@task.command("approve")
+@click.argument("task_id", required=False, default=None)
+@click.option("--all", "approve_all", is_flag=True, help="Approve all draft tasks")
+def task_approve(task_id, approve_all):
+    """Approve a draft task (or all drafts) to make it schedulable."""
+    _, ml, ws, al, _, _ = _get_all()
+
+    if approve_all:
+        drafts = ws.list_tasks(status="draft")
+        if not drafts:
+            click.echo("No draft tasks to approve.")
+            return
+        for t in drafts:
+            ml.append(
+                "task_approved",
+                {},
+                reason="Draft approved via CLI (--all)",
+                task_id=t["id"],
+            )
+            al.log("task_approved", task_id=t["id"])
+            click.echo(f"Approved task {t['id']}: {t['name']}")
+        click.echo(f"Approved {len(drafts)} draft task(s).")
+        return
+
+    if not task_id:
+        click.echo("Error: provide a TASK_ID or use --all.", err=True)
+        sys.exit(1)
+
+    t = ws.get_task(task_id)
+    if not t:
+        click.echo(f"Task {task_id} not found.", err=True)
+        sys.exit(1)
+
+    if t["status"] != "draft":
+        click.echo(f"Error: task {task_id} is '{t['status']}', not 'draft'.", err=True)
+        sys.exit(1)
+
+    ml.append(
+        "task_approved",
+        {},
+        reason="Draft approved via CLI",
+        task_id=task_id,
+    )
+    al.log("task_approved", task_id=task_id)
+    click.echo(f"Approved task {task_id}: {t['name']}")
 
 
 @task.command("status")
@@ -693,6 +756,7 @@ def status():
         "completed",
         "running",
         "pending",
+        "draft",
         "failed",
         "escalated",
         "blocked",
@@ -705,6 +769,7 @@ def status():
             "completed": "✅",
             "running": "🔄",
             "pending": "⬚",
+            "draft": "📝",
             "failed": "❌",
             "escalated": "🚨",
             "blocked": "◻",

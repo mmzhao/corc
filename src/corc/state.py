@@ -144,11 +144,12 @@ class WorkState:
                 """INSERT OR REPLACE INTO tasks(id, name, description, status, role, depends_on,
                    done_when, checklist, context_bundle, context_bundle_mtimes,
                    created, updated, attempt_count, max_retries, priority, task_type)
-                   VALUES(?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     data["id"],
                     data["name"],
                     data.get("description", ""),
+                    data.get("status", "pending"),
                     data.get("role", "implementer"),
                     json.dumps(data.get("depends_on", [])),
                     data["done_when"],
@@ -248,6 +249,11 @@ class WorkState:
         elif t == "task_handed_off":
             self.conn.execute(
                 "UPDATE tasks SET status='handed_off', updated=? WHERE id=?",
+                (entry["ts"], task_id),
+            )
+        elif t == "task_approved":
+            self.conn.execute(
+                "UPDATE tasks SET status='pending', updated=? WHERE id=?",
                 (entry["ts"], task_id),
             )
         elif t == "task_pending_merge":
