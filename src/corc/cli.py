@@ -1121,14 +1121,16 @@ def template_cmd(type_name, title, project, render):
 @cli.command()
 @click.option("--last", "last_n", default=20, help="Show last N events")
 def watch(last_n):
-    """Live two-panel dashboard: DAG status + event stream.
+    """Live active-plan dashboard: focused on current work + event stream.
 
-    Top panel shows the task dependency graph with live status updates.
+    Top panel shows only active/relevant tasks: running (with elapsed time
+    and agent info), ready (dispatchable), blocked (with dependency info),
+    and recently completed (dimmed). Historical completed tasks are hidden.
     Bottom panel shows color-coded events as they happen.
     Press 'q' to quit, or Ctrl+C.
     """
     try:
-        from corc.tui import run_dashboard
+        from corc.tui import run_active_dashboard
 
         _watch_dashboard(last_n)
     except ImportError:
@@ -1136,18 +1138,12 @@ def watch(last_n):
 
 
 def _watch_dashboard(last_n):
-    from corc.tui import run_dashboard
+    from corc.tui import run_active_dashboard
+    from corc.queries import QueryAPI
 
-    paths, ml, ws, al, _, _ = _get_all()
-
-    def get_tasks():
-        ws.refresh()
-        return ws.list_tasks()
-
-    def get_events():
-        return al.read_recent(last_n)
-
-    run_dashboard(get_tasks, get_events, max_events=last_n)
+    paths, ml, ws, al, sl, _ = _get_all()
+    query_api = QueryAPI(ws, al, sl)
+    run_active_dashboard(query_api, max_events=last_n)
 
 
 def _watch_plain(last_n):
