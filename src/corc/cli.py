@@ -1488,6 +1488,15 @@ def repo_add(name, path, merge_policy, protected_branches, enforcement_level):
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
 
+    # Auto-generate Claude Code hooks for this repo
+    from corc.hook_gen import sync_hooks
+
+    try:
+        written = sync_hooks(path, repo_config)
+        click.echo(f"Generated {len(written)} hook file(s) in {path}/.claude/")
+    except OSError as e:
+        click.echo(f"Warning: could not generate hooks: {e}", err=True)
+
     click.echo(f"Registered repo '{name}'")
     click.echo(f"  path: {repo_config['path']}")
     click.echo(f"  merge_policy: {repo_config['merge_policy']}")
@@ -1618,6 +1627,16 @@ def repo_update(name, merge_policy, path, protected_branches, enforcement_level)
     except RepoValidationError as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
+
+    # Re-generate Claude Code hooks after update
+    from corc.hook_gen import sync_hooks
+
+    repo_path = repo_config["path"]
+    try:
+        written = sync_hooks(repo_path, repo_config)
+        click.echo(f"Regenerated {len(written)} hook file(s) in {repo_path}/.claude/")
+    except OSError as e:
+        click.echo(f"Warning: could not regenerate hooks: {e}", err=True)
 
     click.echo(f"Updated repo '{name}'")
     click.echo(f"  path: {repo_config['path']}")
