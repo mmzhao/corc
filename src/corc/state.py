@@ -208,10 +208,19 @@ class WorkState:
             updates = []
             params = []
             for field in (
+                "name",
+                "description",
                 "status",
+                "role",
+                "agent_id",
+                "depends_on",
+                "done_when",
                 "checklist",
+                "context_bundle",
+                "context_bundle_mtimes",
                 "pr_url",
                 "proof_of_work",
+                "completed",
                 "findings",
                 "micro_deviations",
                 "attempt_count",

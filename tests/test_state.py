@@ -419,3 +419,101 @@ def test_migration_is_idempotent(tmp_path):
 
     assert task1["max_retries"] == task2["max_retries"] == 5
     assert task1["attempt_count"] == task2["attempt_count"] == 0
+
+
+def test_task_updated_depends_on(state):
+    """task_updated mutation should update depends_on in SQLite."""
+    ml, ws = state
+    ml.append(
+        "task_created",
+        {
+            "id": "t1",
+            "name": "task",
+            "done_when": "done",
+            "depends_on": [],
+        },
+        reason="test",
+    )
+    ws.refresh()
+
+    task = ws.get_task("t1")
+    assert task["depends_on"] == []
+
+    # Update depends_on via task_updated mutation
+    ml.append(
+        "task_updated",
+        {"depends_on": ["t0", "t-1"]},
+        reason="add deps",
+        task_id="t1",
+    )
+    ws.refresh()
+
+    task = ws.get_task("t1")
+    assert task["depends_on"] == ["t0", "t-1"]
+
+
+def test_task_updated_all_fields(state):
+    """task_updated mutation should handle all task fields."""
+    ml, ws = state
+    ml.append(
+        "task_created",
+        {
+            "id": "t1",
+            "name": "original name",
+            "done_when": "original done_when",
+            "description": "original desc",
+            "role": "implementer",
+            "depends_on": [],
+            "checklist": [],
+            "context_bundle": [],
+            "priority": 100,
+        },
+        reason="test",
+    )
+    ws.refresh()
+
+    # Update every field that task_updated should support
+    ml.append(
+        "task_updated",
+        {
+            "name": "new name",
+            "description": "new desc",
+            "status": "running",
+            "role": "scout",
+            "depends_on": ["dep1"],
+            "done_when": "new done_when",
+            "checklist": [{"item": "check1", "done": False}],
+            "context_bundle": ["file1.md", "file2.md"],
+            "context_bundle_mtimes": {"file1.md": "2025-01-01"},
+            "priority": 10,
+            "pr_url": "http://example.com/pr/1",
+            "proof_of_work": {"commit": "abc123"},
+            "findings": ["finding1"],
+            "micro_deviations": ["deviation1"],
+            "attempt_count": 2,
+            "max_retries": 5,
+            "merge_status": "merged",
+        },
+        reason="update all fields",
+        task_id="t1",
+    )
+    ws.refresh()
+
+    task = ws.get_task("t1")
+    assert task["name"] == "new name"
+    assert task["description"] == "new desc"
+    assert task["status"] == "running"
+    assert task["role"] == "scout"
+    assert task["depends_on"] == ["dep1"]
+    assert task["done_when"] == "new done_when"
+    assert task["checklist"] == [{"item": "check1", "done": False}]
+    assert task["context_bundle"] == ["file1.md", "file2.md"]
+    assert task["context_bundle_mtimes"] == {"file1.md": "2025-01-01"}
+    assert task["priority"] == 10
+    assert task["pr_url"] == "http://example.com/pr/1"
+    assert task["proof_of_work"] == {"commit": "abc123"}
+    assert task["findings"] == ["finding1"]
+    assert task["micro_deviations"] == ["deviation1"]
+    assert task["attempt_count"] == 2
+    assert task["max_retries"] == 5
+    assert task["merge_status"] == "merged"
