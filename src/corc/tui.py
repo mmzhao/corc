@@ -5,14 +5,16 @@ Shows only what matters *right now*:
   - Ready tasks (marked as dispatchable)
   - Blocked tasks (with dependency info)
   - Recently completed tasks (dimmed, last hour)
+  - Streaming detail (live tool calls, reasoning, checklist progress)
   - Event stream (color-coded)
 
 Historical completed tasks from old phases are hidden.
 Data comes from queries.py (QueryAPI data layer).
 
-Press 'q' to quit, or Ctrl+C.
+Press 'q' to quit, or Ctrl+C.  ↑/↓ to scroll streaming detail.
 """
 
+import json
 import sys
 import threading
 import time
@@ -80,6 +82,229 @@ def _elapsed_since(iso_ts: str) -> str:
         return f"{hours}h {mins}m"
     except (ValueError, TypeError, OverflowError):
         return ""
+
+
+# ── Stream event helpers (testable, pure) ────────────────────────────────
+
+
+def _parse_stream_content(entry: dict) -> dict | None:
+    """Parse the JSON content field of a stream_event entry.
+
+    Session log stream_event entries store the original event as a
+    JSON-encoded string in the ``content`` field.  Returns the parsed
+    dict or ``None`` on failure.
+    """
+    content = entry.get("content", "")
+    if not content:
+        return None
+    try:
+        return json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def _format_tool_call(event: dict) -> str:
+    """Format a tool_use event as a concise one-liner.
+
+    Extracts the most useful input parameter for display:
+      - file_path for Read/Write/Edit
+      - command for Bash
+      - pattern for Grep/Glob
+      - Falls back to first key=value
+
+    Returns e.g. ``'Read /src/main.py'`` or ``'Bash ls -la'``.
+    """
+    tool = event.get("tool", {})
+    name = tool.get("name", "?")
+    tool_input = tool.get("input", {})
+
+    if "file_path" in tool_input:
+        return f"{name} {tool_input['file_path']}"
+    if "command" in tool_input:
+        cmd = tool_input["command"]
+        if len(cmd) > 60:
+            cmd = cmd[:57] + "..."
+        return f"{name} {cmd}"
+    if "pattern" in tool_input:
+        return f"{name} {tool_input['pattern']}"
+    # Fallback: show first input key=value
+    if tool_input:
+        key = next(iter(tool_input))
+        val = str(tool_input[key])
+        if len(val) > 40:
+            val = val[:37] + "..."
+        return f"{name} {key}={val}"
+    return name
+
+
+def _truncate_reasoning(text: str, max_len: int = 120) -> str:
+    """Truncate assistant reasoning text for single-line display.
+
+    Collapses newlines into spaces, strips whitespace, and truncates
+    with ``...`` if longer than *max_len*.
+    """
+    clean = text.replace("\n", " ").strip()
+    if len(clean) <= max_len:
+        return clean
+    return clean[: max_len - 3] + "..."
+
+
+def _format_checklist_progress(checklist) -> str | None:
+    """Format a task checklist as a progress string.
+
+    *checklist* may be a JSON string or a list of dicts, each with an
+    optional ``done`` boolean.  Returns e.g. ``'3/5 items done'`` or
+    ``None`` if there is no valid checklist.
+    """
+    if not checklist:
+        return None
+    if isinstance(checklist, str):
+        try:
+            checklist = json.loads(checklist)
+        except (json.JSONDecodeError, TypeError):
+            return None
+    if not isinstance(checklist, list) or not checklist:
+        return None
+
+    total = len(checklist)
+    done = sum(1 for item in checklist if isinstance(item, dict) and item.get("done"))
+    return f"{done}/{total} items done"
+
+
+def build_streaming_detail_panel(
+    running_tasks: list[dict],
+    stream_events_by_task: dict[str, list[dict]],
+    scroll_offset: int = 0,
+    max_lines: int = 30,
+) -> Panel:
+    """Build the streaming detail panel showing live agent activity.
+
+    For each running task, displays:
+      - Task header (name + id)
+      - Checklist progress (if checklist present)
+      - Tool calls with file paths (🔧)
+      - Assistant reasoning truncated (💭)
+      - Result summaries (✅)
+
+    Supports scrolling via *scroll_offset* (lines from the bottom).
+
+    Args:
+        running_tasks: Currently running task dicts (may include checklist).
+        stream_events_by_task: Maps task_id → list of stream_event entries
+            from ``QueryAPI.get_task_stream_events()``.
+        scroll_offset: Lines to scroll up from the bottom (0 = newest).
+        max_lines: Maximum number of lines to display.
+    """
+    lines: list[Text] = []
+
+    if not running_tasks:
+        content = Text("No running agents. Waiting for dispatch...", style="dim")
+        return Panel(
+            content,
+            title="[bold] Streaming Detail [/bold]",
+            subtitle="↑/↓ scroll",
+            border_style="magenta",
+        )
+
+    def _name(t: dict) -> str:
+        return t.get("name") or t.get("id", "?")[:12]
+
+    def _tid(t: dict) -> str:
+        return t.get("id", "")[:8]
+
+    for task in running_tasks:
+        tid = task.get("id", "?")
+
+        # ── Task header ────────────────────────────────────────────
+        header = Text()
+        header.append(f"  🔄 {_name(task)}", style="bold yellow")
+        header.append(f"  ({_tid(task)})", style="dim")
+        lines.append(header)
+
+        # ── Checklist progress ─────────────────────────────────────
+        checklist = task.get("checklist")
+        progress = _format_checklist_progress(checklist)
+        if progress:
+            prog_line = Text()
+            prog_line.append(f"    ☑ {progress}", style="cyan")
+            lines.append(prog_line)
+
+        # ── Stream events for this task ────────────────────────────
+        events = stream_events_by_task.get(tid, [])
+        if not events:
+            empty_line = Text()
+            empty_line.append("    Waiting for stream events...", style="dim")
+            lines.append(empty_line)
+        else:
+            # Show recent events (last 20 per task to keep panel readable)
+            display_events = events[-20:]
+            for entry in display_events:
+                stream_type = entry.get("stream_type", "unknown")
+                parsed = _parse_stream_content(entry)
+                if parsed is None:
+                    continue
+
+                if stream_type == "tool_use":
+                    desc = _format_tool_call(parsed)
+                    line = Text()
+                    line.append("    🔧 ", style="magenta")
+                    line.append(desc, style="magenta")
+                    lines.append(line)
+
+                elif stream_type == "assistant":
+                    # Extract text content from assistant message
+                    message = parsed.get("message", {})
+                    content_blocks = message.get("content", [])
+                    texts = [
+                        b.get("text", "")
+                        for b in content_blocks
+                        if b.get("type") == "text"
+                    ]
+                    full_text = " ".join(texts)
+                    if full_text:
+                        truncated = _truncate_reasoning(full_text)
+                        line = Text()
+                        line.append("    💭 ", style="blue")
+                        line.append(truncated, style="blue dim")
+                        lines.append(line)
+
+                elif stream_type == "result":
+                    result_text = parsed.get("result", "")
+                    if result_text:
+                        truncated = _truncate_reasoning(result_text, max_len=80)
+                        line = Text()
+                        line.append("    ✅ ", style="green")
+                        line.append(truncated, style="green")
+                        lines.append(line)
+
+        lines.append(Text(""))  # Spacer between tasks
+
+    # ── Apply scroll offset ────────────────────────────────────────
+    total_lines = len(lines)
+    if scroll_offset > 0 and total_lines > max_lines:
+        end = max(0, total_lines - scroll_offset)
+        start = max(0, end - max_lines)
+        lines = lines[start:end]
+    elif total_lines > max_lines:
+        # Default: show the most recent lines (bottom)
+        lines = lines[-max_lines:]
+
+    if lines:
+        content = Text("\n").join(lines)
+    else:
+        content = Text("No stream data yet.", style="dim")
+
+    # Scroll indicator in subtitle
+    subtitle = "↑/↓ scroll"
+    if scroll_offset > 0:
+        subtitle += f" | offset: {scroll_offset}"
+
+    return Panel(
+        content,
+        title="[bold] Streaming Detail [/bold]",
+        subtitle=subtitle,
+        border_style="magenta",
+    )
 
 
 # ── Panel builders (testable, pure rendering) ───────────────────────────
@@ -393,18 +618,42 @@ def build_active_dashboard(
     other_active: list[dict],
     events: list[dict],
     max_events: int = 20,
+    stream_events_by_task: dict[str, list[dict]] | None = None,
+    scroll_offset: int = 0,
 ) -> Layout:
     """Build the active-plan-focused dashboard layout.
 
     Returns a Rich Layout with:
       - top: Active plan panel (ratio 2 — more prominent)
+      - middle: Streaming detail panel (ratio 2) — when stream data provided
       - bottom: event stream panel (ratio 1)
+
+    When *stream_events_by_task* is ``None``, the layout falls back to
+    the original two-panel layout (backward compatible).
     """
     layout = Layout()
-    layout.split_column(
-        Layout(name="active_plan", ratio=2),
-        Layout(name="events", ratio=1),
-    )
+
+    if stream_events_by_task is not None:
+        # Three-panel layout with streaming detail
+        layout.split_column(
+            Layout(name="active_plan", ratio=2),
+            Layout(name="streaming", ratio=2),
+            Layout(name="events", ratio=1),
+        )
+        layout["streaming"].update(
+            build_streaming_detail_panel(
+                running_tasks,
+                stream_events_by_task,
+                scroll_offset=scroll_offset,
+            )
+        )
+    else:
+        # Legacy two-panel layout
+        layout.split_column(
+            Layout(name="active_plan", ratio=2),
+            Layout(name="events", ratio=1),
+        )
+
     layout["active_plan"].update(
         build_active_plan_panel(
             running_tasks,
@@ -443,6 +692,62 @@ def _listen_for_quit(stop_event: threading.Event) -> None:
                     if ch.lower() == "q":
                         stop_event.set()
                         break
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    except (ImportError, OSError, ValueError, AttributeError):
+        # Not a real terminal -- just wait for the stop event
+        while not stop_event.is_set():
+            stop_event.wait(0.5)
+
+
+def _listen_for_keys(
+    stop_event: threading.Event,
+    scroll_state: dict,
+) -> None:
+    """Background thread: listen for 'q' and arrow keys.
+
+    Handles:
+      - ``q``: quit (sets *stop_event*)
+      - ``↑`` (ESC [ A): scroll streaming panel up
+      - ``↓`` (ESC [ B): scroll streaming panel down (towards newest)
+
+    *scroll_state* is a mutable dict with key ``offset`` (int).
+    Uses cbreak mode on Unix; falls back to quit-only on non-terminals.
+    """
+    try:
+        import tty
+        import termios
+        import select
+
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            while not stop_event.is_set():
+                ready, _, _ = select.select([sys.stdin], [], [], 0.2)
+                if ready:
+                    ch = sys.stdin.read(1)
+                    if ch.lower() == "q":
+                        stop_event.set()
+                        break
+                    if ch == "\x1b":
+                        # Possible escape sequence (arrow key)
+                        ready2, _, _ = select.select([sys.stdin], [], [], 0.05)
+                        if ready2:
+                            ch2 = sys.stdin.read(1)
+                            if ch2 == "[":
+                                ready3, _, _ = select.select([sys.stdin], [], [], 0.05)
+                                if ready3:
+                                    ch3 = sys.stdin.read(1)
+                                    if ch3 == "A":  # Up arrow
+                                        scroll_state["offset"] = (
+                                            scroll_state.get("offset", 0) + 3
+                                        )
+                                    elif ch3 == "B":  # Down arrow
+                                        scroll_state["offset"] = max(
+                                            0,
+                                            scroll_state.get("offset", 0) - 3,
+                                        )
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
     except (ImportError, OSError, ValueError, AttributeError):
@@ -506,7 +811,12 @@ def run_active_dashboard(
       - Ready (dispatchable) tasks
       - Blocked tasks with reasons
       - Recently completed (last hour)
+      - Streaming detail from session log stream events
       - Recent events
+
+    The streaming detail panel auto-updates each refresh cycle by
+    calling ``query_api.get_task_stream_events()`` for every running
+    task.  Arrow keys scroll the streaming panel up/down.
 
     Args:
         query_api: A QueryAPI instance (from corc.queries).
@@ -516,16 +826,14 @@ def run_active_dashboard(
     """
     console = console or Console()
     stop_event = threading.Event()
+    scroll_state: dict = {"offset": 0}
 
     key_thread = threading.Thread(
-        target=_listen_for_quit, args=(stop_event,), daemon=True
+        target=_listen_for_keys, args=(stop_event, scroll_state), daemon=True
     )
     key_thread.start()
 
     interval = 1.0 / refresh_per_second
-
-    # IDs we've seen as running/ready/blocked/completed to filter "other active"
-    _CATEGORIZED_STATUSES = frozenset({"running", "completed"})
 
     try:
         with Live(
@@ -541,6 +849,12 @@ def run_active_dashboard(
                 blocked = query_api.get_blocked_tasks_with_reasons()
                 recent_done = query_api.get_recently_completed_tasks(hours=1.0)
                 events = query_api.get_recent_events(max_events)
+
+                # Fetch stream events for each running task
+                stream_events_by_task: dict[str, list[dict]] = {}
+                for task in running:
+                    tid = task["id"]
+                    stream_events_by_task[tid] = query_api.get_task_stream_events(tid)
 
                 # "Other active" = active tasks not in running/ready/blocked
                 categorized_ids = (
@@ -559,6 +873,8 @@ def run_active_dashboard(
                     other,
                     events,
                     max_events,
+                    stream_events_by_task=stream_events_by_task,
+                    scroll_offset=scroll_state.get("offset", 0),
                 )
                 live.update(dashboard)
                 stop_event.wait(interval)

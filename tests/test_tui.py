@@ -7,13 +7,15 @@ Tests cover:
   - Ready tasks: marked as dispatchable
   - Blocked tasks: dependency info shown
   - Recently completed: dimmed rendering
+  - Streaming detail panel: tool calls, reasoning, checklist, scrolling
   - Event panel: unchanged from v1
-  - Dashboard layout: active_plan + events
+  - Dashboard layout: active_plan + streaming + events
   - Legacy compatibility: build_dag_panel, build_dashboard still work
   - QueryAPI integration: get_recently_completed_tasks
 """
 
 import io
+import json
 import time
 import threading
 from datetime import datetime, timezone, timedelta
@@ -28,11 +30,16 @@ from rich.text import Text
 from corc.tui import (
     build_active_plan_panel,
     build_event_panel,
+    build_streaming_detail_panel,
     build_dag_panel,
     build_dashboard,
     build_active_dashboard,
     EVENT_STYLES,
     _elapsed_since,
+    _parse_stream_content,
+    _format_tool_call,
+    _truncate_reasoning,
+    _format_checklist_progress,
 )
 
 
@@ -1030,3 +1037,872 @@ class TestActivePanelResize:
         layout = build_active_dashboard(running, [], [], [], [], [])
         text = _render_to_plain(layout, width=200)
         assert "Active Plan" in text
+
+
+# ── Stream event helpers ─────────────────────────────────────────────────
+
+
+def _make_stream_entry(stream_type: str, event_data: dict) -> dict:
+    """Build a stream_event entry as returned by QueryAPI.get_task_stream_events()."""
+    return {
+        "timestamp": "2026-03-23T10:00:00.000Z",
+        "type": "stream_event",
+        "content": json.dumps(event_data, separators=(",", ":")),
+        "stream_type": stream_type,
+    }
+
+
+# ── _parse_stream_content ────────────────────────────────────────────────
+
+
+class TestParseStreamContent:
+    def test_valid_json_content(self):
+        entry = _make_stream_entry(
+            "tool_use", {"type": "tool_use", "tool": {"name": "Read"}}
+        )
+        parsed = _parse_stream_content(entry)
+        assert parsed is not None
+        assert parsed["type"] == "tool_use"
+
+    def test_empty_content(self):
+        assert _parse_stream_content({"content": ""}) is None
+
+    def test_missing_content(self):
+        assert _parse_stream_content({}) is None
+
+    def test_invalid_json(self):
+        assert _parse_stream_content({"content": "not json"}) is None
+
+    def test_none_content(self):
+        assert _parse_stream_content({"content": None}) is None
+
+
+# ── _format_tool_call ────────────────────────────────────────────────────
+
+
+class TestFormatToolCall:
+    def test_read_file_path(self):
+        event = {"tool": {"name": "Read", "input": {"file_path": "/src/main.py"}}}
+        assert _format_tool_call(event) == "Read /src/main.py"
+
+    def test_write_file_path(self):
+        event = {
+            "tool": {
+                "name": "Write",
+                "input": {"file_path": "/src/new.py", "content": "code"},
+            }
+        }
+        assert _format_tool_call(event) == "Write /src/new.py"
+
+    def test_bash_command(self):
+        event = {"tool": {"name": "Bash", "input": {"command": "ls -la"}}}
+        assert _format_tool_call(event) == "Bash ls -la"
+
+    def test_bash_long_command_truncated(self):
+        long_cmd = "x" * 100
+        event = {"tool": {"name": "Bash", "input": {"command": long_cmd}}}
+        result = _format_tool_call(event)
+        assert len(result) < 70
+        assert result.endswith("...")
+
+    def test_grep_pattern(self):
+        event = {"tool": {"name": "Grep", "input": {"pattern": "def main"}}}
+        assert _format_tool_call(event) == "Grep def main"
+
+    def test_glob_pattern(self):
+        event = {"tool": {"name": "Glob", "input": {"pattern": "**/*.py"}}}
+        assert _format_tool_call(event) == "Glob **/*.py"
+
+    def test_fallback_first_key(self):
+        event = {"tool": {"name": "Custom", "input": {"query": "find something"}}}
+        result = _format_tool_call(event)
+        assert "Custom" in result
+        assert "query=" in result
+
+    def test_no_input(self):
+        event = {"tool": {"name": "NoArgs", "input": {}}}
+        assert _format_tool_call(event) == "NoArgs"
+
+    def test_missing_tool(self):
+        event = {}
+        result = _format_tool_call(event)
+        assert result == "?"
+
+    def test_fallback_long_value_truncated(self):
+        event = {"tool": {"name": "Custom", "input": {"data": "a" * 100}}}
+        result = _format_tool_call(event)
+        assert "..." in result
+        assert len(result) < 60
+
+
+# ── _truncate_reasoning ──────────────────────────────────────────────────
+
+
+class TestTruncateReasoning:
+    def test_short_text_unchanged(self):
+        assert _truncate_reasoning("Short text.") == "Short text."
+
+    def test_long_text_truncated(self):
+        long_text = "a" * 200
+        result = _truncate_reasoning(long_text, max_len=50)
+        assert len(result) == 50
+        assert result.endswith("...")
+
+    def test_newlines_collapsed(self):
+        text = "Line one.\nLine two.\nLine three."
+        result = _truncate_reasoning(text)
+        assert "\n" not in result
+        assert "Line one. Line two. Line three." == result
+
+    def test_whitespace_stripped(self):
+        assert _truncate_reasoning("  hello  ") == "hello"
+
+    def test_exact_max_len(self):
+        text = "x" * 120
+        result = _truncate_reasoning(text, max_len=120)
+        assert result == text  # Exactly at limit, no truncation
+
+    def test_one_over_max_len(self):
+        text = "x" * 121
+        result = _truncate_reasoning(text, max_len=120)
+        assert len(result) == 120
+        assert result.endswith("...")
+
+
+# ── _format_checklist_progress ───────────────────────────────────────────
+
+
+class TestFormatChecklistProgress:
+    def test_no_checklist(self):
+        assert _format_checklist_progress(None) is None
+        assert _format_checklist_progress("") is None
+        assert _format_checklist_progress([]) is None
+
+    def test_list_of_dicts(self):
+        checklist = [
+            {"item": "Write tests", "done": True},
+            {"item": "Implement feature", "done": True},
+            {"item": "Review PR", "done": False},
+        ]
+        result = _format_checklist_progress(checklist)
+        assert result == "2/3 items done"
+
+    def test_all_done(self):
+        checklist = [{"done": True}, {"done": True}]
+        assert _format_checklist_progress(checklist) == "2/2 items done"
+
+    def test_none_done(self):
+        checklist = [{"done": False}, {"done": False}]
+        assert _format_checklist_progress(checklist) == "0/2 items done"
+
+    def test_json_string_input(self):
+        checklist_str = json.dumps([{"done": True}, {"done": False}])
+        result = _format_checklist_progress(checklist_str)
+        assert result == "1/2 items done"
+
+    def test_invalid_json_string(self):
+        assert _format_checklist_progress("not json") is None
+
+    def test_items_without_done_key(self):
+        """Items without 'done' key count as not done."""
+        checklist = [{"item": "task"}]
+        assert _format_checklist_progress(checklist) == "0/1 items done"
+
+    def test_non_list_after_parse(self):
+        """If JSON parses to non-list, return None."""
+        assert _format_checklist_progress('{"not": "a list"}') is None
+
+
+# ── build_streaming_detail_panel ─────────────────────────────────────────
+
+
+class TestBuildStreamingDetailPanel:
+    """Test the streaming detail panel builder."""
+
+    def test_empty_state_no_running_tasks(self):
+        """No running tasks shows empty message."""
+        panel = build_streaming_detail_panel([], {})
+        assert isinstance(panel, Panel)
+        text = _render_to_plain(panel)
+        assert "No running agents" in text
+
+    def test_panel_title(self):
+        panel = build_streaming_detail_panel([], {})
+        text = _render_to_plain(panel)
+        assert "Streaming Detail" in text
+
+    def test_panel_border_style(self):
+        panel = build_streaming_detail_panel([], {})
+        assert panel.border_style == "magenta"
+
+    def test_scroll_hint_in_subtitle(self):
+        panel = build_streaming_detail_panel([], {})
+        text = _render_to_plain(panel)
+        assert "scroll" in text
+
+    def test_running_task_header(self):
+        """Running task name and ID are displayed."""
+        running = [_make_task("task-abc123", "build-parser", status="running")]
+        panel = build_streaming_detail_panel(running, {})
+        text = _render_to_plain(panel)
+        assert "build-parser" in text
+        assert "task-abc" in text
+
+    def test_waiting_for_stream_events(self):
+        """When no stream events exist yet, shows waiting message."""
+        running = [_make_task("t1", "new-task", status="running")]
+        panel = build_streaming_detail_panel(running, {})
+        text = _render_to_plain(panel)
+        assert "Waiting for stream events" in text
+
+    def test_tool_use_displayed(self):
+        """Tool use events show tool name and file path."""
+        running = [_make_task("t1", "coding-task", status="running")]
+        events = {
+            "t1": [
+                _make_stream_entry(
+                    "tool_use",
+                    {
+                        "type": "tool_use",
+                        "tool": {
+                            "name": "Read",
+                            "input": {"file_path": "/src/main.py"},
+                        },
+                    },
+                ),
+            ]
+        }
+        panel = build_streaming_detail_panel(running, events)
+        text = _render_to_plain(panel)
+        assert "Read" in text
+        assert "/src/main.py" in text
+
+    def test_assistant_reasoning_displayed(self):
+        """Assistant messages show truncated reasoning."""
+        running = [_make_task("t1", "reasoning-task", status="running")]
+        events = {
+            "t1": [
+                _make_stream_entry(
+                    "assistant",
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "Let me analyze the code structure.",
+                                }
+                            ],
+                        },
+                    },
+                ),
+            ]
+        }
+        panel = build_streaming_detail_panel(running, events)
+        text = _render_to_plain(panel)
+        assert "Let me analyze the code structure." in text
+
+    def test_assistant_reasoning_truncated(self):
+        """Long assistant messages are truncated."""
+        running = [_make_task("t1", "verbose-task", status="running")]
+        long_text = "x" * 200
+        events = {
+            "t1": [
+                _make_stream_entry(
+                    "assistant",
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "content": [{"type": "text", "text": long_text}],
+                        },
+                    },
+                ),
+            ]
+        }
+        panel = build_streaming_detail_panel(running, events)
+        text = _render_to_plain(panel)
+        assert "..." in text
+        # Should not contain the full 200-char string
+        assert long_text not in text
+
+    def test_result_event_displayed(self):
+        """Result events show completion summary."""
+        running = [_make_task("t1", "done-task", status="running")]
+        events = {
+            "t1": [
+                _make_stream_entry(
+                    "result",
+                    {
+                        "type": "result",
+                        "result": "Task completed successfully.",
+                    },
+                ),
+            ]
+        }
+        panel = build_streaming_detail_panel(running, events)
+        text = _render_to_plain(panel)
+        assert "Task completed successfully." in text
+
+    def test_checklist_progress_displayed(self):
+        """Tasks with checklist show progress."""
+        checklist = [
+            {"item": "Write tests", "done": True},
+            {"item": "Implement feature", "done": False},
+            {"item": "Review PR", "done": False},
+        ]
+        running = [
+            _make_task("t1", "checklist-task", status="running", checklist=checklist)
+        ]
+        panel = build_streaming_detail_panel(running, {})
+        text = _render_to_plain(panel)
+        assert "1/3 items done" in text
+
+    def test_multiple_running_tasks(self):
+        """Multiple running tasks each get their own section."""
+        running = [
+            _make_task("t1", "task-alpha", status="running"),
+            _make_task("t2", "task-beta", status="running"),
+        ]
+        events = {
+            "t1": [
+                _make_stream_entry(
+                    "tool_use",
+                    {
+                        "type": "tool_use",
+                        "tool": {"name": "Read", "input": {"file_path": "/alpha.py"}},
+                    },
+                ),
+            ],
+            "t2": [
+                _make_stream_entry(
+                    "tool_use",
+                    {
+                        "type": "tool_use",
+                        "tool": {"name": "Write", "input": {"file_path": "/beta.py"}},
+                    },
+                ),
+            ],
+        }
+        panel = build_streaming_detail_panel(running, events)
+        text = _render_to_plain(panel)
+        assert "task-alpha" in text
+        assert "task-beta" in text
+        assert "/alpha.py" in text
+        assert "/beta.py" in text
+
+    def test_mixed_event_types(self):
+        """Mix of tool_use, assistant, and result events render together."""
+        running = [_make_task("t1", "mixed-task", status="running")]
+        events = {
+            "t1": [
+                _make_stream_entry(
+                    "assistant",
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "content": [{"type": "text", "text": "Analyzing..."}]
+                        },
+                    },
+                ),
+                _make_stream_entry(
+                    "tool_use",
+                    {
+                        "type": "tool_use",
+                        "tool": {"name": "Bash", "input": {"command": "ls"}},
+                    },
+                ),
+                _make_stream_entry(
+                    "result",
+                    {
+                        "type": "result",
+                        "result": "Done.",
+                    },
+                ),
+            ]
+        }
+        panel = build_streaming_detail_panel(running, events)
+        text = _render_to_plain(panel)
+        assert "Analyzing" in text
+        assert "Bash" in text
+        assert "Done." in text
+
+    def test_system_events_skipped(self):
+        """System events don't produce visible output."""
+        running = [_make_task("t1", "sys-task", status="running")]
+        events = {
+            "t1": [
+                _make_stream_entry("system", {"type": "system", "subtype": "init"}),
+            ]
+        }
+        panel = build_streaming_detail_panel(running, events)
+        text = _render_to_plain(panel)
+        # System events produce no display lines; task header still there
+        assert "sys-task" in text
+        assert "init" not in text
+
+    def test_tool_result_events_skipped(self):
+        """tool_result events don't produce visible output (too verbose)."""
+        running = [_make_task("t1", "result-task", status="running")]
+        events = {
+            "t1": [
+                _make_stream_entry(
+                    "tool_result",
+                    {
+                        "type": "tool_result",
+                        "tool": {"content": "long output..."},
+                    },
+                ),
+            ]
+        }
+        panel = build_streaming_detail_panel(running, events)
+        text = _render_to_plain(panel)
+        assert "result-task" in text
+        assert "long output" not in text
+
+    def test_scroll_offset_applied(self):
+        """Scroll offset shifts the visible window upward."""
+        running = [_make_task("t1", "scrolling-task", status="running")]
+        # Create many events to exceed max_lines
+        many_events = []
+        for i in range(40):
+            many_events.append(
+                _make_stream_entry(
+                    "tool_use",
+                    {
+                        "type": "tool_use",
+                        "tool": {
+                            "name": "Read",
+                            "input": {"file_path": f"/file{i}.py"},
+                        },
+                    },
+                )
+            )
+        events = {"t1": many_events}
+
+        # Without scroll: shows newest (last events)
+        panel_default = build_streaming_detail_panel(
+            running, events, scroll_offset=0, max_lines=10
+        )
+        text_default = _render_to_plain(panel_default)
+        assert "/file39.py" in text_default
+
+        # With scroll offset: shows older events
+        panel_scrolled = build_streaming_detail_panel(
+            running, events, scroll_offset=20, max_lines=10
+        )
+        text_scrolled = _render_to_plain(panel_scrolled)
+        # Should show events further back
+        assert "/file39.py" not in text_scrolled
+        assert "offset: 20" in text_scrolled
+
+    def test_scroll_offset_zero_shows_newest(self):
+        """Default scroll_offset=0 shows the most recent events."""
+        running = [_make_task("t1", "recent-task", status="running")]
+        events = {
+            "t1": [
+                _make_stream_entry(
+                    "tool_use",
+                    {
+                        "type": "tool_use",
+                        "tool": {"name": "Read", "input": {"file_path": "/old.py"}},
+                    },
+                ),
+                _make_stream_entry(
+                    "tool_use",
+                    {
+                        "type": "tool_use",
+                        "tool": {"name": "Read", "input": {"file_path": "/newest.py"}},
+                    },
+                ),
+            ]
+        }
+        panel = build_streaming_detail_panel(running, events, scroll_offset=0)
+        text = _render_to_plain(panel)
+        assert "/newest.py" in text
+
+    def test_max_lines_limit(self):
+        """Panel respects max_lines limit."""
+        running = [_make_task("t1", "busy-task", status="running")]
+        many_events = []
+        for i in range(50):
+            many_events.append(
+                _make_stream_entry(
+                    "tool_use",
+                    {
+                        "type": "tool_use",
+                        "tool": {
+                            "name": "Read",
+                            "input": {"file_path": f"/file{i}.py"},
+                        },
+                    },
+                )
+            )
+        events = {"t1": many_events}
+        panel = build_streaming_detail_panel(running, events, max_lines=5)
+        text = _render_to_plain(panel)
+        # Should not contain all 50 files - limited by max_lines
+        file_count = sum(1 for i in range(50) if f"/file{i}.py" in text)
+        assert file_count <= 5
+
+    def test_assistant_no_text_blocks_skipped(self):
+        """Assistant message without text blocks produces no output."""
+        running = [_make_task("t1", "tool-only-task", status="running")]
+        events = {
+            "t1": [
+                _make_stream_entry(
+                    "assistant",
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "content": [
+                                {"type": "tool_use", "name": "Read", "input": {}}
+                            ],
+                        },
+                    },
+                ),
+            ]
+        }
+        panel = build_streaming_detail_panel(running, events)
+        text = _render_to_plain(panel)
+        assert "tool-only-task" in text
+        # No reasoning line should appear
+
+    def test_result_no_text_skipped(self):
+        """Result event with empty result text produces no output."""
+        running = [_make_task("t1", "empty-result-task", status="running")]
+        events = {
+            "t1": [
+                _make_stream_entry(
+                    "result",
+                    {
+                        "type": "result",
+                        "result": "",
+                    },
+                ),
+            ]
+        }
+        panel = build_streaming_detail_panel(running, events)
+        text = _render_to_plain(panel)
+        assert "empty-result-task" in text
+
+    def test_invalid_content_skipped_gracefully(self):
+        """Entries with unparseable content are silently skipped."""
+        running = [_make_task("t1", "bad-data-task", status="running")]
+        events = {
+            "t1": [
+                {
+                    "timestamp": "...",
+                    "type": "stream_event",
+                    "content": "not-json",
+                    "stream_type": "unknown",
+                },
+                _make_stream_entry(
+                    "tool_use",
+                    {
+                        "type": "tool_use",
+                        "tool": {"name": "Read", "input": {"file_path": "/good.py"}},
+                    },
+                ),
+            ]
+        }
+        panel = build_streaming_detail_panel(running, events)
+        text = _render_to_plain(panel)
+        assert "/good.py" in text
+        assert "bad-data-task" in text
+
+    def test_renders_at_narrow_width(self):
+        """Panel renders without crash at narrow terminal width."""
+        running = [_make_task("t1", "narrow-task", status="running")]
+        events = {
+            "t1": [
+                _make_stream_entry(
+                    "tool_use",
+                    {
+                        "type": "tool_use",
+                        "tool": {
+                            "name": "Read",
+                            "input": {"file_path": "/src/main.py"},
+                        },
+                    },
+                ),
+            ]
+        }
+        panel = build_streaming_detail_panel(running, events)
+        text = _render_to_plain(panel, width=40)
+        assert "Streaming Detail" in text
+
+    def test_renders_at_wide_width(self):
+        """Panel renders without crash at wide terminal width."""
+        running = [_make_task("t1", "wide-task", status="running")]
+        panel = build_streaming_detail_panel(running, {})
+        text = _render_to_plain(panel, width=200)
+        assert "Streaming Detail" in text
+
+
+# ── Active Dashboard with Streaming ──────────────────────────────────────
+
+
+class TestBuildActiveDashboardWithStreaming:
+    """Test the three-panel dashboard layout when streaming data is provided."""
+
+    def test_three_panel_layout_with_streaming(self):
+        """When stream_events_by_task is provided, layout has 3 panels."""
+        layout = build_active_dashboard(
+            [], [], [], [], [], [], stream_events_by_task={}
+        )
+        child_names = [c.name for c in layout.children]
+        assert "active_plan" in child_names
+        assert "streaming" in child_names
+        assert "events" in child_names
+        assert len(layout.children) == 3
+
+    def test_two_panel_layout_without_streaming(self):
+        """When stream_events_by_task is None (default), layout has 2 panels."""
+        layout = build_active_dashboard([], [], [], [], [], [])
+        child_names = [c.name for c in layout.children]
+        assert "active_plan" in child_names
+        assert "events" in child_names
+        assert "streaming" not in child_names
+        assert len(layout.children) == 2
+
+    def test_streaming_panel_ratios(self):
+        """Three-panel layout has correct ratios."""
+        layout = build_active_dashboard(
+            [], [], [], [], [], [], stream_events_by_task={}
+        )
+        assert layout.children[0].name == "active_plan"
+        assert layout.children[0].ratio == 2
+        assert layout.children[1].name == "streaming"
+        assert layout.children[1].ratio == 2
+        assert layout.children[2].name == "events"
+        assert layout.children[2].ratio == 1
+
+    def test_streaming_renders_with_data(self):
+        """Full dashboard with streaming data renders correctly."""
+        running = [_make_task("r1", "live-task", status="running")]
+        stream_events = {
+            "r1": [
+                _make_stream_entry(
+                    "tool_use",
+                    {
+                        "type": "tool_use",
+                        "tool": {"name": "Read", "input": {"file_path": "/src/app.py"}},
+                    },
+                ),
+            ]
+        }
+        events = [
+            {
+                "timestamp": "2026-03-23T10:00:00.000Z",
+                "event_type": "task_dispatched",
+                "task_id": "r1",
+            }
+        ]
+
+        layout = build_active_dashboard(
+            running,
+            [],
+            [],
+            [],
+            [],
+            events,
+            stream_events_by_task=stream_events,
+        )
+        text = _render_to_plain(layout, width=120)
+
+        assert "Active Plan" in text
+        assert "Streaming Detail" in text
+        assert "Events" in text
+        assert "/src/app.py" in text
+        assert "task_dispatched" in text
+
+    def test_scroll_offset_passed_through(self):
+        """Scroll offset is passed to the streaming detail panel."""
+        running = [_make_task("t1", "scroll-task", status="running")]
+        many_events = [
+            _make_stream_entry(
+                "tool_use",
+                {
+                    "type": "tool_use",
+                    "tool": {"name": "Read", "input": {"file_path": f"/f{i}.py"}},
+                },
+            )
+            for i in range(50)
+        ]
+        layout = build_active_dashboard(
+            running,
+            [],
+            [],
+            [],
+            [],
+            [],
+            stream_events_by_task={"t1": many_events},
+            scroll_offset=10,
+        )
+        text = _render_to_plain(layout, width=120)
+        assert "offset: 10" in text
+
+    def test_backward_compat_no_streaming_args(self):
+        """Calling build_active_dashboard without new args works exactly as before."""
+        running = [_make_task("r1", "parser", status="running")]
+        events = [
+            {
+                "timestamp": "2025-01-15T10:00:00.000Z",
+                "event_type": "task_dispatched",
+                "task_id": "r1",
+            }
+        ]
+        layout = build_active_dashboard(running, [], [], [], [], events)
+        text = _render_to_plain(layout, width=120)
+        assert "parser" in text
+        assert "task_dispatched" in text
+        assert "Active Plan" in text
+        assert "Events" in text
+        # No streaming panel
+        assert "Streaming Detail" not in text
+
+
+# ── QueryAPI + Streaming Panel integration ───────────────────────────────
+
+
+class TestQueryAPIStreamingIntegration:
+    """Test that QueryAPI.get_task_stream_events() data renders correctly
+    in the streaming detail panel."""
+
+    def test_full_pipeline_with_session_data(self):
+        """Simulate: session logger → QueryAPI → streaming panel."""
+        from corc.sessions import SessionLogger
+
+        # Create a session logger with stream events
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sl = SessionLogger(tmpdir)
+            sl.log_stream_event(
+                "t1",
+                1,
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [{"type": "text", "text": "Analyzing codebase."}],
+                    },
+                },
+            )
+            sl.log_stream_event(
+                "t1",
+                1,
+                {
+                    "type": "tool_use",
+                    "tool": {"name": "Read", "input": {"file_path": "/src/main.py"}},
+                },
+            )
+            sl.log_stream_event(
+                "t1",
+                1,
+                {
+                    "type": "tool_use",
+                    "tool": {
+                        "name": "Write",
+                        "input": {"file_path": "/src/feature.py"},
+                    },
+                },
+            )
+
+            # Read back via session logger (same path as QueryAPI.get_task_stream_events)
+            entries = sl.read_session("t1", 1)
+            stream_entries = [e for e in entries if e.get("type") == "stream_event"]
+
+            running = [_make_task("t1", "feature-impl", status="running")]
+            panel = build_streaming_detail_panel(running, {"t1": stream_entries})
+            text = _render_to_plain(panel)
+
+            assert "feature-impl" in text
+            assert "Analyzing codebase." in text
+            assert "/src/main.py" in text
+            assert "/src/feature.py" in text
+
+    def test_real_format_stream_events(self):
+        """Stream events matching real claude CLI output render correctly."""
+        # Real-format events with extra fields (session_id, uuid, etc.)
+        running = [_make_task("t1", "real-task", status="running")]
+        events = {
+            "t1": [
+                _make_stream_entry(
+                    "assistant",
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "model": "claude-sonnet-4-20250514",
+                            "id": "msg_01abc",
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [
+                                {"type": "text", "text": "I'll read the file first."}
+                            ],
+                            "stop_reason": None,
+                            "usage": {"input_tokens": 100, "output_tokens": 10},
+                        },
+                        "parent_tool_use_id": None,
+                        "session_id": "866b421f-2c52-418d-93a9-4c6481efc10f",
+                        "uuid": "b570c34f-eef4-4662-9287-887250a4dafe",
+                    },
+                ),
+                _make_stream_entry(
+                    "tool_use",
+                    {
+                        "type": "tool_use",
+                        "tool": {
+                            "type": "tool_use",
+                            "id": "toolu_01abc",
+                            "name": "Read",
+                            "input": {"file_path": "/src/main.py"},
+                        },
+                        "session_id": "866b421f-2c52-418d-93a9-4c6481efc10f",
+                        "uuid": "c1d2e3f4-5678-9abc-def0-123456789012",
+                    },
+                ),
+            ]
+        }
+        panel = build_streaming_detail_panel(running, events)
+        text = _render_to_plain(panel)
+
+        assert "I'll read the file first." in text
+        assert "Read" in text
+        assert "/src/main.py" in text
+
+    def test_empty_stream_events_shows_waiting(self):
+        """When get_task_stream_events returns [], shows waiting message."""
+        running = [_make_task("t1", "new-task", status="running")]
+        events = {"t1": []}
+        panel = build_streaming_detail_panel(running, events)
+        text = _render_to_plain(panel)
+        assert "Waiting for stream events" in text
+
+    def test_checklist_from_task_displayed(self):
+        """Task checklist field is rendered as progress in streaming panel."""
+        checklist = json.dumps(
+            [
+                {"item": "Write unit tests", "done": True},
+                {"item": "Implement function", "done": True},
+                {"item": "Update docs", "done": False},
+                {"item": "Run CI", "done": False},
+            ]
+        )
+        running = [
+            _make_task("t1", "checklist-task", status="running", checklist=checklist)
+        ]
+        events = {
+            "t1": [
+                _make_stream_entry(
+                    "tool_use",
+                    {
+                        "type": "tool_use",
+                        "tool": {"name": "Read", "input": {"file_path": "/test.py"}},
+                    },
+                ),
+            ]
+        }
+        panel = build_streaming_detail_panel(running, events)
+        text = _render_to_plain(panel)
+        assert "2/4 items done" in text
+        assert "/test.py" in text
