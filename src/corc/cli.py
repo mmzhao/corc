@@ -1428,6 +1428,204 @@ def role_validate(name):
         sys.exit(1)
 
 
+# --- Repo Management ---
+
+
+@cli.group()
+def repo():
+    """Manage registered repositories and merge policies."""
+    pass
+
+
+@repo.command("add")
+@click.argument("name")
+@click.option("--path", required=True, help="Filesystem path to the repository")
+@click.option(
+    "--merge-policy",
+    default="auto",
+    type=click.Choice(["auto", "human-only"], case_sensitive=False),
+    help="Merge policy (default: auto)",
+)
+@click.option(
+    "--protected-branches",
+    default="main",
+    help="Comma-separated list of protected branches (default: main)",
+)
+@click.option(
+    "--enforcement-level",
+    default="strict",
+    type=click.Choice(["strict", "relaxed"], case_sensitive=False),
+    help="Enforcement level (default: strict)",
+)
+def repo_add(name, path, merge_policy, protected_branches, enforcement_level):
+    """Register a repository with merge policy settings.
+
+    Examples:
+      corc repo add my-app --path /code/my-app
+      corc repo add prod --path /code/prod --merge-policy human-only
+      corc repo add api --path /code/api --protected-branches main,staging
+    """
+    from corc.repo import RepoManager, RepoAlreadyExistsError, RepoValidationError
+
+    cfg = load_config()
+    mgr = RepoManager(cfg)
+
+    branches = [b.strip() for b in protected_branches.split(",") if b.strip()]
+
+    try:
+        repo_config = mgr.add(
+            name=name,
+            path=path,
+            merge_policy=merge_policy,
+            protected_branches=branches,
+            enforcement_level=enforcement_level,
+        )
+        cfg.save()
+    except RepoAlreadyExistsError:
+        click.echo(f"Error: repo '{name}' already exists.", err=True)
+        sys.exit(1)
+    except RepoValidationError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Registered repo '{name}'")
+    click.echo(f"  path: {repo_config['path']}")
+    click.echo(f"  merge_policy: {repo_config['merge_policy']}")
+    click.echo(f"  protected_branches: {', '.join(repo_config['protected_branches'])}")
+    click.echo(f"  enforcement_level: {repo_config['enforcement_level']}")
+
+
+@repo.command("list")
+def repo_list():
+    """List all registered repositories with settings."""
+    from corc.repo import RepoManager
+
+    cfg = load_config()
+    mgr = RepoManager(cfg)
+    repos = mgr.list_repos()
+
+    if not repos:
+        click.echo("No repos registered.")
+        return
+
+    for r in repos:
+        branches = ", ".join(r.get("protected_branches", []))
+        click.echo(
+            f"  {r['name']:<25} "
+            f"policy={r.get('merge_policy', '?'):<12} "
+            f"enforcement={r.get('enforcement_level', '?'):<8} "
+            f"branches=[{branches}]"
+        )
+        click.echo(f"  {'':25} path={r.get('path', '?')}")
+
+
+@repo.command("show")
+@click.argument("name")
+def repo_show(name):
+    """Show full configuration for a repository."""
+    from corc.repo import RepoManager, RepoNotFoundError
+
+    cfg = load_config()
+    mgr = RepoManager(cfg)
+
+    try:
+        repo_config = mgr.get(name)
+    except RepoNotFoundError:
+        click.echo(f"Error: repo '{name}' not found.", err=True)
+        sys.exit(1)
+
+    click.echo(f"Repo: {name}")
+    click.echo(f"  path: {repo_config['path']}")
+    click.echo(f"  merge_policy: {repo_config['merge_policy']}")
+    click.echo(f"  protected_branches: {', '.join(repo_config['protected_branches'])}")
+    click.echo(f"  enforcement_level: {repo_config['enforcement_level']}")
+
+
+@repo.command("remove")
+@click.argument("name")
+def repo_remove(name):
+    """Remove a registered repository."""
+    from corc.repo import RepoManager, RepoNotFoundError
+
+    cfg = load_config()
+    mgr = RepoManager(cfg)
+
+    try:
+        mgr.remove(name)
+        cfg.save()
+    except RepoNotFoundError:
+        click.echo(f"Error: repo '{name}' not found.", err=True)
+        sys.exit(1)
+
+    click.echo(f"Removed repo '{name}'.")
+
+
+@repo.command("update")
+@click.argument("name")
+@click.option(
+    "--merge-policy",
+    default=None,
+    type=click.Choice(["auto", "human-only"], case_sensitive=False),
+    help="Update merge policy",
+)
+@click.option("--path", default=None, help="Update filesystem path")
+@click.option(
+    "--protected-branches",
+    default=None,
+    help="Update protected branches (comma-separated)",
+)
+@click.option(
+    "--enforcement-level",
+    default=None,
+    type=click.Choice(["strict", "relaxed"], case_sensitive=False),
+    help="Update enforcement level",
+)
+def repo_update(name, merge_policy, path, protected_branches, enforcement_level):
+    """Update settings for a registered repository.
+
+    Examples:
+      corc repo update my-app --merge-policy human-only
+      corc repo update my-app --protected-branches main,staging,prod
+      corc repo update my-app --enforcement-level relaxed
+    """
+    from corc.repo import RepoManager, RepoNotFoundError, RepoValidationError
+
+    cfg = load_config()
+    mgr = RepoManager(cfg)
+
+    kwargs = {}
+    if merge_policy is not None:
+        kwargs["merge_policy"] = merge_policy
+    if path is not None:
+        kwargs["path"] = path
+    if protected_branches is not None:
+        kwargs["protected_branches"] = [
+            b.strip() for b in protected_branches.split(",") if b.strip()
+        ]
+    if enforcement_level is not None:
+        kwargs["enforcement_level"] = enforcement_level
+
+    if not kwargs:
+        click.echo("Nothing to update. Provide at least one option.")
+        sys.exit(1)
+
+    try:
+        repo_config = mgr.update(name, **kwargs)
+        cfg.save()
+    except RepoNotFoundError:
+        click.echo(f"Error: repo '{name}' not found.", err=True)
+        sys.exit(1)
+    except RepoValidationError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Updated repo '{name}'")
+    click.echo(f"  path: {repo_config['path']}")
+    click.echo(f"  merge_policy: {repo_config['merge_policy']}")
+    click.echo(f"  protected_branches: {', '.join(repo_config['protected_branches'])}")
+    click.echo(f"  enforcement_level: {repo_config['enforcement_level']}")
+
+
 # --- Chaos Monkey ---
 
 
