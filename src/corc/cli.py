@@ -7,7 +7,7 @@ import uuid
 
 import click
 
-from corc.config import get_paths
+from corc.config import get_paths, load_config, _parse_value
 from corc.mutations import MutationLog
 from corc.state import WorkState
 from corc.audit import AuditLog
@@ -49,6 +49,67 @@ def _get_all():
 def cli():
     """CORC — Claude Orchestration System"""
     pass
+
+
+# --- Task commands ---
+
+
+@cli.group("config")
+def config_cmd():
+    """View and update configuration."""
+    pass
+
+
+@config_cmd.command("show")
+@click.option("--key", default=None, help="Show a specific config key (dot notation)")
+def config_show(key):
+    """Display the current configuration.
+
+    Shows the full merged config (defaults + overrides from .corc/config.yaml).
+    Use --key to show a specific setting, e.g. --key dispatch.agent_timeout_s
+    """
+    import yaml as _yaml
+
+    cfg = load_config()
+    if key:
+        value = cfg.get(key)
+        if value is None:
+            click.echo(f"Key '{key}' not found in config.")
+            sys.exit(1)
+        if isinstance(value, dict):
+            click.echo(
+                _yaml.safe_dump(
+                    {key: value}, default_flow_style=False, sort_keys=False
+                ).rstrip()
+            )
+        else:
+            click.echo(f"{key}: {value}")
+    else:
+        click.echo(
+            _yaml.safe_dump(
+                cfg.as_dict(), default_flow_style=False, sort_keys=False
+            ).rstrip()
+        )
+
+
+@config_cmd.command("set")
+@click.argument("key")
+@click.argument("value")
+def config_set(key, value):
+    """Update a config value. KEY uses dot notation.
+
+    Examples:
+      corc config set dispatch.agent_timeout_s 3600
+      corc config set retry.default_retries 3
+      corc config set daemon.poll_interval 10.0
+      corc config set alerts.cost.daily_limit_usd 100.0
+    """
+    cfg = load_config()
+    parsed_value = _parse_value(value)
+    cfg.set(key, parsed_value)
+    saved_path = cfg.save()
+    click.echo(f"Set {key} = {parsed_value!r}")
+    click.echo(f"Saved to {saved_path}")
 
 
 # --- Task commands ---

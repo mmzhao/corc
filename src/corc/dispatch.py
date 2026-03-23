@@ -18,14 +18,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from corc.config import DEFAULTS
+
 logger = logging.getLogger(__name__)
+
+# Read defaults from centralized config
+_DISPATCH_DEFAULTS = DEFAULTS["dispatch"]
 
 
 @dataclass
 class Constraints:
-    allowed_tools: list[str] = field(default_factory=lambda: ["Read", "Edit", "Write", "Bash", "Grep", "Glob"])
-    max_budget_usd: float = 3.0
-    max_turns: int = 50
+    allowed_tools: list[str] = field(
+        default_factory=lambda: list(_DISPATCH_DEFAULTS["default_allowed_tools"])
+    )
+    max_budget_usd: float = _DISPATCH_DEFAULTS["max_budget_usd"]
+    max_turns: int = _DISPATCH_DEFAULTS["max_turns"]
     output_format: str | None = None
     json_schema: str | None = None
 
@@ -43,9 +50,15 @@ EventCallback = Callable[[dict], None]
 
 class AgentDispatcher(ABC):
     @abstractmethod
-    def dispatch(self, prompt: str, system_prompt: str, constraints: Constraints,
-                 pid_callback=None, event_callback: EventCallback | None = None,
-                 cwd: str | None = None) -> AgentResult:
+    def dispatch(
+        self,
+        prompt: str,
+        system_prompt: str,
+        constraints: Constraints,
+        pid_callback=None,
+        event_callback: EventCallback | None = None,
+        cwd: str | None = None,
+    ) -> AgentResult:
         """Dispatch an agent with the given prompt and constraints.
 
         Args:
@@ -63,9 +76,15 @@ class AgentDispatcher(ABC):
 
 
 class ClaudeCodeDispatcher(AgentDispatcher):
-    def dispatch(self, prompt: str, system_prompt: str, constraints: Constraints,
-                 pid_callback=None, event_callback: EventCallback | None = None,
-                 cwd: str | None = None) -> AgentResult:
+    def dispatch(
+        self,
+        prompt: str,
+        system_prompt: str,
+        constraints: Constraints,
+        pid_callback=None,
+        event_callback: EventCallback | None = None,
+        cwd: str | None = None,
+    ) -> AgentResult:
         cmd = ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose"]
 
         if system_prompt:
@@ -113,7 +132,7 @@ class ClaudeCodeDispatcher(AgentDispatcher):
             except OSError:
                 pass
 
-        timer = threading.Timer(1800, _kill_on_timeout)
+        timer = threading.Timer(_DISPATCH_DEFAULTS["agent_timeout_s"], _kill_on_timeout)
         timer.start()
 
         result_text = ""
@@ -149,12 +168,15 @@ class ClaudeCodeDispatcher(AgentDispatcher):
             timer.cancel()
 
         stderr_thread.join(timeout=5)
-        logger.info("stream dispatch finished: %d events parsed, exit_code=%s",
-                     event_count, proc.returncode)
+        logger.info(
+            "stream dispatch finished: %d events parsed, exit_code=%s",
+            event_count,
+            proc.returncode,
+        )
 
         if timed_out:
             return AgentResult(
-                output="[TIMEOUT: agent exceeded 1800s limit]",
+                output=f"[TIMEOUT: agent exceeded {_DISPATCH_DEFAULTS['agent_timeout_s']}s limit]",
                 exit_code=-1,
                 duration_s=time.time() - start,
             )
@@ -177,5 +199,7 @@ def get_dispatcher(provider: str = "claude-code") -> AgentDispatcher:
         "claude-code": ClaudeCodeDispatcher,
     }
     if provider not in dispatchers:
-        raise ValueError(f"Unknown dispatch provider: {provider}. Available: {list(dispatchers.keys())}")
+        raise ValueError(
+            f"Unknown dispatch provider: {provider}. Available: {list(dispatchers.keys())}"
+        )
     return dispatchers[provider]()

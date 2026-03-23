@@ -8,9 +8,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import yaml
-
 from corc.audit import AuditLog
+from corc.config import load_config
 
 
 # ---------------------------------------------------------------------------
@@ -29,7 +28,7 @@ class CostAlertConfig:
 
 
 def load_alert_config(corc_dir: Path) -> CostAlertConfig:
-    """Load cost alert thresholds from .corc/config.yaml.
+    """Load cost alert thresholds via centralized config.
 
     Example config:
         alerts:
@@ -39,21 +38,13 @@ def load_alert_config(corc_dir: Path) -> CostAlertConfig:
             project_limit_usd: 200.0
             task_limit_usd: 10.0
     """
-    config_path = Path(corc_dir) / "config.yaml"
-    if not config_path.exists():
-        return CostAlertConfig()
-
-    with open(config_path) as f:
-        raw = yaml.safe_load(f) or {}
-
-    alerts = raw.get("alerts", {})
-    cost = alerts.get("cost", {})
-
+    root = Path(corc_dir).parent
+    cfg = load_config(root)
     return CostAlertConfig(
-        daily_limit_usd=float(cost.get("daily_limit_usd", 50.0)),
-        project_limit_usd=float(cost.get("project_limit_usd", 200.0)),
-        task_limit_usd=float(cost.get("task_limit_usd", 10.0)),
-        enabled=bool(cost.get("enabled", True)),
+        daily_limit_usd=float(cfg.get("alerts.cost.daily_limit_usd")),
+        project_limit_usd=float(cfg.get("alerts.cost.project_limit_usd")),
+        task_limit_usd=float(cfg.get("alerts.cost.task_limit_usd")),
+        enabled=bool(cfg.get("alerts.cost.enabled")),
     )
 
 

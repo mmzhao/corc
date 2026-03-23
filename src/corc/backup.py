@@ -9,37 +9,28 @@ import shutil
 import time
 from pathlib import Path
 
-import yaml
+from corc.config import DEFAULTS, load_config
 
 
-# ── Default configuration ──────────────────────────────────────────────
+# ── Default configuration (kept for backward compat) ──────────────────
 
-DEFAULT_BACKUP_CONFIG = {
-    "backup_path": "~/.corc-backups/audit/",
-    "backup_interval": "daily",
-    "rotate_after_days": 90,
-}
+DEFAULT_BACKUP_CONFIG = DEFAULTS["audit"]
 
 
 def load_audit_config(corc_dir: Path) -> dict:
-    """Load audit backup configuration from .corc/config.yaml.
+    """Load audit backup configuration via centralized config.
 
     Falls back to defaults if the file or audit section is missing.
     Expands ~ in backup_path.
     """
-    config_path = Path(corc_dir) / "config.yaml"
-    config = dict(DEFAULT_BACKUP_CONFIG)
-
-    if config_path.exists():
-        try:
-            with open(config_path, "r") as f:
-                raw = yaml.safe_load(f) or {}
-            audit = raw.get("audit", {})
-            if audit:
-                config.update({k: v for k, v in audit.items() if v is not None})
-        except (yaml.YAMLError, OSError):
-            pass  # Stick with defaults on parse error
-
+    # Derive root from corc_dir (corc_dir is <root>/.corc)
+    root = Path(corc_dir).parent
+    cfg = load_config(root)
+    config = {
+        "backup_path": cfg.get("audit.backup_path"),
+        "backup_interval": cfg.get("audit.backup_interval"),
+        "rotate_after_days": cfg.get("audit.rotate_after_days"),
+    }
     # Expand ~ in backup_path
     config["backup_path"] = str(Path(config["backup_path"]).expanduser())
     return config
