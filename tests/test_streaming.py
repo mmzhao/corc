@@ -25,7 +25,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from corc.audit import AuditLog
-from corc.dispatch import AgentDispatcher, AgentResult, ClaudeCodeDispatcher, Constraints
+from corc.dispatch import (
+    AgentDispatcher,
+    AgentResult,
+    ClaudeCodeDispatcher,
+    Constraints,
+)
 from corc.executor import Executor
 from corc.mutations import MutationLog
 from corc.sessions import SessionLogger
@@ -57,8 +62,10 @@ class MockPopen:
 
 def _make_mock_popen(events, exit_code=0, stderr_text=""):
     """Create a factory that returns a MockPopen with the given events."""
+
     def factory(cmd, **kwargs):
         return MockPopen(events, exit_code, stderr_text)
+
     return factory
 
 
@@ -68,37 +75,76 @@ def _make_mock_popen(events, exit_code=0, stderr_text=""):
 
 
 SAMPLE_EVENTS = [
-    {"type": "system", "subtype": "init", "session_id": "test-session-1",
-     "tools": ["Read", "Write"], "model": "claude-sonnet-4-20250514"},
-    {"type": "assistant", "message": {
-        "id": "msg_01", "type": "message", "role": "assistant",
-        "content": [{"type": "text", "text": "Let me analyze the codebase."}],
-        "stop_reason": "tool_use",
-    }},
-    {"type": "tool_use", "tool": {
-        "type": "tool_use", "id": "toolu_01", "name": "Read",
-        "input": {"file_path": "/src/main.py"},
-    }},
-    {"type": "tool_result", "tool": {
-        "type": "tool_result", "tool_use_id": "toolu_01",
-        "content": "def main():\n    print('hello')\n",
-    }},
-    {"type": "assistant", "message": {
-        "id": "msg_02", "type": "message", "role": "assistant",
-        "content": [{"type": "text", "text": "Now I'll implement the feature."}],
-        "stop_reason": "tool_use",
-    }},
-    {"type": "tool_use", "tool": {
-        "type": "tool_use", "id": "toolu_02", "name": "Write",
-        "input": {"file_path": "/src/feature.py", "content": "# new feature\n"},
-    }},
-    {"type": "tool_result", "tool": {
-        "type": "tool_result", "tool_use_id": "toolu_02",
-        "content": "File written successfully.",
-    }},
-    {"type": "result", "subtype": "success", "is_error": False,
-     "result": "Task completed. Created feature.py with the new feature.",
-     "duration_ms": 5000, "num_turns": 3, "total_cost_usd": 0.05},
+    {
+        "type": "system",
+        "subtype": "init",
+        "session_id": "test-session-1",
+        "tools": ["Read", "Write"],
+        "model": "claude-sonnet-4-20250514",
+    },
+    {
+        "type": "assistant",
+        "message": {
+            "id": "msg_01",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Let me analyze the codebase."}],
+            "stop_reason": "tool_use",
+        },
+    },
+    {
+        "type": "tool_use",
+        "tool": {
+            "type": "tool_use",
+            "id": "toolu_01",
+            "name": "Read",
+            "input": {"file_path": "/src/main.py"},
+        },
+    },
+    {
+        "type": "tool_result",
+        "tool": {
+            "type": "tool_result",
+            "tool_use_id": "toolu_01",
+            "content": "def main():\n    print('hello')\n",
+        },
+    },
+    {
+        "type": "assistant",
+        "message": {
+            "id": "msg_02",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Now I'll implement the feature."}],
+            "stop_reason": "tool_use",
+        },
+    },
+    {
+        "type": "tool_use",
+        "tool": {
+            "type": "tool_use",
+            "id": "toolu_02",
+            "name": "Write",
+            "input": {"file_path": "/src/feature.py", "content": "# new feature\n"},
+        },
+    },
+    {
+        "type": "tool_result",
+        "tool": {
+            "type": "tool_result",
+            "tool_use_id": "toolu_02",
+            "content": "File written successfully.",
+        },
+    },
+    {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "result": "Task completed. Created feature.py with the new feature.",
+        "duration_ms": 5000,
+        "num_turns": 3,
+        "total_cost_usd": 0.05,
+    },
 ]
 
 
@@ -106,48 +152,82 @@ SAMPLE_EVENTS = [
 # Used to verify the parser handles the actual CLI output format (which
 # includes extra fields like session_id, uuid, parent_tool_use_id, etc.).
 REAL_FORMAT_EVENTS = [
-    {"type": "system", "subtype": "init", "cwd": "/tmp/test",
-     "session_id": "866b421f-2c52-418d-93a9-4c6481efc10f",
-     "tools": ["Bash", "Read", "Write", "Edit", "Grep", "Glob"],
-     "model": "claude-sonnet-4-20250514", "permissionMode": "default",
-     "uuid": "26a8ca40-917d-48ed-87b4-66866d845b05"},
-    {"type": "assistant", "message": {
+    {
+        "type": "system",
+        "subtype": "init",
+        "cwd": "/tmp/test",
+        "session_id": "866b421f-2c52-418d-93a9-4c6481efc10f",
+        "tools": ["Bash", "Read", "Write", "Edit", "Grep", "Glob"],
         "model": "claude-sonnet-4-20250514",
-        "id": "msg_01CKpMXE8xMyRhjjw9NU9zB6", "type": "message",
-        "role": "assistant",
-        "content": [{"type": "text", "text": "I'll read the file first."}],
-        "stop_reason": None, "stop_sequence": None,
-        "usage": {"input_tokens": 100, "output_tokens": 10},
-     }, "parent_tool_use_id": None,
-     "session_id": "866b421f-2c52-418d-93a9-4c6481efc10f",
-     "uuid": "b570c34f-eef4-4662-9287-887250a4dafe"},
-    {"type": "tool_use", "tool": {
-        "type": "tool_use", "id": "toolu_01abc", "name": "Read",
-        "input": {"file_path": "/src/main.py"},
-     }, "session_id": "866b421f-2c52-418d-93a9-4c6481efc10f",
-     "uuid": "c1d2e3f4-5678-9abc-def0-123456789012"},
-    {"type": "tool_result", "tool": {
-        "type": "tool_result", "tool_use_id": "toolu_01abc",
-        "content": "def main():\n    pass\n",
-     }, "session_id": "866b421f-2c52-418d-93a9-4c6481efc10f",
-     "uuid": "d4e5f6a7-8901-2bcd-ef34-567890123456"},
-    {"type": "assistant", "message": {
-        "model": "claude-sonnet-4-20250514",
-        "id": "msg_02XYZ", "type": "message",
-        "role": "assistant",
-        "content": [{"type": "text", "text": "Done implementing."}],
-        "stop_reason": "end_turn", "stop_sequence": None,
-        "usage": {"input_tokens": 200, "output_tokens": 20},
-     }, "parent_tool_use_id": None,
-     "session_id": "866b421f-2c52-418d-93a9-4c6481efc10f",
-     "uuid": "e5f6a7b8-0123-4cde-f567-890123456789"},
-    {"type": "result", "subtype": "success", "is_error": False,
-     "duration_ms": 5000, "duration_api_ms": 4800, "num_turns": 2,
-     "result": "Implementation complete.",
-     "stop_reason": "end_turn",
-     "session_id": "866b421f-2c52-418d-93a9-4c6481efc10f",
-     "total_cost_usd": 0.05,
-     "uuid": "f6a7b8c9-1234-5def-a678-901234567890"},
+        "permissionMode": "default",
+        "uuid": "26a8ca40-917d-48ed-87b4-66866d845b05",
+    },
+    {
+        "type": "assistant",
+        "message": {
+            "model": "claude-sonnet-4-20250514",
+            "id": "msg_01CKpMXE8xMyRhjjw9NU9zB6",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "I'll read the file first."}],
+            "stop_reason": None,
+            "stop_sequence": None,
+            "usage": {"input_tokens": 100, "output_tokens": 10},
+        },
+        "parent_tool_use_id": None,
+        "session_id": "866b421f-2c52-418d-93a9-4c6481efc10f",
+        "uuid": "b570c34f-eef4-4662-9287-887250a4dafe",
+    },
+    {
+        "type": "tool_use",
+        "tool": {
+            "type": "tool_use",
+            "id": "toolu_01abc",
+            "name": "Read",
+            "input": {"file_path": "/src/main.py"},
+        },
+        "session_id": "866b421f-2c52-418d-93a9-4c6481efc10f",
+        "uuid": "c1d2e3f4-5678-9abc-def0-123456789012",
+    },
+    {
+        "type": "tool_result",
+        "tool": {
+            "type": "tool_result",
+            "tool_use_id": "toolu_01abc",
+            "content": "def main():\n    pass\n",
+        },
+        "session_id": "866b421f-2c52-418d-93a9-4c6481efc10f",
+        "uuid": "d4e5f6a7-8901-2bcd-ef34-567890123456",
+    },
+    {
+        "type": "assistant",
+        "message": {
+            "model": "claude-sonnet-4-20250514",
+            "id": "msg_02XYZ",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Done implementing."}],
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 200, "output_tokens": 20},
+        },
+        "parent_tool_use_id": None,
+        "session_id": "866b421f-2c52-418d-93a9-4c6481efc10f",
+        "uuid": "e5f6a7b8-0123-4cde-f567-890123456789",
+    },
+    {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "duration_ms": 5000,
+        "duration_api_ms": 4800,
+        "num_turns": 2,
+        "result": "Implementation complete.",
+        "stop_reason": "end_turn",
+        "session_id": "866b421f-2c52-418d-93a9-4c6481efc10f",
+        "total_cost_usd": 0.05,
+        "uuid": "f6a7b8c9-1234-5def-a678-901234567890",
+    },
 ]
 
 
@@ -187,16 +267,20 @@ def work_state(tmp_project, mutation_log):
 
 
 def _create_task(mutation_log, task_id, name, done_when="tests_pass", depends_on=None):
-    mutation_log.append("task_created", {
-        "id": task_id,
-        "name": name,
-        "description": f"Test task: {name}",
-        "role": "implementer",
-        "depends_on": depends_on or [],
-        "done_when": done_when,
-        "checklist": [],
-        "context_bundle": [],
-    }, reason="Test setup")
+    mutation_log.append(
+        "task_created",
+        {
+            "id": task_id,
+            "name": name,
+            "description": f"Test task: {name}",
+            "role": "implementer",
+            "depends_on": depends_on or [],
+            "done_when": done_when,
+            "checklist": [],
+            "context_bundle": [],
+        },
+        reason="Test setup",
+    )
 
 
 # ===========================================================================
@@ -214,7 +298,14 @@ class TestStreamingDispatch:
         def mock_popen(cmd, **kwargs):
             captured_cmd["cmd"] = cmd
             return MockPopen(
-                [{"type": "result", "subtype": "success", "result": "done", "is_error": False}],
+                [
+                    {
+                        "type": "result",
+                        "subtype": "success",
+                        "result": "done",
+                        "is_error": False,
+                    }
+                ],
                 exit_code=0,
             )
 
@@ -232,6 +323,31 @@ class TestStreamingDispatch:
         assert "-p" == cmd[1]
         assert "test prompt" == cmd[2]
 
+    def test_command_includes_dangerously_skip_permissions(self, monkeypatch):
+        """Dispatch always passes --dangerously-skip-permissions to claude -p."""
+        captured_cmd = {}
+
+        def mock_popen(cmd, **kwargs):
+            captured_cmd["cmd"] = cmd
+            return MockPopen(
+                [
+                    {
+                        "type": "result",
+                        "subtype": "success",
+                        "result": "done",
+                        "is_error": False,
+                    }
+                ],
+                exit_code=0,
+            )
+
+        monkeypatch.setattr("corc.dispatch.subprocess.Popen", mock_popen)
+        dispatcher = ClaudeCodeDispatcher()
+        dispatcher.dispatch("test prompt", "system prompt", Constraints())
+
+        cmd = captured_cmd["cmd"]
+        assert "--dangerously-skip-permissions" in cmd
+
     def test_event_callback_called_for_each_event(self, monkeypatch):
         """Each parsed JSON event triggers the event_callback."""
         monkeypatch.setattr(
@@ -242,7 +358,9 @@ class TestStreamingDispatch:
         received = []
         dispatcher = ClaudeCodeDispatcher()
         dispatcher.dispatch(
-            "test", "system", Constraints(),
+            "test",
+            "system",
+            Constraints(),
             event_callback=lambda e: received.append(e),
         )
 
@@ -263,7 +381,9 @@ class TestStreamingDispatch:
         dispatcher = ClaudeCodeDispatcher()
         result = dispatcher.dispatch("test", "system", Constraints())
 
-        assert result.output == "Task completed. Created feature.py with the new feature."
+        assert (
+            result.output == "Task completed. Created feature.py with the new feature."
+        )
         assert result.exit_code == 0
 
     def test_stderr_appended(self, monkeypatch):
@@ -285,6 +405,7 @@ class TestStreamingDispatch:
 
     def test_malformed_json_skipped(self, monkeypatch):
         """Non-JSON lines are silently skipped."""
+
         def mock_popen(cmd, **kwargs):
             lines = 'not json\n{"type":"result","result":"ok","is_error":false}\n'
             proc = MockPopen([], exit_code=0)
@@ -296,7 +417,9 @@ class TestStreamingDispatch:
         received = []
         dispatcher = ClaudeCodeDispatcher()
         result = dispatcher.dispatch(
-            "test", "system", Constraints(),
+            "test",
+            "system",
+            Constraints(),
             event_callback=lambda e: received.append(e),
         )
 
@@ -307,6 +430,7 @@ class TestStreamingDispatch:
 
     def test_empty_lines_skipped(self, monkeypatch):
         """Blank lines in stdout are skipped."""
+
         def mock_popen(cmd, **kwargs):
             lines = '\n\n{"type":"result","result":"ok","is_error":false}\n\n'
             proc = MockPopen([], exit_code=0)
@@ -318,7 +442,9 @@ class TestStreamingDispatch:
         received = []
         dispatcher = ClaudeCodeDispatcher()
         result = dispatcher.dispatch(
-            "test", "system", Constraints(),
+            "test",
+            "system",
+            Constraints(),
             event_callback=lambda e: received.append(e),
         )
 
@@ -329,7 +455,10 @@ class TestStreamingDispatch:
         """If no result event is received, output is empty."""
         events = [
             {"type": "system", "subtype": "init"},
-            {"type": "assistant", "message": {"content": [{"type": "text", "text": "hello"}]}},
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "hello"}]},
+            },
         ]
         monkeypatch.setattr(
             "corc.dispatch.subprocess.Popen",
@@ -353,7 +482,9 @@ class TestStreamingDispatch:
         pids = []
         dispatcher = ClaudeCodeDispatcher()
         dispatcher.dispatch(
-            "test", "system", Constraints(),
+            "test",
+            "system",
+            Constraints(),
             pid_callback=lambda pid: pids.append(pid),
         )
 
@@ -378,7 +509,14 @@ class TestStreamingDispatch:
         monkeypatch.setattr(
             "corc.dispatch.subprocess.Popen",
             _make_mock_popen(
-                [{"type": "result", "result": "", "is_error": True, "subtype": "error"}],
+                [
+                    {
+                        "type": "result",
+                        "result": "",
+                        "is_error": True,
+                        "subtype": "error",
+                    }
+                ],
                 exit_code=1,
             ),
         )
@@ -444,14 +582,22 @@ class TestStreamingDispatch:
         received = []
         dispatcher = ClaudeCodeDispatcher()
         result = dispatcher.dispatch(
-            "test", "system", Constraints(),
+            "test",
+            "system",
+            Constraints(),
             event_callback=lambda e: received.append(e),
         )
 
         assert len(received) == len(REAL_FORMAT_EVENTS)
         types = [e["type"] for e in received]
-        assert types == ["system", "assistant", "tool_use", "tool_result",
-                         "assistant", "result"]
+        assert types == [
+            "system",
+            "assistant",
+            "tool_use",
+            "tool_result",
+            "assistant",
+            "result",
+        ]
         assert result.output == "Implementation complete."
 
     def test_real_format_assistant_has_extra_fields(self, monkeypatch):
@@ -464,7 +610,9 @@ class TestStreamingDispatch:
         received = []
         dispatcher = ClaudeCodeDispatcher()
         dispatcher.dispatch(
-            "test", "system", Constraints(),
+            "test",
+            "system",
+            Constraints(),
             event_callback=lambda e: received.append(e),
         )
 
@@ -477,11 +625,10 @@ class TestStreamingDispatch:
 
     def test_non_json_error_line_logged_and_skipped(self, monkeypatch):
         """When claude outputs a non-JSON error (e.g. missing --verbose), it is skipped."""
+
         def mock_popen(cmd, **kwargs):
             # Simulate what happens without --verbose: error message on stdout
-            lines = (
-                "Error: When using --print, --output-format=stream-json requires --verbose\n"
-            )
+            lines = "Error: When using --print, --output-format=stream-json requires --verbose\n"
             proc = MockPopen([], exit_code=1)
             proc.stdout = io.StringIO(lines)
             return proc
@@ -491,7 +638,9 @@ class TestStreamingDispatch:
         received = []
         dispatcher = ClaudeCodeDispatcher()
         result = dispatcher.dispatch(
-            "test", "system", Constraints(),
+            "test",
+            "system",
+            Constraints(),
             event_callback=lambda e: received.append(e),
         )
 
@@ -540,8 +689,12 @@ class TestSessionLogStreaming:
     def test_stream_events_mixed_with_dispatch_output(self, session_logger):
         """Stream events coexist with dispatch and output entries."""
         session_logger.log_dispatch("task-1", 1, "prompt", "system", ["Read"], 3.0)
-        session_logger.log_stream_event("task-1", 1, {"type": "assistant", "message": {}})
-        session_logger.log_stream_event("task-1", 1, {"type": "result", "result": "done"})
+        session_logger.log_stream_event(
+            "task-1", 1, {"type": "assistant", "message": {}}
+        )
+        session_logger.log_stream_event(
+            "task-1", 1, {"type": "result", "result": "done"}
+        )
         session_logger.log_output("task-1", 1, "done", 0, 5.0)
 
         entries = session_logger.read_session("task-1", 1)
@@ -556,7 +709,9 @@ class TestSessionLogStreaming:
         entries = session_logger.read_session("task-1", 1)
         assert len(entries) == 1
 
-        session_logger.log_stream_event("task-1", 1, {"type": "assistant", "message": {}})
+        session_logger.log_stream_event(
+            "task-1", 1, {"type": "assistant", "message": {}}
+        )
 
         # Read after second write — both entries are there
         entries = session_logger.read_session("task-1", 1)
@@ -571,8 +726,9 @@ class TestSessionLogStreaming:
 class TestAuditLogStreaming:
     """Test that tool_use and assistant events are written to audit log."""
 
-    def test_tool_use_in_audit_log(self, audit_log, session_logger, mutation_log,
-                                    work_state, tmp_project):
+    def test_tool_use_in_audit_log(
+        self, audit_log, session_logger, mutation_log, work_state, tmp_project
+    ):
         """tool_use events are logged to the audit log with task_id."""
         _create_task(mutation_log, "t1", "Task 1")
         work_state.refresh()
@@ -589,7 +745,12 @@ class TestAuditLogStreaming:
         )
 
         callback = executor._make_event_callback("t1", 1)
-        callback({"type": "tool_use", "tool": {"name": "Read", "input": {"file_path": "/test.py"}}})
+        callback(
+            {
+                "type": "tool_use",
+                "tool": {"name": "Read", "input": {"file_path": "/test.py"}},
+            }
+        )
 
         events = audit_log.read_today()
         tool_events = [e for e in events if e["event_type"] == "tool_use"]
@@ -598,8 +759,9 @@ class TestAuditLogStreaming:
         assert tool_events[0]["tool_name"] == "Read"
         assert "/test.py" in tool_events[0]["tool_input"]
 
-    def test_assistant_message_in_audit_log(self, audit_log, session_logger,
-                                             mutation_log, work_state, tmp_project):
+    def test_assistant_message_in_audit_log(
+        self, audit_log, session_logger, mutation_log, work_state, tmp_project
+    ):
         """assistant events with text content are logged to audit log."""
         executor = Executor(
             dispatcher=MagicMock(),
@@ -611,14 +773,16 @@ class TestAuditLogStreaming:
         )
 
         callback = executor._make_event_callback("t1", 1)
-        callback({
-            "type": "assistant",
-            "message": {
-                "content": [
-                    {"type": "text", "text": "I will analyze the code."},
-                ],
-            },
-        })
+        callback(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "I will analyze the code."},
+                    ],
+                },
+            }
+        )
 
         events = audit_log.read_today()
         msg_events = [e for e in events if e["event_type"] == "assistant_message"]
@@ -626,8 +790,9 @@ class TestAuditLogStreaming:
         assert msg_events[0]["task_id"] == "t1"
         assert msg_events[0]["content"] == "I will analyze the code."
 
-    def test_assistant_message_no_text_blocks(self, audit_log, session_logger,
-                                               mutation_log, work_state, tmp_project):
+    def test_assistant_message_no_text_blocks(
+        self, audit_log, session_logger, mutation_log, work_state, tmp_project
+    ):
         """assistant events without text blocks do not create audit entries."""
         executor = Executor(
             dispatcher=MagicMock(),
@@ -639,21 +804,24 @@ class TestAuditLogStreaming:
         )
 
         callback = executor._make_event_callback("t1", 1)
-        callback({
-            "type": "assistant",
-            "message": {
-                "content": [
-                    {"type": "tool_use", "name": "Read", "input": {}},
-                ],
-            },
-        })
+        callback(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "tool_use", "name": "Read", "input": {}},
+                    ],
+                },
+            }
+        )
 
         events = audit_log.read_today()
         msg_events = [e for e in events if e["event_type"] == "assistant_message"]
         assert len(msg_events) == 0
 
-    def test_all_events_written_to_session_log(self, audit_log, session_logger,
-                                                 mutation_log, work_state, tmp_project):
+    def test_all_events_written_to_session_log(
+        self, audit_log, session_logger, mutation_log, work_state, tmp_project
+    ):
         """Every event (regardless of type) is written to the session log."""
         executor = Executor(
             dispatcher=MagicMock(),
@@ -673,8 +841,9 @@ class TestAuditLogStreaming:
         # All entries are stream_event type
         assert all(e["type"] == "stream_event" for e in entries)
 
-    def test_system_events_only_in_session_log(self, audit_log, session_logger,
-                                                 mutation_log, work_state, tmp_project):
+    def test_system_events_only_in_session_log(
+        self, audit_log, session_logger, mutation_log, work_state, tmp_project
+    ):
         """system and result events go to session log but NOT audit log."""
         executor = Executor(
             dispatcher=MagicMock(),
@@ -720,8 +889,15 @@ class MockStreamingDispatcher(AgentDispatcher):
         )
         self.received_event_callback = None
 
-    def dispatch(self, prompt: str, system_prompt: str, constraints: Constraints,
-                 pid_callback=None, event_callback=None, cwd=None) -> AgentResult:
+    def dispatch(
+        self,
+        prompt: str,
+        system_prompt: str,
+        constraints: Constraints,
+        pid_callback=None,
+        event_callback=None,
+        cwd=None,
+    ) -> AgentResult:
         self.received_event_callback = event_callback
         if event_callback:
             for event in self.events:
@@ -732,8 +908,9 @@ class MockStreamingDispatcher(AgentDispatcher):
 class TestExecutorStreamingIntegration:
     """Test that the executor wires up event callbacks correctly."""
 
-    def test_executor_creates_event_callback(self, mutation_log, work_state,
-                                               audit_log, session_logger, tmp_project):
+    def test_executor_creates_event_callback(
+        self, mutation_log, work_state, audit_log, session_logger, tmp_project
+    ):
         """Executor creates an event callback for each dispatch."""
         executor = Executor(
             dispatcher=MagicMock(),
@@ -747,9 +924,15 @@ class TestExecutorStreamingIntegration:
         callback = executor._make_event_callback("task-1", 1)
         assert callable(callback)
 
-    def test_streaming_dispatch_via_executor(self, monkeypatch, mutation_log,
-                                              work_state, audit_log,
-                                              session_logger, tmp_project):
+    def test_streaming_dispatch_via_executor(
+        self,
+        monkeypatch,
+        mutation_log,
+        work_state,
+        audit_log,
+        session_logger,
+        tmp_project,
+    ):
         """Full integration: executor dispatches with streaming, logs correctly."""
         monkeypatch.setattr(
             "corc.dispatch.subprocess.Popen",
@@ -775,7 +958,10 @@ class TestExecutorStreamingIntegration:
         completed = executor.poll_completed()
 
         assert len(completed) == 1
-        assert completed[0].result.output == "Task completed. Created feature.py with the new feature."
+        assert (
+            completed[0].result.output
+            == "Task completed. Created feature.py with the new feature."
+        )
 
         # Session log should have dispatch + stream events + output
         session = session_logger.read_session("t1", 1)
@@ -802,9 +988,9 @@ class TestExecutorStreamingIntegration:
 
         executor.shutdown()
 
-    def test_mock_dispatcher_stream_events_captured(self, mutation_log,
-                                                      work_state, audit_log,
-                                                      session_logger, tmp_project):
+    def test_mock_dispatcher_stream_events_captured(
+        self, mutation_log, work_state, audit_log, session_logger, tmp_project
+    ):
         """Mock dispatcher emits stream events; executor captures them in session and audit logs.
 
         This test verifies the full wiring path: Executor builds event_callback,
@@ -872,9 +1058,9 @@ class TestExecutorStreamingIntegration:
 
         executor.shutdown()
 
-    def test_mock_dispatcher_no_events_still_works(self, mutation_log,
-                                                     work_state, audit_log,
-                                                     session_logger, tmp_project):
+    def test_mock_dispatcher_no_events_still_works(
+        self, mutation_log, work_state, audit_log, session_logger, tmp_project
+    ):
         """Dispatcher that emits zero stream events still completes normally."""
         mock_dispatcher = MockStreamingDispatcher(
             events=[],
@@ -908,16 +1094,19 @@ class TestExecutorStreamingIntegration:
 
         executor.shutdown()
 
-    def test_tool_result_events_in_session_log(self, mutation_log,
-                                                 work_state, audit_log,
-                                                 session_logger, tmp_project):
+    def test_tool_result_events_in_session_log(
+        self, mutation_log, work_state, audit_log, session_logger, tmp_project
+    ):
         """tool_result events are captured in session log for full conversation replay."""
         tool_result_events = [
             {"type": "tool_use", "tool": {"name": "Bash", "input": {"command": "ls"}}},
-            {"type": "tool_result", "tool": {
-                "tool_use_id": "toolu_99",
-                "content": "file1.py\nfile2.py\n",
-            }},
+            {
+                "type": "tool_result",
+                "tool": {
+                    "tool_use_id": "toolu_99",
+                    "content": "file1.py\nfile2.py\n",
+                },
+            },
             {"type": "result", "result": "Listed files.", "is_error": False},
         ]
 
@@ -952,15 +1141,17 @@ class TestExecutorStreamingIntegration:
         assert "result" in stream_types
 
         # Verify tool_result content is preserved in session log
-        tool_result_entry = [e for e in stream_entries if e["stream_type"] == "tool_result"][0]
+        tool_result_entry = [
+            e for e in stream_entries if e["stream_type"] == "tool_result"
+        ][0]
         parsed = json.loads(tool_result_entry["content"])
         assert "file1.py" in parsed["tool"]["content"]
 
         executor.shutdown()
 
-    def test_real_format_events_in_session_log(self, mutation_log,
-                                                 work_state, audit_log,
-                                                 session_logger, tmp_project):
+    def test_real_format_events_in_session_log(
+        self, mutation_log, work_state, audit_log, session_logger, tmp_project
+    ):
         """Real-format events (with session_id, uuid, etc.) are captured in session log.
 
         Verifies the full pipeline: REAL_FORMAT_EVENTS flow through
@@ -1043,18 +1234,21 @@ class TestTUIStreamingEvents:
 
     def test_tool_use_event_rendered(self):
         """tool_use events are rendered with tool name in the event panel."""
-        events = [{
-            "timestamp": "2026-03-22T10:00:00.000Z",
-            "event_type": "tool_use",
-            "task_id": "task-abc1",
-            "tool_name": "Read",
-            "tool_input": '{"file_path":"/src/main.py"}',
-        }]
+        events = [
+            {
+                "timestamp": "2026-03-22T10:00:00.000Z",
+                "event_type": "tool_use",
+                "task_id": "task-abc1",
+                "tool_name": "Read",
+                "tool_input": '{"file_path":"/src/main.py"}',
+            }
+        ]
 
         panel = build_event_panel(events)
         # Render to plain text for assertions
         import io
         from rich.console import Console
+
         buf = io.StringIO()
         console = Console(file=buf, force_terminal=False, width=120, no_color=True)
         console.print(panel)
@@ -1066,16 +1260,19 @@ class TestTUIStreamingEvents:
 
     def test_assistant_message_event_rendered(self):
         """assistant_message events show content in the panel."""
-        events = [{
-            "timestamp": "2026-03-22T10:00:00.000Z",
-            "event_type": "assistant_message",
-            "task_id": "task-abc1",
-            "content": "Let me analyze the code structure.",
-        }]
+        events = [
+            {
+                "timestamp": "2026-03-22T10:00:00.000Z",
+                "event_type": "assistant_message",
+                "task_id": "task-abc1",
+                "content": "Let me analyze the code structure.",
+            }
+        ]
 
         panel = build_event_panel(events)
         import io
         from rich.console import Console
+
         buf = io.StringIO()
         console = Console(file=buf, force_terminal=False, width=120, no_color=True)
         console.print(panel)
@@ -1116,6 +1313,7 @@ class TestTUIStreamingEvents:
         panel = build_event_panel(events)
         import io
         from rich.console import Console
+
         buf = io.StringIO()
         console = Console(file=buf, force_terminal=False, width=120, no_color=True)
         console.print(panel)
@@ -1129,16 +1327,19 @@ class TestTUIStreamingEvents:
 
     def test_multiline_assistant_content(self):
         """assistant_message with multiline content is shown fully."""
-        events = [{
-            "timestamp": "2026-03-22T10:00:00.000Z",
-            "event_type": "assistant_message",
-            "task_id": "task-abc1",
-            "content": "Line 1 of reasoning.\nLine 2 of reasoning.\nLine 3.",
-        }]
+        events = [
+            {
+                "timestamp": "2026-03-22T10:00:00.000Z",
+                "event_type": "assistant_message",
+                "task_id": "task-abc1",
+                "content": "Line 1 of reasoning.\nLine 2 of reasoning.\nLine 3.",
+            }
+        ]
 
         panel = build_event_panel(events)
         import io
         from rich.console import Console
+
         buf = io.StringIO()
         console = Console(file=buf, force_terminal=False, width=120, no_color=True)
         console.print(panel)

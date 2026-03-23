@@ -430,7 +430,7 @@ def launch_interactive_claude(
     """
     _check_prompt_size(system_prompt)
 
-    cmd = ["claude", "--system-prompt", system_prompt]
+    cmd = ["claude", "--dangerously-skip-permissions", "--system-prompt", system_prompt]
 
     if resume_claude_session_id:
         cmd.extend(["--resume", resume_claude_session_id])
