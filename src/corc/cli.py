@@ -80,6 +80,15 @@ def task():
     type=int,
     help="Task priority (lower=higher priority, default 100)",
 )
+@click.option(
+    "--type",
+    "task_type",
+    default="implementation",
+    type=click.Choice(
+        ["implementation", "investigation", "bugfix"], case_sensitive=False
+    ),
+    help="Task type (default: implementation)",
+)
 def task_create(
     name,
     done_when,
@@ -90,10 +99,11 @@ def task_create(
     checklist,
     strict,
     priority,
+    task_type,
 ):
     """Create a new task."""
-    # Lint done_when criteria
-    lint_result = lint_done_when(done_when)
+    # Lint done_when criteria (with type-specific rules)
+    lint_result = lint_done_when(done_when, task_type=task_type)
     if lint_result.warnings:
         for warning in lint_result.warnings:
             click.echo(f"Warning: done_when: {warning}", err=True)
@@ -142,12 +152,14 @@ def task_create(
             "context_bundle": bundle,
             "context_bundle_mtimes": bundle_mtimes,
             "priority": priority,
+            "task_type": task_type,
         },
         reason=f"Task created via CLI",
     )
 
     al.log("task_created", task_id=task_id, name=name)
-    click.echo(f"Created task {task_id}: {name} (priority {priority})")
+    type_str = f" [{task_type}]" if task_type != "implementation" else ""
+    click.echo(f"Created task {task_id}: {name}{type_str} (priority {priority})")
 
 
 @task.command("list")
@@ -172,7 +184,11 @@ def task_list(status, ready):
         dep_str = f" (depends: {', '.join(deps)})" if deps else ""
         pri = t.get("priority", 100)
         pri_str = f" [pri={pri}]" if pri != 100 else ""
-        click.echo(f"  [{t['status']:>10}] {t['id']}  {t['name']}{pri_str}{dep_str}")
+        task_type = t.get("task_type", "implementation")
+        type_str = f" ({task_type})" if task_type != "implementation" else ""
+        click.echo(
+            f"  [{t['status']:>10}] {t['id']}  {t['name']}{type_str}{pri_str}{dep_str}"
+        )
         click.echo(f"             done_when: {t['done_when']}")
 
 
@@ -209,6 +225,7 @@ def task_status(task_id):
 
     click.echo(f"Task: {t['name']} ({t['id']})")
     click.echo(f"Status: {t['status']}")
+    click.echo(f"Type: {t.get('task_type', 'implementation')}")
     click.echo(f"Priority: {t.get('priority', 100)}")
     click.echo(f"Role: {t.get('role', 'unset')}")
     click.echo(f"Done when: {t['done_when']}")

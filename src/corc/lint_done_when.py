@@ -84,6 +84,25 @@ TESTABLE_PATTERNS: list[re.Pattern] = [
     re.compile(r"\baccepts?\b", re.IGNORECASE),
 ]
 
+# ---------------------------------------------------------------------------
+# Valid task types and type-specific required patterns.
+#
+# Each task type can define required patterns that must appear in done_when.
+# If none match, a warning is emitted.
+# ---------------------------------------------------------------------------
+VALID_TASK_TYPES = ("implementation", "investigation", "bugfix")
+
+TYPE_SPECIFIC_PATTERNS: dict[str, list[tuple[re.Pattern, str]]] = {
+    "investigation": [
+        (re.compile(r"\broot\s+cause\b", re.IGNORECASE), "root cause"),
+        (re.compile(r"\bdocumented\b", re.IGNORECASE), "documented"),
+    ],
+    "bugfix": [
+        (re.compile(r"\bregression\s+test\b", re.IGNORECASE), "regression test"),
+        (re.compile(r"\breproduced\b", re.IGNORECASE), "reproduced"),
+    ],
+}
+
 
 # ---------------------------------------------------------------------------
 # Result type
@@ -107,6 +126,7 @@ class LintResult:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _is_compound_well(text: str, match: re.Match) -> bool:
     """Return True if 'well' is part of a compound adjective like 'well-tested'."""
     end = match.end()
@@ -117,12 +137,23 @@ def _is_compound_well(text: str, match: re.Match) -> bool:
 # Public API
 # ---------------------------------------------------------------------------
 
-def lint_done_when(criteria: str) -> LintResult:
+
+def lint_done_when(criteria: str, task_type: str = "implementation") -> LintResult:
     """Lint a *done_when* criteria string.
 
     Checks for:
     1. Subjective adjectives (good, clean, correct, proper, nice, well, ...).
     2. Presence of at least one testable pattern (test, pass, exist, ...).
+    3. Type-specific required patterns (investigation: root cause/documented;
+       bugfix: regression test/reproduced).
+
+    Parameters
+    ----------
+    criteria:
+        The done_when string to lint.
+    task_type:
+        One of ``"implementation"`` (default), ``"investigation"``, ``"bugfix"``.
+        Controls which type-specific rules are applied.
 
     Returns a :class:`LintResult` whose :attr:`~LintResult.passed` property
     is ``False`` when any warning was emitted.
@@ -156,5 +187,21 @@ def lint_done_when(criteria: str) -> LintResult:
             "schemas, or measurable outcomes "
             "(e.g. 'tests pass', 'file exists', 'output matches schema')"
         )
+
+    # --- type-specific patterns ---------------------------------------------
+    type_patterns = TYPE_SPECIFIC_PATTERNS.get(task_type)
+    if type_patterns:
+        matched_any = False
+        labels = []
+        for pattern, label in type_patterns:
+            if pattern.search(criteria):
+                matched_any = True
+                break
+            labels.append(label)
+        if not matched_any:
+            options = " or ".join(f"'{l}'" for l in labels)
+            result.warnings.append(
+                f"Task type '{task_type}' requires done_when to mention {options}"
+            )
 
     return result
