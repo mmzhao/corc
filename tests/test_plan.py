@@ -478,6 +478,15 @@ class TestLaunchInteractiveClaude:
         assert "test prompt" in cmd
 
     @patch("corc.plan.subprocess.run")
+    def test_includes_dangerously_skip_permissions(self, mock_run):
+        """Interactive sessions always pass --dangerously-skip-permissions."""
+        mock_run.return_value = MagicMock(returncode=0)
+        launch_interactive_claude("prompt")
+
+        cmd = mock_run.call_args[0][0]
+        assert "--dangerously-skip-permissions" in cmd
+
+    @patch("corc.plan.subprocess.run")
     def test_passes_continue_flag(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0)
         launch_interactive_claude("prompt", continue_session=True)

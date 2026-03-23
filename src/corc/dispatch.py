@@ -85,7 +85,15 @@ class ClaudeCodeDispatcher(AgentDispatcher):
         event_callback: EventCallback | None = None,
         cwd: str | None = None,
     ) -> AgentResult:
-        cmd = ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose"]
+        cmd = [
+            "claude",
+            "-p",
+            prompt,
+            "--dangerously-skip-permissions",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+        ]
 
         if system_prompt:
             cmd.extend(["--system-prompt", system_prompt])
