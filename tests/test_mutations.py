@@ -1,6 +1,7 @@
 """Tests for the mutation log."""
 
 import json
+import multiprocessing
 import tempfile
 from pathlib import Path
 
@@ -45,7 +46,9 @@ def test_read_since(tmp_path):
 
 def test_validate_rejects_bad_type():
     with pytest.raises(ValueError, match="Unknown mutation type"):
-        _validate_mutation({"seq": 1, "ts": "now", "type": "bad_type", "data": {}, "reason": "test"})
+        _validate_mutation(
+            {"seq": 1, "ts": "now", "type": "bad_type", "data": {}, "reason": "test"}
+        )
 
 
 def test_validate_rejects_missing_fields():
@@ -63,3 +66,45 @@ def test_task_id_included(tmp_path):
     ml = MutationLog(tmp_path / "mutations.jsonl")
     entry = ml.append("task_started", {}, reason="test", task_id="abc123")
     assert entry["task_id"] == "abc123"
+
+
+def _writer(path: str, n_appends: int) -> None:
+    """Worker function for concurrent writer test (must be top-level for pickling)."""
+    ml = MutationLog(Path(path))
+    for _ in range(n_appends):
+        ml.append("task_created", {"writer": "concurrent"}, reason="concurrent test")
+
+
+def test_concurrent_writers(tmp_path):
+    """10 concurrent process writers × 10 appends each → 100 unique sequential seqs."""
+    log_path = tmp_path / "mutations.jsonl"
+    n_writers = 10
+    n_appends = 10
+
+    processes = []
+    for _ in range(n_writers):
+        p = multiprocessing.Process(target=_writer, args=(str(log_path), n_appends))
+        processes.append(p)
+
+    for p in processes:
+        p.start()
+
+    for p in processes:
+        p.join()
+
+    # Verify all processes exited cleanly
+    for p in processes:
+        assert p.exitcode == 0, f"Writer process exited with code {p.exitcode}"
+
+    ml = MutationLog(log_path)
+    entries = ml.read_all()
+
+    assert len(entries) == n_writers * n_appends, (
+        f"Expected {n_writers * n_appends} entries, got {len(entries)}"
+    )
+
+    seqs = [e["seq"] for e in entries]
+    # All seq numbers must be unique
+    assert len(set(seqs)) == len(seqs), f"Duplicate seq numbers found: {seqs}"
+    # Must be strictly sequential 1..100
+    assert sorted(seqs) == list(range(1, n_writers * n_appends + 1))

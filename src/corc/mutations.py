@@ -41,7 +41,9 @@ def _validate_mutation(entry: dict) -> None:
     if missing:
         raise ValueError(f"Mutation missing required fields: {missing}")
     if entry["type"] not in MUTATION_TYPES:
-        raise ValueError(f"Unknown mutation type: {entry['type']}. Valid: {MUTATION_TYPES}")
+        raise ValueError(
+            f"Unknown mutation type: {entry['type']}. Valid: {MUTATION_TYPES}"
+        )
 
 
 class MutationLog:
@@ -61,24 +63,50 @@ class MutationLog:
                     last_seq = entry.get("seq", last_seq)
         return last_seq + 1
 
-    def append(self, mutation_type: str, data: dict, reason: str, task_id: str | None = None) -> dict:
-        entry = {
-            "seq": self._next_seq(),
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "type": mutation_type,
-            "data": data,
-            "reason": reason,
-        }
-        if task_id is not None:
-            entry["task_id"] = task_id
+    @staticmethod
+    def _read_last_seq(fd: int) -> int:
+        """Read last seq from an already-opened and locked file descriptor."""
+        os.lseek(fd, 0, os.SEEK_SET)
+        content = b""
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            content += chunk
+        last_seq = 0
+        for line in content.decode().splitlines():
+            line = line.strip()
+            if line:
+                entry = json.loads(line)
+                last_seq = entry.get("seq", last_seq)
+        return last_seq
 
-        _validate_mutation(entry)
-
-        line = json.dumps(entry, separators=(",", ":")) + "\n"
-
-        fd = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+    def append(
+        self, mutation_type: str, data: dict, reason: str, task_id: str | None = None
+    ) -> dict:
+        # Open file for both reading and writing; flock covers the entire
+        # read-then-write sequence so concurrent processes cannot observe
+        # the same last seq number.
+        fd = os.open(str(self.path), os.O_RDWR | os.O_CREAT, 0o644)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
+
+            last_seq = self._read_last_seq(fd)
+
+            entry = {
+                "seq": last_seq + 1,
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "type": mutation_type,
+                "data": data,
+                "reason": reason,
+            }
+            if task_id is not None:
+                entry["task_id"] = task_id
+
+            _validate_mutation(entry)
+
+            line = json.dumps(entry, separators=(",", ":")) + "\n"
+            os.lseek(fd, 0, os.SEEK_END)
             os.write(fd, line.encode())
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
