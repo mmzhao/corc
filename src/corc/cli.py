@@ -15,7 +15,11 @@ from corc.sessions import SessionLogger
 from corc.knowledge import KnowledgeStore
 from corc.pause import write_pause_lock, remove_pause_lock, read_pause_lock, is_paused
 from corc.dag import render_ascii_dag, render_mermaid
-from corc.context import assemble_context, record_context_mtimes
+from corc.context import (
+    assemble_context,
+    record_context_mtimes,
+    validate_context_bundle_paths,
+)
 from corc.daemon import Daemon, stop_daemon
 from corc.dispatch import get_dispatcher, Constraints
 from corc.roles import RoleLoader, constraints_from_role, get_system_prompt_for_role
@@ -105,8 +109,24 @@ def task_create(
     bundle = [b.strip() for b in context_bundle.split(",") if b.strip()]
     cl = [c.strip() for c in checklist.split(",") if c.strip()]
 
-    # Record file mtimes at creation time for staleness detection
+    # Validate context bundle paths exist
     project_root = paths["root"] if isinstance(paths, dict) else paths.root
+    if bundle:
+        missing = validate_context_bundle_paths(bundle, project_root)
+        if missing:
+            for m in missing:
+                click.echo(
+                    f"Warning: context_bundle: {m['ref']}: {m['reason']}",
+                    err=True,
+                )
+            if strict:
+                click.echo(
+                    "Aborted: --strict rejects missing context_bundle paths.",
+                    err=True,
+                )
+                sys.exit(1)
+
+    # Record file mtimes at creation time for staleness detection
     bundle_mtimes = record_context_mtimes(bundle, project_root)
 
     ml.append(
