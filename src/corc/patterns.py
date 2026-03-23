@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
+from corc.config import DEFAULTS
 from corc.rating import Rating, RatingStore, DIMENSIONS, DIMENSION_NAMES
 
 
@@ -115,11 +116,13 @@ class PlanningReport:
 # Helper functions
 # ---------------------------------------------------------------------------
 
-LOW_SCORE_THRESHOLD = 5.0
-HIGH_SCORE_THRESHOLD = 9.0
-FLAG_THRESHOLD = 7.0
-MIN_SAMPLE_SIZE = 3  # minimum ratings to include in analysis
-TRUST_MIN_SAMPLE = 20  # minimum for trust level suggestions
+_PATTERN_DEFAULTS = DEFAULTS["patterns"]
+
+LOW_SCORE_THRESHOLD = _PATTERN_DEFAULTS["low_score_threshold"]
+HIGH_SCORE_THRESHOLD = _PATTERN_DEFAULTS["high_score_threshold"]
+FLAG_THRESHOLD = _PATTERN_DEFAULTS["flag_threshold"]
+MIN_SAMPLE_SIZE = _PATTERN_DEFAULTS["min_sample_size"]
+TRUST_MIN_SAMPLE = _PATTERN_DEFAULTS["trust_min_sample"]
 
 
 def _compute_dimension_avgs(ratings: list[Rating]) -> dict[str, float]:

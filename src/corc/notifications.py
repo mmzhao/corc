@@ -34,6 +34,8 @@ from pathlib import Path
 
 import yaml
 
+from corc.config import load_config
+
 
 # ---------------------------------------------------------------------------
 # Severity levels
@@ -280,34 +282,23 @@ _DEFAULT_CONFIG = {
 
 
 def load_notification_config(corc_dir: Path) -> NotificationConfig:
-    """Load notification configuration from .corc/config.yaml.
+    """Load notification configuration via centralized config.
 
     Returns defaults if the config file doesn't exist or the notifications
     section is missing.
     """
-    config_path = Path(corc_dir) / "config.yaml"
-    raw_notifications = {}
-
-    if config_path.exists():
-        try:
-            with open(config_path) as f:
-                raw = yaml.safe_load(f) or {}
-            raw_notifications = raw.get("notifications", {})
-        except (yaml.YAMLError, OSError):
-            raw_notifications = {}
-
-    # Deep copy defaults so we never mutate the module-level _DEFAULT_CONFIG
-    channels = copy.deepcopy(_DEFAULT_CONFIG["channels"])
-    for name, conf in raw_notifications.get("channels", {}).items():
-        if name in channels:
-            channels[name].update(conf or {})
-        else:
-            channels[name] = conf or {}
-
-    triggers = copy.deepcopy(_DEFAULT_CONFIG["triggers"])
-    for event, channel_list in raw_notifications.get("triggers", {}).items():
-        triggers[event] = channel_list if channel_list is not None else []
-
+    root = Path(corc_dir).parent
+    cfg = load_config(root)
+    channels = cfg.get("notifications.channels") or copy.deepcopy(
+        _DEFAULT_CONFIG["channels"]
+    )
+    triggers = cfg.get("notifications.triggers") or copy.deepcopy(
+        _DEFAULT_CONFIG["triggers"]
+    )
+    # Normalize null trigger lists to empty lists (YAML null → [])
+    for event, channel_list in triggers.items():
+        if channel_list is None:
+            triggers[event] = []
     return NotificationConfig(channels=channels, triggers=triggers)
 
 

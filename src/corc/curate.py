@@ -18,16 +18,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from corc.audit import AuditLog
+from corc.config import DEFAULTS
 from corc.knowledge import KnowledgeStore
 from corc.mutations import MutationLog
 from corc.state import WorkState
 
-BLACKLIST_THRESHOLD = 3  # rejections of same type before suggesting blacklist
+BLACKLIST_THRESHOLD = DEFAULTS["curation"]["blacklist_threshold"]
 
 
 @dataclass
 class Finding:
     """A structured finding from an agent."""
+
     index: int
     content: str
     finding_type: str = "general"
@@ -54,6 +56,7 @@ class Finding:
 @dataclass
 class CurationResult:
     """Summary of a curation session."""
+
     task_id: str
     approved: int = 0
     rejected: int = 0
@@ -101,8 +104,7 @@ class CurationEngine:
             return []
 
         return [
-            Finding.from_raw(i, f, task_id=task_id)
-            for i, f in enumerate(raw_findings)
+            Finding.from_raw(i, f, task_id=task_id) for i, f in enumerate(raw_findings)
         ]
 
     def approve_finding(
@@ -144,7 +146,9 @@ class CurationEngine:
         content = f"---\n{frontmatter}\n---\n\n# {finding.content[:80]}\n\n{finding.content}\n"
 
         # Write to knowledge store
-        doc_id = self.ks.add(content=content, doc_type=doc_type, project=project, tags=tag_list)
+        doc_id = self.ks.add(
+            content=content, doc_type=doc_type, project=project, tags=tag_list
+        )
 
         # Log approval to mutation log
         self.ml.append(
@@ -225,26 +229,30 @@ class CurationEngine:
             if entry["type"] == "finding_rejected":
                 data = entry["data"]
                 ftype = data.get("finding_type", "general")
-                rejections_by_type.setdefault(ftype, []).append({
-                    "task_id": entry.get("task_id", ""),
-                    "reason": data.get("rejection_reason", ""),
-                    "content": data.get("finding_content", ""),
-                    "ts": entry.get("ts", ""),
-                })
+                rejections_by_type.setdefault(ftype, []).append(
+                    {
+                        "task_id": entry.get("task_id", ""),
+                        "reason": data.get("rejection_reason", ""),
+                        "content": data.get("finding_content", ""),
+                        "ts": entry.get("ts", ""),
+                    }
+                )
 
         suggestions = []
         for ftype, rejections in rejections_by_type.items():
             if len(rejections) >= BLACKLIST_THRESHOLD:
                 # Collect unique reasons
                 reasons = list({r["reason"] for r in rejections if r["reason"]})
-                suggestions.append({
-                    "finding_type": ftype,
-                    "rejection_count": len(rejections),
-                    "recent_reasons": reasons[-5:],  # Last 5 unique reasons
-                    "suggestion": (
-                        f"Finding type '{ftype}' has been rejected {len(rejections)} times. "
-                        f"Consider adding to blacklist to auto-reject future findings of this type."
-                    ),
-                })
+                suggestions.append(
+                    {
+                        "finding_type": ftype,
+                        "rejection_count": len(rejections),
+                        "recent_reasons": reasons[-5:],  # Last 5 unique reasons
+                        "suggestion": (
+                            f"Finding type '{ftype}' has been rejected {len(rejections)} times. "
+                            f"Consider adding to blacklist to auto-reject future findings of this type."
+                        ),
+                    }
+                )
 
         return suggestions

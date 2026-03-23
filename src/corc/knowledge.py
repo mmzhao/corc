@@ -17,6 +17,7 @@ from pathlib import Path
 import yaml
 
 from corc import embeddings
+from corc.config import DEFAULTS
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (
@@ -71,7 +72,7 @@ def _parse_frontmatter(content: str) -> tuple[dict, str]:
     if end == -1:
         return {}, content
     fm_str = content[3:end].strip()
-    body = content[end + 3:].strip()
+    body = content[end + 3 :].strip()
     try:
         fm = yaml.safe_load(fm_str) or {}
     except yaml.YAMLError:
@@ -93,7 +94,7 @@ def _content_hash(content: str) -> str:
 
 # --- Content Chunking ---
 
-TARGET_TOKENS = 500
+TARGET_TOKENS = DEFAULTS["knowledge"]["target_tokens"]
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
 
 
@@ -203,7 +204,11 @@ def chunk_markdown(body: str, target_tokens: int = TARGET_TOKENS) -> list[dict]:
 
         # Include heading text in content for context
         if heading:
-            full_text = f"{'#' * section['level']} {heading}\n\n{content}" if content else f"{'#' * section['level']} {heading}"
+            full_text = (
+                f"{'#' * section['level']} {heading}\n\n{content}"
+                if content
+                else f"{'#' * section['level']} {heading}"
+            )
         else:
             full_text = content
 
@@ -213,11 +218,13 @@ def chunk_markdown(body: str, target_tokens: int = TARGET_TOKENS) -> list[dict]:
         tokens = estimate_tokens(full_text)
 
         if tokens <= target_tokens:
-            chunks.append({
-                "heading": heading,
-                "content": full_text,
-                "token_estimate": tokens,
-            })
+            chunks.append(
+                {
+                    "heading": heading,
+                    "content": full_text,
+                    "token_estimate": tokens,
+                }
+            )
         else:
             # Section too long — split it
             pieces = _split_long_text(content, target_tokens)
@@ -226,22 +233,28 @@ def chunk_markdown(body: str, target_tokens: int = TARGET_TOKENS) -> list[dict]:
                 if heading and j == 0:
                     piece_text = f"{'#' * section['level']} {heading}\n\n{piece}"
                 elif heading:
-                    piece_text = f"{'#' * section['level']} {heading} (continued)\n\n{piece}"
+                    piece_text = (
+                        f"{'#' * section['level']} {heading} (continued)\n\n{piece}"
+                    )
                 else:
                     piece_text = piece
-                chunks.append({
-                    "heading": heading,
-                    "content": piece_text,
-                    "token_estimate": estimate_tokens(piece_text),
-                })
+                chunks.append(
+                    {
+                        "heading": heading,
+                        "content": piece_text,
+                        "token_estimate": estimate_tokens(piece_text),
+                    }
+                )
 
     # Handle edge case: empty body produces no chunks
     if not chunks and body.strip():
-        chunks.append({
-            "heading": None,
-            "content": body.strip(),
-            "token_estimate": estimate_tokens(body.strip()),
-        })
+        chunks.append(
+            {
+                "heading": None,
+                "content": body.strip(),
+                "token_estimate": estimate_tokens(body.strip()),
+            }
+        )
 
     return chunks
 
@@ -275,8 +288,14 @@ class KnowledgeStore:
             self.conn.execute("ALTER TABLE documents ADD COLUMN file_mtime REAL")
             self.conn.commit()
 
-    def add(self, file_path: Path | None = None, content: str | None = None,
-            doc_type: str = "note", project: str | None = None, tags: list[str] | None = None) -> str:
+    def add(
+        self,
+        file_path: Path | None = None,
+        content: str | None = None,
+        doc_type: str = "note",
+        project: str | None = None,
+        tags: list[str] | None = None,
+    ) -> str:
         """Add a document. Either from file_path or raw content."""
         mtime: float | None = None
         if file_path:
@@ -362,7 +381,14 @@ class KnowledgeStore:
         for idx, chunk in enumerate(chunks):
             self.conn.execute(
                 "INSERT INTO chunks(document_id, chunk_index, heading, content, token_estimate, embedding) VALUES(?, ?, ?, ?, ?, ?)",
-                (doc_id, idx, chunk["heading"], chunk["content"], chunk["token_estimate"], chunk_embeddings[idx]),
+                (
+                    doc_id,
+                    idx,
+                    chunk["heading"],
+                    chunk["content"],
+                    chunk["token_estimate"],
+                    chunk_embeddings[idx],
+                ),
             )
 
         self.conn.commit()
@@ -443,7 +469,9 @@ class KnowledgeStore:
             if rel_path not in on_disk:
                 doc_id = entry["id"]
                 self.conn.execute("DELETE FROM chunks WHERE document_id=?", (doc_id,))
-                self.conn.execute("DELETE FROM document_tags WHERE document_id=?", (doc_id,))
+                self.conn.execute(
+                    "DELETE FROM document_tags WHERE document_id=?", (doc_id,)
+                )
                 self.conn.execute(
                     "DELETE FROM documents_fts WHERE rowid = (SELECT rowid FROM documents WHERE id=?)",
                     (doc_id,),
@@ -454,8 +482,13 @@ class KnowledgeStore:
 
         return refreshed
 
-    def search(self, query: str, limit: int = 10, doc_type: str | None = None,
-               project: str | None = None) -> list[dict]:
+    def search(
+        self,
+        query: str,
+        limit: int = 10,
+        doc_type: str | None = None,
+        project: str | None = None,
+    ) -> list[dict]:
         """FTS5 keyword search with BM25 ranking."""
         self._refresh_stale_docs()
         sql = """
@@ -479,8 +512,13 @@ class KnowledgeStore:
         rows = self.conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
-    def semantic_search(self, query: str, limit: int = 10, doc_type: str | None = None,
-                        project: str | None = None) -> list[dict]:
+    def semantic_search(
+        self,
+        query: str,
+        limit: int = 10,
+        doc_type: str | None = None,
+        project: str | None = None,
+    ) -> list[dict]:
         """Semantic search using sentence-transformers embeddings and cosine similarity.
 
         Falls back to FTS5 keyword search if sentence-transformers is unavailable
@@ -536,9 +574,15 @@ class KnowledgeStore:
 
         return [item[1] for item in scored[:limit]]
 
-    def hybrid_search(self, query: str, limit: int = 10, doc_type: str | None = None,
-                      project: str | None = None, semantic_weight: float = 0.6,
-                      keyword_weight: float | None = None) -> list[dict]:
+    def hybrid_search(
+        self,
+        query: str,
+        limit: int = 10,
+        doc_type: str | None = None,
+        project: str | None = None,
+        semantic_weight: float = 0.6,
+        keyword_weight: float | None = None,
+    ) -> list[dict]:
         """Hybrid search combining FTS5 keyword and semantic similarity.
 
         Runs both FTS5 keyword search and semantic search, normalizes each
@@ -561,16 +605,22 @@ class KnowledgeStore:
 
         Falls back to FTS5 if semantic search is unavailable.
         """
-        kw_weight = keyword_weight if keyword_weight is not None else (1.0 - semantic_weight)
+        kw_weight = (
+            keyword_weight if keyword_weight is not None else (1.0 - semantic_weight)
+        )
 
         # Note: freshness check happens inside search() and semantic_search()
         # Run both FTS5 keyword and semantic searches with expanded limits
-        fts_results = self.search(query, limit=limit * 2, doc_type=doc_type, project=project)
+        fts_results = self.search(
+            query, limit=limit * 2, doc_type=doc_type, project=project
+        )
 
         if not self._embeddings_available:
             return fts_results[:limit]
 
-        sem_results = self.semantic_search(query, limit=limit * 2, doc_type=doc_type, project=project)
+        sem_results = self.semantic_search(
+            query, limit=limit * 2, doc_type=doc_type, project=project
+        )
 
         # If semantic search fell back to FTS5, just return FTS results
         # (detected by checking if results have 'chunk_id' key)
@@ -659,7 +709,9 @@ class KnowledgeStore:
         return [item[1] for item in merged[:limit]]
 
     def get(self, doc_id: str) -> dict | None:
-        row = self.conn.execute("SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone()
+        row = self.conn.execute(
+            "SELECT * FROM documents WHERE id=?", (doc_id,)
+        ).fetchone()
         if not row:
             return None
         d = dict(row)
@@ -668,7 +720,9 @@ class KnowledgeStore:
             d["content"] = file_path.read_text()
         return d
 
-    def list_docs(self, doc_type: str | None = None, status: str = "active") -> list[dict]:
+    def list_docs(
+        self, doc_type: str | None = None, status: str = "active"
+    ) -> list[dict]:
         sql = "SELECT * FROM documents WHERE status=?"
         params: list = [status]
         if doc_type:
@@ -711,9 +765,13 @@ class KnowledgeStore:
     def stats(self) -> dict:
         total = self.conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
         by_type = {}
-        for row in self.conn.execute("SELECT type, COUNT(*) as cnt FROM documents GROUP BY type").fetchall():
+        for row in self.conn.execute(
+            "SELECT type, COUNT(*) as cnt FROM documents GROUP BY type"
+        ).fetchall():
             by_type[row[0]] = row[1]
         by_status = {}
-        for row in self.conn.execute("SELECT status, COUNT(*) as cnt FROM documents GROUP BY status").fetchall():
+        for row in self.conn.execute(
+            "SELECT status, COUNT(*) as cnt FROM documents GROUP BY status"
+        ).fetchall():
             by_status[row[0]] = row[1]
         return {"total": total, "by_type": by_type, "by_status": by_status}

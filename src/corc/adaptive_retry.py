@@ -17,22 +17,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from corc.audit import AuditLog
+from corc.config import DEFAULTS
 
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Configuration — sourced from centralized defaults
 # ---------------------------------------------------------------------------
 
-DEFAULT_RETRIES = 2
-REDUCED_RETRIES = 1
-INCREASED_RETRIES = 3
+_RETRY_DEFAULTS = DEFAULTS["retry"]
+
+DEFAULT_RETRIES = _RETRY_DEFAULTS["default_retries"]
+REDUCED_RETRIES = _RETRY_DEFAULTS["reduced_retries"]
+INCREASED_RETRIES = _RETRY_DEFAULTS["increased_retries"]
 
 # Minimum number of first-attempt outcomes before adapting
-MIN_SAMPLES = 5
+MIN_SAMPLES = _RETRY_DEFAULTS["min_samples"]
 
 # Thresholds
-HIGH_SUCCESS_THRESHOLD = 0.90  # >90% => reduce
-LOW_SUCCESS_THRESHOLD = 0.50  # <50% => increase
+HIGH_SUCCESS_THRESHOLD = _RETRY_DEFAULTS["high_success_threshold"]
+LOW_SUCCESS_THRESHOLD = _RETRY_DEFAULTS["low_success_threshold"]
 
 
 # ---------------------------------------------------------------------------
