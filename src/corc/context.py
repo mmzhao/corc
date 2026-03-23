@@ -198,15 +198,15 @@ def generate_catch_up_summary(
             if isinstance(finding, str):
                 lines.append(f'- Finding from "{name}": {finding}')
             elif isinstance(finding, dict):
-                content = finding.get("content", finding.get("description", str(finding)))
+                content = finding.get(
+                    "content", finding.get("description", str(finding))
+                )
                 lines.append(f'- Finding from "{name}": {content}')
             has_content = True
 
     # Overall progress from plan_tasks
     if plan_tasks:
-        completed_count = sum(
-            1 for t in plan_tasks if t.get("status") == "completed"
-        )
+        completed_count = sum(1 for t in plan_tasks if t.get("status") == "completed")
         total = len(plan_tasks)
         remaining = total - completed_count
         lines.append(f"- {completed_count} tasks completed, {remaining} remaining")
@@ -234,7 +234,13 @@ def _extract_section(content: str, section_slug: str) -> str:
         if line.startswith("#"):
             level = len(line) - len(line.lstrip("#"))
             heading_text = line.lstrip("#").strip()
-            slug = heading_text.lower().replace(" ", "-").replace(":", "").replace("(", "").replace(")", "")
+            slug = (
+                heading_text.lower()
+                .replace(" ", "-")
+                .replace(":", "")
+                .replace("(", "")
+                .replace(")", "")
+            )
 
             if not capturing and section_slug in slug:
                 capturing = True
@@ -251,6 +257,47 @@ def _extract_section(content: str, section_slug: str) -> str:
     if captured:
         return "\n".join(captured)
     return content  # Fallback: return full content if section not found
+
+
+def validate_context_bundle_paths(
+    context_bundle: list[str], project_root: Path
+) -> list[dict[str, str]]:
+    """Validate that all context bundle paths exist on disk.
+
+    Returns a list of dicts describing each missing path, e.g.:
+
+        [{"ref": "src/foo.py", "file_path": "src/foo.py", "reason": "file not found"}]
+
+    For section references like ``spec.md#design``, validates that the
+    underlying file (``spec.md``) exists. Returns an empty list if all
+    paths are valid.
+    """
+    missing: list[dict[str, str]] = []
+    for ref in context_bundle:
+        ref_str = str(ref)
+        file_part = ref_str
+        if "#" in ref_str:
+            file_part = ref_str.rsplit("#", 1)[0]
+
+        full_path = project_root / file_part
+        try:
+            if not full_path.exists():
+                missing.append(
+                    {
+                        "ref": ref_str,
+                        "file_path": file_part,
+                        "reason": "file not found",
+                    }
+                )
+        except OSError:
+            missing.append(
+                {
+                    "ref": ref_str,
+                    "file_path": file_part,
+                    "reason": "file not accessible",
+                }
+            )
+    return missing
 
 
 def record_context_mtimes(
@@ -278,9 +325,7 @@ def record_context_mtimes(
     return mtimes
 
 
-def check_context_staleness(
-    task: dict, project_root: Path
-) -> list[dict[str, Any]]:
+def check_context_staleness(task: dict, project_root: Path) -> list[dict[str, Any]]:
     """Check if context bundle files have changed since task creation.
 
     Compares current file mtimes against those recorded in
@@ -303,11 +348,13 @@ def check_context_staleness(
             if file_path.exists():
                 current_mtime = file_path.stat().st_mtime
                 if current_mtime != recorded_mtime:
-                    stale.append({
-                        "file": ref_str,
-                        "recorded_mtime": recorded_mtime,
-                        "current_mtime": current_mtime,
-                    })
+                    stale.append(
+                        {
+                            "file": ref_str,
+                            "recorded_mtime": recorded_mtime,
+                            "current_mtime": current_mtime,
+                        }
+                    )
         except OSError:
             pass
     return stale
