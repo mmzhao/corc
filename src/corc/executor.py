@@ -5,6 +5,10 @@ Uses a thread pool for parallel dispatch. Can be called standalone: `corc dispat
 
 Each agent runs in its own git worktree for filesystem isolation.
 Worktrees are created before dispatch and cleaned up after completion.
+
+PR workflow: before creating a worktree, the executor git-pulls main to
+ensure branches start from the latest state. After agent completion, the
+worktree branch is pushed and a PR is created via `gh pr create`.
 """
 
 import uuid
@@ -22,6 +26,7 @@ from corc.retry import get_retry_context
 from corc.roles import RoleLoader, constraints_from_role, get_system_prompt_for_role
 from corc.sessions import SessionLogger
 from corc.state import WorkState
+from corc.pr import create_pr, pull_main, push_branch, get_worktree_branch, PRInfo
 from corc.repo_policy import get_repo_policy
 from corc.worktree import (
     WorktreeError,
@@ -35,12 +40,14 @@ from corc.worktree import (
 @dataclass
 class CompletedTask:
     """A task that has finished executing, with its result."""
+
     task: dict
     result: AgentResult
     attempt: int
     worktree_path: Path | None = None
     agent_id: str | None = None
     merge_status: str | None = None
+    pr_info: PRInfo | None = None
 
 
 class Executor:
@@ -103,6 +110,15 @@ class Executor:
                 reason="Reusing worktree after merge conflict",
             )
         else:
+            # Pull latest main before creating worktree so branch starts
+            # from the most recent state.
+            pulled = pull_main(self.project_root)
+            self.audit_log.log(
+                "main_pulled",
+                task_id=task["id"],
+                success=pulled,
+            )
+
             # Create git worktree for agent isolation
             try:
                 worktree_path, branch_name = create_worktree(
@@ -173,7 +189,9 @@ class Executor:
         except ValueError:
             # Fallback if role YAML not found — use defaults
             constraints = Constraints()
-            system_prompt = f"You are a {role_name} working on task '{task['name']}'.\n\n{context}"
+            system_prompt = (
+                f"You are a {role_name} working on task '{task['name']}'.\n\n{context}"
+            )
 
         prompt = (
             f"Complete the following task.\n\n"
@@ -190,8 +208,12 @@ class Executor:
 
         # Log the dispatch
         self.session_logger.log_dispatch(
-            task["id"], attempt, prompt, system_prompt,
-            constraints.allowed_tools, constraints.max_budget_usd,
+            task["id"],
+            attempt,
+            prompt,
+            system_prompt,
+            constraints.allowed_tools,
+            constraints.max_budget_usd,
         )
 
         # Build streaming event callback for real-time logging
@@ -202,8 +224,12 @@ class Executor:
 
         # Submit to thread pool (non-blocking)
         future = self._pool.submit(
-            self.dispatcher.dispatch, prompt, system_prompt, constraints,
-            event_callback=event_callback, cwd=cwd,
+            self.dispatcher.dispatch,
+            prompt,
+            system_prompt,
+            constraints,
+            event_callback=event_callback,
+            cwd=cwd,
         )
         self._futures[future] = (task, attempt, worktree_path, agent_id)
 
@@ -215,6 +241,7 @@ class Executor:
         2. Writes tool_use events to the audit log with task_id.
         3. Writes assistant message events to the audit log for TUI visibility.
         """
+
         def callback(event):
             event_type = event.get("type", "unknown")
 
@@ -248,6 +275,61 @@ class Executor:
 
         return callback
 
+    def _create_pr_from_worktree(
+        self, task: dict, worktree_path: Path
+    ) -> PRInfo | None:
+        """Push worktree branch and create a PR.
+
+        After an agent completes successfully, pushes the branch to origin
+        and creates a PR via `gh pr create`. This ensures no code is ever
+        pushed directly to main — all changes go through PRs.
+
+        Args:
+            task: The task dict.
+            worktree_path: Path to the worktree.
+
+        Returns:
+            PRInfo if PR was created successfully, None otherwise.
+        """
+        task_id = task["id"]
+        branch_name = get_worktree_branch(self.project_root, worktree_path)
+        if not branch_name:
+            self.audit_log.log(
+                "pr_creation_skipped",
+                task_id=task_id,
+                reason="Could not determine branch name for worktree",
+            )
+            return None
+
+        # Push the branch to remote
+        pushed = push_branch(self.project_root, branch_name)
+        if not pushed:
+            self.audit_log.log(
+                "pr_push_failed",
+                task_id=task_id,
+                branch=branch_name,
+            )
+            return None
+
+        # Create the PR
+        pr_info = create_pr(self.project_root, branch_name, task)
+        if pr_info:
+            self.audit_log.log(
+                "pr_created",
+                task_id=task_id,
+                pr_url=pr_info.url,
+                pr_number=pr_info.number,
+                branch=branch_name,
+            )
+        else:
+            self.audit_log.log(
+                "pr_creation_failed",
+                task_id=task_id,
+                branch=branch_name,
+            )
+
+        return pr_info
+
     def poll_completed(self) -> list[CompletedTask]:
         """Check for completed dispatches. Non-blocking.
 
@@ -273,8 +355,11 @@ class Executor:
 
             # Log the output
             self.session_logger.log_output(
-                task["id"], attempt, result.output,
-                result.exit_code, result.duration_s,
+                task["id"],
+                attempt,
+                result.output,
+                result.exit_code,
+                result.duration_s,
             )
             self.audit_log.log(
                 "task_dispatch_complete",
@@ -283,6 +368,11 @@ class Executor:
                 duration_s=result.duration_s,
                 attempt=attempt,
             )
+
+            # Create PR from worktree branch (PR-based workflow)
+            pr_info = None
+            if worktree_path and result.exit_code == 0:
+                pr_info = self._create_pr_from_worktree(task, worktree_path)
 
             if not self.defer_merge and worktree_path:
                 # Legacy behavior: merge and clean up immediately
@@ -297,8 +387,9 @@ class Executor:
                         reason="Merge policy is human-only; PR left for human review",
                     )
                     try:
-                        remove_worktree(self.project_root, worktree_path,
-                                        remove_branch=False)
+                        remove_worktree(
+                            self.project_root, worktree_path, remove_branch=False
+                        )
                         self.audit_log.log(
                             "worktree_removed",
                             task_id=task["id"],
@@ -313,10 +404,16 @@ class Executor:
                 else:
                     self._merge_and_cleanup_worktree(task["id"], worktree_path)
 
-            completed.append(CompletedTask(
-                task=task, result=result, attempt=attempt,
-                worktree_path=worktree_path, agent_id=agent_id,
-            ))
+            completed.append(
+                CompletedTask(
+                    task=task,
+                    result=result,
+                    attempt=attempt,
+                    worktree_path=worktree_path,
+                    agent_id=agent_id,
+                    pr_info=pr_info,
+                )
+            )
 
         return completed
 
