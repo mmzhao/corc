@@ -254,6 +254,7 @@ def plan(file, resume_session):
 
     Resume a crashed/interrupted session: corc plan --resume
     """
+    import uuid as _uuid
     from pathlib import Path as _Path
     from corc.plan import (
         build_system_prompt,
@@ -271,7 +272,7 @@ def plan(file, resume_session):
 
     draft_content = None
     resume_meta = None
-    continue_session = False
+    resume_claude_session_id = None
 
     if resume_session:
         resume_meta, draft_content = load_latest_draft(paths["corc_dir"])
@@ -279,7 +280,13 @@ def plan(file, resume_session):
             click.echo(
                 f"Resuming session from {resume_meta.get('timestamp', 'unknown')}"
             )
-            continue_session = True
+            resume_claude_session_id = resume_meta.get("claude_session_id")
+            if not resume_claude_session_id:
+                click.echo(
+                    "Warning: no Claude session ID saved — "
+                    "falling back to --continue (may resume wrong session).",
+                    err=True,
+                )
         else:
             click.echo("No previous session found. Starting fresh.")
 
@@ -293,21 +300,32 @@ def plan(file, resume_session):
         resume_meta=resume_meta,
     )
 
+    # Generate a Claude session UUID so we can resume precisely
+    claude_session_id = str(_uuid.uuid4())
+
     # Save session metadata for crash recovery
     session_id = time.strftime("%Y%m%d-%H%M%S")
     save_session_metadata(
         paths["corc_dir"],
         session_id,
         seed_file=str(file) if file else None,
+        claude_session_id=claude_session_id,
     )
 
     click.echo("Launching planning session...")
     click.echo("Use 'corc task create' to create tasks from within the session.")
     click.echo()
 
-    exit_code = launch_interactive_claude(
-        system_prompt, continue_session=continue_session
-    )
+    try:
+        exit_code = launch_interactive_claude(
+            system_prompt,
+            claude_session_id=claude_session_id,
+            resume_claude_session_id=resume_claude_session_id,
+            continue_session=bool(resume_meta and not resume_claude_session_id),
+        )
+    except FileNotFoundError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
 
     # Mark session complete on clean exit
     if exit_code == 0:
