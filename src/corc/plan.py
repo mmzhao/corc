@@ -7,7 +7,6 @@ tasks via `corc task create`.
 """
 
 import json
-import os
 import subprocess
 import time
 from pathlib import Path
@@ -101,6 +100,7 @@ what alternatives were considered.
 # Context assembly helpers
 # ---------------------------------------------------------------------------
 
+
 def _get_knowledge_summary(ks) -> str:
     """Summarize the knowledge store for the planning session."""
     docs = ks.list_docs()
@@ -138,8 +138,11 @@ def _get_work_state_summary(ws) -> str:
         if not group:
             continue
         icon = {
-            "completed": "done", "running": "running",
-            "pending": "pending", "failed": "failed", "blocked": "blocked",
+            "completed": "done",
+            "running": "running",
+            "pending": "pending",
+            "failed": "failed",
+            "blocked": "blocked",
         }.get(status, "?")
         lines.append(f"  [{icon}] {status} ({len(group)}):")
         for t in group:
@@ -162,7 +165,9 @@ def _get_repo_context(project_root: Path) -> str:
     try:
         result = subprocess.run(
             ["git", "log", "--oneline", "-20"],
-            capture_output=True, text=True, cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            cwd=str(project_root),
             timeout=10,
         )
         if result.returncode == 0 and result.stdout.strip():
@@ -201,6 +206,7 @@ def _get_repo_context(project_root: Path) -> str:
 # Draft / session management
 # ---------------------------------------------------------------------------
 
+
 def get_drafts_dir(corc_dir: Path) -> Path:
     """Return the drafts directory path, creating it if needed."""
     drafts_dir = corc_dir / "drafts"
@@ -208,12 +214,25 @@ def get_drafts_dir(corc_dir: Path) -> Path:
     return drafts_dir
 
 
-def save_session_metadata(corc_dir: Path, session_id: str,
-                          seed_file: str | None = None) -> Path:
-    """Save session metadata for crash recovery."""
+def save_session_metadata(
+    corc_dir: Path,
+    session_id: str,
+    seed_file: str | None = None,
+    claude_session_id: str | None = None,
+) -> Path:
+    """Save session metadata for crash recovery.
+
+    Args:
+        corc_dir: Path to .corc directory.
+        session_id: CORC session identifier (timestamp-based).
+        seed_file: Optional path to seed document.
+        claude_session_id: UUID for the Claude Code session (used with
+            ``--session-id`` / ``--resume`` for precise session recovery).
+    """
     drafts_dir = get_drafts_dir(corc_dir)
     meta = {
         "session_id": session_id,
+        "claude_session_id": claude_session_id,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "seed_file": seed_file,
         "status": "active",
@@ -238,13 +257,16 @@ def mark_session_complete(corc_dir: Path, session_id: str) -> None:
 
 
 def load_latest_draft(corc_dir: Path) -> tuple[dict | None, str | None]:
-    """Load the most recent session metadata and any draft content.
+    """Load the most recent *active* session metadata and any draft content.
+
+    Only considers sessions with status != "complete" so that --resume
+    does not pointlessly re-open a finished session.
 
     Returns (metadata_dict, draft_content) or (None, None) if nothing found.
     """
     drafts_dir = get_drafts_dir(corc_dir)
 
-    # Find latest session metadata
+    # Find latest active session metadata (skip completed ones)
     sessions = sorted(
         drafts_dir.glob("session-*.json"),
         key=lambda p: p.stat().st_mtime,
@@ -252,10 +274,17 @@ def load_latest_draft(corc_dir: Path) -> tuple[dict | None, str | None]:
     if not sessions:
         return None, None
 
-    latest_meta_path = sessions[-1]
-    try:
-        meta = json.loads(latest_meta_path.read_text())
-    except (json.JSONDecodeError, IOError):
+    meta = None
+    for meta_path in reversed(sessions):
+        try:
+            candidate = json.loads(meta_path.read_text())
+        except (json.JSONDecodeError, IOError):
+            continue
+        if candidate.get("status") != "complete":
+            meta = candidate
+            break
+
+    if meta is None:
         return None, None
 
     # Find latest draft spec file
@@ -276,6 +305,7 @@ def load_latest_draft(corc_dir: Path) -> tuple[dict | None, str | None]:
 # ---------------------------------------------------------------------------
 # System prompt builder
 # ---------------------------------------------------------------------------
+
 
 def build_system_prompt(
     paths: dict,
@@ -322,7 +352,9 @@ def build_system_prompt(
     # Seed document
     if seed_content:
         parts.append("## Seed Document (Pre-loaded)")
-        parts.append("The operator provided the following document to seed this planning session:")
+        parts.append(
+            "The operator provided the following document to seed this planning session:"
+        )
         parts.append("```")
         parts.append(seed_content)
         parts.append("```")
@@ -331,7 +363,9 @@ def build_system_prompt(
     # Resume context
     if draft_content:
         parts.append("## Previous Draft (Resuming)")
-        parts.append("This is a resumed planning session. Here is the last saved draft:")
+        parts.append(
+            "This is a resumed planning session. Here is the last saved draft:"
+        )
         parts.append("```")
         parts.append(draft_content)
         parts.append("```")
@@ -339,7 +373,9 @@ def build_system_prompt(
         parts.append("")
 
     if resume_meta:
-        parts.append(f"Previous session started: {resume_meta.get('timestamp', 'unknown')}")
+        parts.append(
+            f"Previous session started: {resume_meta.get('timestamp', 'unknown')}"
+        )
         parts.append("")
 
     return "\n".join(parts)
@@ -349,24 +385,67 @@ def build_system_prompt(
 # Session launcher
 # ---------------------------------------------------------------------------
 
-def launch_interactive_claude(system_prompt: str,
-                              continue_session: bool = False) -> int:
-    """Launch an interactive claude session with the given system prompt.
+
+def _check_prompt_size(system_prompt: str) -> None:
+    """Warn if the system prompt is approaching OS argument length limits."""
+    # macOS ARG_MAX is typically 1MB; leave headroom for other args
+    MAX_SAFE_BYTES = 800_000
+    prompt_bytes = len(system_prompt.encode("utf-8"))
+    if prompt_bytes > MAX_SAFE_BYTES:
+        import warnings
+
+        warnings.warn(
+            f"System prompt is {prompt_bytes:,} bytes, which may exceed OS "
+            f"argument length limits. Consider reducing knowledge store or "
+            f"work state size.",
+            stacklevel=3,
+        )
+
+
+def launch_interactive_claude(
+    system_prompt: str,
+    continue_session: bool = False,
+    claude_session_id: str | None = None,
+    resume_claude_session_id: str | None = None,
+) -> int:
+    """Launch an interactive Claude Code session with the given system prompt.
 
     The child process inherits stdin/stdout/stderr so the user gets a
     fully interactive terminal session.
 
     Args:
         system_prompt: The system prompt to inject.
-        continue_session: If True, pass --continue to resume last conversation.
+        continue_session: Deprecated — use *resume_claude_session_id* instead.
+            If True and no *resume_claude_session_id* is given, passes
+            ``--continue`` as a fallback.
+        claude_session_id: UUID to assign to a *new* session (``--session-id``).
+        resume_claude_session_id: UUID of a previous session to resume
+            (``--resume <id>``).  Takes precedence over *continue_session*.
 
     Returns:
         The exit code of the claude process.
+
+    Raises:
+        FileNotFoundError: If the ``claude`` binary is not on PATH.
     """
+    _check_prompt_size(system_prompt)
+
     cmd = ["claude", "--system-prompt", system_prompt]
 
-    if continue_session:
+    if resume_claude_session_id:
+        cmd.extend(["--resume", resume_claude_session_id])
+    elif continue_session:
         cmd.append("--continue")
 
-    result = subprocess.run(cmd)
+    if claude_session_id and not resume_claude_session_id:
+        cmd.extend(["--session-id", claude_session_id])
+
+    try:
+        result = subprocess.run(cmd)
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            "claude: command not found. "
+            "Install Claude Code (https://docs.anthropic.com/en/docs/claude-code) "
+            "and ensure it is on your PATH."
+        )
     return result.returncode
