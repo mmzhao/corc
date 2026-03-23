@@ -2207,5 +2207,134 @@ def retro(project_name, cost_estimate):
     click.echo(f"Retrospective saved to knowledge store: {doc_id}")
 
 
+# --- Blacklist Management ---
+
+
+@cli.group()
+def blacklist():
+    """Manage the agent blacklist.
+
+    The blacklist contains entries agents should NOT do. Entries come in two forms:
+
+    - Advisory (plain text): Injected into agent context as guidance.
+    - Enforced (block_command: prefix): Auto-generates PreToolUse hooks that
+      block matching Bash commands at the tool-use layer.
+    """
+    pass
+
+
+@blacklist.command("list")
+def blacklist_list():
+    """List all blacklist entries, showing which are enforced.
+
+    Examples:
+      corc blacklist list
+    """
+    from corc.blacklist import load_blacklist
+
+    paths = get_paths()
+    entries = load_blacklist(paths["root"])
+
+    if not entries:
+        click.echo("No blacklist entries found.")
+        return
+
+    for entry in entries:
+        if entry.is_block_command:
+            reason_str = f" ({entry.reason})" if entry.reason else ""
+            click.echo(f"  [enforced]  block_command: {entry.pattern}{reason_str}")
+        else:
+            click.echo(f"  [advisory]  {entry.raw}")
+
+
+@blacklist.command("add")
+@click.argument("entry")
+@click.option("--reason", default="", help="Reason for this blacklist entry")
+@click.option("--section", default=None, help="Section heading to add under")
+def blacklist_add(entry, reason, section):
+    """Add an entry to the blacklist.
+
+    Use the 'block_command:' prefix for entries that should be machine-enforced
+    via PreToolUse hooks. Plain text entries are advisory (prompt-only).
+
+    Examples:
+      corc blacklist add "Never use eval()" --reason "security"
+      corc blacklist add "block_command: git push --force" --reason "history"
+      corc blacklist add "block_command: rm -rf /" --reason "dangerous" --section "Process"
+    """
+    from corc.blacklist import add_entry, sync_blacklist_hooks, parse_blacklist
+
+    paths = get_paths()
+    formatted = add_entry(paths["root"], entry, reason=reason, section=section)
+    click.echo(f"Added: {formatted}")
+
+    # If the entry is a block_command, regenerate hooks
+    if entry.strip().lower().startswith("block_command:"):
+        written = sync_blacklist_hooks(paths["root"])
+        if written:
+            click.echo(f"Generated/updated {len(written)} hook file(s)")
+
+
+@blacklist.command("remove")
+@click.argument("entry")
+def blacklist_remove(entry):
+    """Remove an entry from the blacklist.
+
+    Matches by substring — removes the first matching entry.
+
+    Examples:
+      corc blacklist remove "Never use eval()"
+      corc blacklist remove "git push --force"
+    """
+    from corc.blacklist import remove_entry, sync_blacklist_hooks
+
+    paths = get_paths()
+    removed = remove_entry(paths["root"], entry)
+
+    if not removed:
+        click.echo(f"No matching entry found for: {entry}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Removed entry matching: {entry}")
+
+    # Regenerate hooks (might need cleanup if a block_command was removed)
+    written = sync_blacklist_hooks(paths["root"])
+    if written:
+        click.echo(f"Updated {len(written)} hook file(s)")
+
+
+@blacklist.command("sync-hooks")
+def blacklist_sync_hooks():
+    """Regenerate hooks from current blacklist entries.
+
+    Reads .corc/blacklist.md, finds all block_command: entries, and
+    regenerates .claude/hooks/enforce-blacklist.sh and updates
+    .claude/settings.json accordingly.
+
+    This is automatically called after 'blacklist add' and 'blacklist remove',
+    but can be run manually if the blacklist file was edited directly.
+
+    Examples:
+      corc blacklist sync-hooks
+    """
+    from corc.blacklist import sync_blacklist_hooks, load_blacklist, get_block_commands
+
+    paths = get_paths()
+    entries = load_blacklist(paths["root"])
+    blocked = get_block_commands(entries)
+
+    written = sync_blacklist_hooks(paths["root"])
+
+    if blocked:
+        click.echo(f"Found {len(blocked)} block_command entries")
+        for entry in blocked:
+            click.echo(f"  • {entry.pattern}")
+        click.echo(f"Generated/updated {len(written)} hook file(s)")
+    else:
+        click.echo("No block_command entries found")
+        if written:
+            click.echo(f"Cleaned up {len(written)} hook file(s)")
+
+
 if __name__ == "__main__":
     cli()
