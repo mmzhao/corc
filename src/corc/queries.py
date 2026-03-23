@@ -6,6 +6,7 @@ No mutations — this module is strictly read-only.
 """
 
 import json
+from datetime import datetime, timezone, timedelta
 
 from corc.audit import AuditLog
 from corc.sessions import SessionLogger
@@ -111,6 +112,27 @@ class QueryAPI:
                     }
                 )
         return blocked
+
+    def get_recently_completed_tasks(self, hours: float = 1.0) -> list[dict]:
+        """Tasks completed within the last *hours* hours.
+
+        Uses the ``completed`` timestamp field on each task. Tasks without
+        a ``completed`` timestamp or completed earlier are excluded.
+        Sorted most-recently-completed first.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        cutoff_str = cutoff.isoformat()
+        completed = self.work_state.list_tasks(status="completed")
+        recent = []
+        for t in completed:
+            ts = t.get("completed", "")
+            if not ts:
+                continue
+            # Normalise: timestamps may lack timezone info
+            if ts >= cutoff_str[:19]:  # compare at least YYYY-MM-DDTHH:MM:SS
+                recent.append(t)
+        recent.sort(key=lambda t: t.get("completed", ""), reverse=True)
+        return recent
 
     # ------------------------------------------------------------------
     # Event / stream queries
