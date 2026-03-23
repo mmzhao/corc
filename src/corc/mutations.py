@@ -23,6 +23,7 @@ MUTATION_TYPES = {
     "task_handed_off",
     "task_paused",
     "task_pending_merge",
+    "task_approved",
     "agent_created",
     "agent_updated",
     "pause",
