@@ -1445,6 +1445,70 @@ def log_cmd(last_n, task_id):
         click.echo(f"{ts}  {etype:<25} {tid}  {extra}")
 
 
+# --- Logs (rotation) ---
+
+
+@cli.group()
+def logs():
+    """Log management — rotation and archival."""
+    pass
+
+
+@logs.command("rotate")
+@click.option(
+    "--days",
+    default=None,
+    type=int,
+    help="Move files older than this many days (default: from config or 7)",
+)
+def logs_rotate(days):
+    """Rotate old logs to archive directories.
+
+    Moves session and audit log files older than --days (default 7)
+    into date-stamped archive directories:
+
+      data/sessions/archive/YYYY-MM-DD/
+      data/events/archive/YYYY-MM-DD/
+
+    Files are never deleted, only moved to archive.
+    """
+    from corc.rotate import load_rotation_config, rotate_logs
+
+    paths = get_paths()
+    events_dir = paths["events_dir"]
+    sessions_dir = paths["sessions_dir"]
+    corc_dir = paths["corc_dir"]
+
+    config = load_rotation_config(corc_dir)
+    rotate_days = days if days is not None else config["rotate_after_days"]
+
+    # Resolve archive paths from config or use defaults
+    events_archive = (
+        Path(config["events_archive"]) if config.get("events_archive") else None
+    )
+    sessions_archive = (
+        Path(config["session_archive"]) if config.get("session_archive") else None
+    )
+
+    result = rotate_logs(
+        events_dir=events_dir,
+        sessions_dir=sessions_dir,
+        rotate_after_days=rotate_days,
+        events_archive=events_archive,
+        sessions_archive=sessions_archive,
+    )
+
+    sessions_moved = result["sessions"]["moved"]
+    events_moved = result["events"]["moved"]
+
+    click.echo(f"Log rotation complete (threshold: {rotate_days} days).")
+    click.echo(f"  Sessions archived: {sessions_moved}")
+    click.echo(f"  Events archived:   {events_moved}")
+
+    if sessions_moved == 0 and events_moved == 0:
+        click.echo("  No files needed rotation.")
+
+
 # --- Analyze ---
 
 

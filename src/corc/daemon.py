@@ -23,6 +23,7 @@ from pathlib import Path
 
 from corc.audit import AuditLog
 from corc.backup import run_daily_backup
+from corc.rotate import run_daily_rotation
 from corc.chaos import (
     ChaosMonkey,
     is_chaos_enabled,
@@ -237,6 +238,9 @@ class Daemon:
         # 6. Daily maintenance: audit log backup and rotation
         self._check_daily_backup()
 
+        # 7. Daily maintenance: log rotation (move old logs to archive)
+        self._check_log_rotation()
+
     def _handle_worktree_merge(self, item, proc_result):
         """Handle worktree merge after agent completion and validation.
 
@@ -427,6 +431,32 @@ class Daemon:
                 )
         except OSError as e:
             self.audit_log.log("backup_failed", error=str(e))
+
+    # ------------------------------------------------------------------
+    # Daily maintenance: log rotation (archive old logs)
+    # ------------------------------------------------------------------
+
+    def _check_log_rotation(self):
+        """Move old session and audit logs to date-stamped archive directories.
+
+        Called every tick but only performs work once per day.
+        Files are never deleted — only moved to archive/YYYY-MM-DD/.
+        """
+        corc_dir = self.project_root / ".corc"
+        events_dir = self.project_root / "data" / "events"
+        sessions_dir = self.project_root / "data" / "sessions"
+
+        try:
+            result = run_daily_rotation(corc_dir, events_dir, sessions_dir)
+            if result is not None:
+                self.audit_log.log(
+                    "log_rotation_completed",
+                    sessions_moved=result["sessions"]["moved"],
+                    events_moved=result["events"]["moved"],
+                    rotate_after_days=result["rotate_after_days"],
+                )
+        except OSError as e:
+            self.audit_log.log("log_rotation_failed", error=str(e))
 
     # ------------------------------------------------------------------
     # Chaos monkey integration
