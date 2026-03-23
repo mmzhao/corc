@@ -466,3 +466,26 @@ def notify_pause(
     title = "System paused"
     body = f"Reason: {reason}\nSource: {source}"
     return manager.notify("pause", title, body, severity=SEVERITY_WARNING)
+
+
+def notify_pr_awaiting_human_merge(
+    manager: NotificationManager, task: dict, pr_info
+) -> dict[str, bool]:
+    """Send notification that a PR is awaiting human merge.
+
+    Used for human-only repos where the agent creates the PR but
+    only a human can merge it.
+    """
+    task_name = task.get("name", "unknown")
+    task_id = task.get("id", "unknown")
+    pr_url = pr_info.url if pr_info else "N/A"
+    pr_number = pr_info.number if pr_info else "?"
+
+    title = f"PR #{pr_number} awaiting human merge: {task_name}"
+    body = (
+        f"Task: {task_name} ({task_id})\n"
+        f"PR: {pr_url}\n"
+        f"Validation passed. Merge policy is human-only.\n"
+        f"Please review and merge the PR manually."
+    )
+    return manager.notify("pr_awaiting_merge", title, body, severity=SEVERITY_WARNING)

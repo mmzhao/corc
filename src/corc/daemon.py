@@ -211,6 +211,7 @@ class Daemon:
                 audit_log=self.audit_log,
                 session_logger=self.session_logger,
                 project_root=self.project_root,
+                pr_info=item.pr_info,
             )
 
             # 5. Optimistic merge: merge worktree → main after validation passes

@@ -2,6 +2,10 @@
 
 Reads work state + agent output, writes task completions.
 Can be called standalone: `corc process TASK_ID`
+
+PR workflow: after validation, posts a review comment on the PR via
+`gh pr comment`. For auto-merge repos, merges the PR. For human-only
+repos, leaves the PR open and notifies the operator.
 """
 
 import json
@@ -15,8 +19,10 @@ from corc.mutations import MutationLog
 from corc.notifications import (
     NotificationManager,
     notify_escalation,
+    notify_pr_awaiting_human_merge,
     notify_task_failure,
 )
+from corc.pr import PRInfo, merge_pr, post_review_comment
 from corc.repo_policy import get_repo_policy
 from corc.retry import create_escalation
 from corc.sessions import SessionLogger
@@ -32,6 +38,8 @@ class ProcessResult:
     passed: bool
     details: list[tuple[bool, str]] = field(default_factory=list)
     findings: list[str] = field(default_factory=list)
+    pr_merged: bool = False
+    pr_commented: bool = False
 
 
 def process_completed(
@@ -45,6 +53,7 @@ def process_completed(
     project_root: Path,
     notification_manager: NotificationManager | None = None,
     adaptive_tracker: AdaptiveRetryTracker | None = None,
+    pr_info: PRInfo | None = None,
 ) -> ProcessResult:
     """Validate task output and update state.
 
@@ -60,6 +69,10 @@ def process_completed(
 
     When adaptive_tracker is provided, records the task outcome for
     adaptive retry policy adjustments.
+
+    When pr_info is provided, posts a validation summary as a PR comment.
+    For auto-merge repos, merges the PR after posting the review comment.
+    For human-only repos, leaves the PR open and notifies the operator.
     """
     task_id = task["id"]
     max_retries = task.get("max_retries", 3)
@@ -158,6 +171,31 @@ def process_completed(
         json.dumps([d for _, d in details]),
     )
 
+    # Post validation summary as PR comment (if PR exists)
+    pr_commented = False
+    pr_merged = False
+    if pr_info and pr_info.number:
+        pr_commented = post_review_comment(
+            project_root,
+            pr_info.number,
+            all_passed,
+            details,
+            findings=findings,
+        )
+        if pr_commented:
+            audit_log.log(
+                "pr_review_comment_posted",
+                task_id=task_id,
+                pr_number=pr_info.number,
+                passed=all_passed,
+            )
+        else:
+            audit_log.log(
+                "pr_review_comment_failed",
+                task_id=task_id,
+                pr_number=pr_info.number,
+            )
+
     if all_passed:
         # Check merge policy: human-only repos create PR but do not merge
         policy = get_repo_policy(project_root)
@@ -170,6 +208,8 @@ def process_completed(
                     "findings": findings,
                     "proof_of_work": {"output_preview": result.output[:1000]},
                     "merge_policy": "human-only",
+                    "pr_url": pr_info.url if pr_info else None,
+                    "pr_number": pr_info.number if pr_info else None,
                 },
                 reason="Validation passed; merge policy is human-only — awaiting human merge",
                 task_id=task_id,
@@ -179,14 +219,36 @@ def process_completed(
                 task_id=task_id,
                 attempt=attempt,
                 merge_policy="human-only",
+                pr_url=pr_info.url if pr_info else None,
             )
+            # Notify operator that PR is awaiting human merge
+            if notification_manager and pr_info:
+                notify_pr_awaiting_human_merge(notification_manager, task, pr_info)
         else:
-            # auto: mark task as completed (merge already happened in executor)
+            # auto: merge PR after review comment, then mark task completed
+            if pr_info and pr_info.number:
+                pr_merged = merge_pr(project_root, pr_info.number)
+                if pr_merged:
+                    audit_log.log(
+                        "pr_merged",
+                        task_id=task_id,
+                        pr_number=pr_info.number,
+                    )
+                else:
+                    audit_log.log(
+                        "pr_merge_failed",
+                        task_id=task_id,
+                        pr_number=pr_info.number,
+                    )
+
             mutation_log.append(
                 "task_completed",
                 {
                     "findings": findings,
                     "proof_of_work": {"output_preview": result.output[:1000]},
+                    "pr_url": pr_info.url if pr_info else None,
+                    "pr_number": pr_info.number if pr_info else None,
+                    "pr_merged": pr_merged,
                 },
                 reason="Validated by processor",
                 task_id=task_id,
@@ -246,6 +308,8 @@ def process_completed(
         passed=all_passed,
         details=details,
         findings=findings,
+        pr_merged=pr_merged,
+        pr_commented=pr_commented,
     )
 
 
