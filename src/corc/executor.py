@@ -422,6 +422,27 @@ class Executor:
             )
             return None
 
+        # Check if branch has commits ahead of main before pushing
+        try:
+            diff_check = subprocess.run(
+                ["git", "log", "--oneline", f"main..{branch_name}"],
+                capture_output=True,
+                text=True,
+                cwd=str(self.project_root),
+                timeout=10,
+            )
+            commits_ahead = diff_check.stdout.strip()
+            if not commits_ahead:
+                self.audit_log.log(
+                    "pr_creation_skipped",
+                    task_id=task_id,
+                    branch=branch_name,
+                    reason="Branch has no commits ahead of main — agent may not have committed",
+                )
+                return None
+        except (subprocess.SubprocessError, OSError):
+            pass  # If check fails, try pushing anyway
+
         # Push the branch to remote
         pushed, push_error = push_branch(self.project_root, branch_name)
         if not pushed:

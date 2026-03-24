@@ -12,6 +12,7 @@ Key operations:
 - merge_pr(): merge PR via gh pr merge (auto-merge repos only)
 """
 
+import json
 import logging
 import os
 import subprocess
@@ -309,11 +310,75 @@ def merge_pr(project_root: Path, pr_number: int, timeout: int = 60) -> bool:
         if result.returncode == 0:
             logger.info("Merged PR #%s", pr_number)
             return True
-        else:
-            logger.warning("gh pr merge failed: %s", result.stderr.strip())
-            return False
+
+        # Non-zero exit — gh pr merge can fail even when the merge itself
+        # succeeded (e.g. --delete-branch fails, status check race).
+        # Verify the actual merge state before declaring failure.
+        logger.warning(
+            "gh pr merge returned non-zero for PR #%s: %s",
+            pr_number,
+            result.stderr.strip(),
+        )
+        if _check_pr_merged(project_root, pr_number, timeout):
+            logger.warning(
+                "PR #%s is actually MERGED despite non-zero exit from gh pr merge",
+                pr_number,
+            )
+            return True
+
+        return False
     except (subprocess.SubprocessError, FileNotFoundError, OSError) as e:
         logger.warning("gh pr merge error: %s", e)
+        return False
+
+
+def _check_pr_merged(project_root: Path, pr_number: int, timeout: int = 30) -> bool:
+    """Check whether a PR is in MERGED state via gh pr view.
+
+    Used after a non-zero exit from gh pr merge to verify whether the
+    merge actually succeeded despite the error (e.g. --delete-branch
+    failed, status check race condition).
+
+    Args:
+        project_root: The main repository root directory.
+        pr_number: The PR number to check.
+        timeout: Timeout in seconds.
+
+    Returns:
+        True if the PR state is MERGED, False otherwise.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "view",
+                str(pr_number),
+                "--json",
+                "state",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=str(project_root),
+            timeout=timeout,
+            env=_gh_env(project_root),
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "gh pr view failed for PR #%s: %s",
+                pr_number,
+                result.stderr.strip(),
+            )
+            return False
+
+        data = json.loads(result.stdout)
+        state = data.get("state", "")
+        return state == "MERGED"
+    except (subprocess.SubprocessError, FileNotFoundError, OSError) as e:
+        logger.warning("gh pr view error for PR #%s: %s", pr_number, e)
+        return False
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        logger.warning("Failed to parse gh pr view output for PR #%s: %s", pr_number, e)
         return False
 
 

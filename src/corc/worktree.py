@@ -20,16 +20,6 @@ from pathlib import Path
 # accidental editable installs that would hijack the shared Python path.
 _INSTALLABLE_FILES = ("pyproject.toml", "setup.py", "setup.cfg")
 
-# Data files/directories that are auto-resolved during merge by keeping main's
-# version (--ours).  These files are written exclusively by the daemon on main;
-# agents never modify them.  This prevents the #1 source of merge conflicts
-# (data/mutations.jsonl diverging because the daemon appends while agents run).
-_DATA_PATHS_OURS = (
-    "data/mutations.jsonl",
-    "data/audit.jsonl",
-    "data/sessions/",
-)
-
 
 class WorktreeError(Exception):
     """Raised when a git worktree operation fails."""

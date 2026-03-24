@@ -640,3 +640,106 @@ def test_rebuild_preserves_target_repo(tmp_path):
     ws.rebuild()
     task = ws.get_task("t1")
     assert task["target_repo"] == "fdp"
+
+
+# --- Completed task regression guard tests ---
+
+
+def test_task_failed_after_completed_is_ignored(state):
+    """task_failed mutation should be ignored for tasks already completed."""
+    ml, ws = state
+    ml.append(
+        "task_created",
+        {"id": "t1", "name": "task", "done_when": "done"},
+        reason="test",
+    )
+    ml.append(
+        "task_completed",
+        {"pr_url": "http://pr", "findings": ["f1"]},
+        reason="completed",
+        task_id="t1",
+    )
+    ws.refresh()
+
+    task = ws.get_task("t1")
+    assert task["status"] == "completed"
+    completed_ts = task["completed"]
+
+    # Now try to fail the completed task — should be ignored
+    ml.append(
+        "task_failed",
+        {"findings": ["late failure"], "attempt_count": 1},
+        reason="stale failure",
+        task_id="t1",
+    )
+    ws.refresh()
+
+    task = ws.get_task("t1")
+    assert task["status"] == "completed", "completed task must not regress to failed"
+    assert task["completed"] == completed_ts
+    assert task["findings"] == ["f1"], "findings should not be overwritten"
+
+
+def test_task_started_after_completed_is_ignored(state):
+    """task_started mutation should be ignored for tasks already completed."""
+    ml, ws = state
+    ml.append(
+        "task_created",
+        {"id": "t1", "name": "task", "done_when": "done"},
+        reason="test",
+    )
+    ml.append(
+        "task_completed",
+        {"pr_url": "http://pr"},
+        reason="completed",
+        task_id="t1",
+    )
+    ws.refresh()
+
+    task = ws.get_task("t1")
+    assert task["status"] == "completed"
+
+    # Now try to start the completed task — should be ignored
+    ml.append(
+        "task_started",
+        {"attempt": 2},
+        reason="stale start",
+        task_id="t1",
+    )
+    ws.refresh()
+
+    task = ws.get_task("t1")
+    assert task["status"] == "completed", "completed task must not regress to running"
+
+
+def test_task_updated_after_completed_still_works(state):
+    """task_updated mutation should still modify completed tasks (operator override)."""
+    ml, ws = state
+    ml.append(
+        "task_created",
+        {"id": "t1", "name": "task", "done_when": "done"},
+        reason="test",
+    )
+    ml.append(
+        "task_completed",
+        {"pr_url": "http://pr"},
+        reason="completed",
+        task_id="t1",
+    )
+    ws.refresh()
+
+    task = ws.get_task("t1")
+    assert task["status"] == "completed"
+
+    # Operator override via task_updated — should work
+    ml.append(
+        "task_updated",
+        {"status": "pending", "pr_url": None},
+        reason="operator override: reopen task",
+        task_id="t1",
+    )
+    ws.refresh()
+
+    task = ws.get_task("t1")
+    assert task["status"] == "pending", "task_updated should override completed status"
+    assert task["pr_url"] is None

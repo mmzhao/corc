@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(corc task:*)",
+      "Bash(ls:*)",
+      "Bash(corc pause:*)"
+    ]
+  }
+}

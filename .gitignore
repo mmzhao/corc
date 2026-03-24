@@ -5,14 +5,8 @@ dist/
 build/
 .eggs/
 
-# Data (local, not tracked)
-data/state.db
-data/events/
-data/sessions/
-data/knowledge.db
-
-# Keep the mutations log tracked (source of truth)
-# But not SQLite derivatives
+# Data (runtime, not tracked — daemon owns these files)
+data/
 
 # IDE
 .idea/
