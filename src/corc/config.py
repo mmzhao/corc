@@ -129,6 +129,10 @@ DEFAULTS: dict[str, Any] = {
     "knowledge": {
         "target_tokens": 500,
     },
+    # --- Context assembly ---
+    "context": {
+        "max_tokens_warn": 25000,
+    },
     # --- Webhook timeouts ---
     "webhooks": {
         "timeout": 10.0,

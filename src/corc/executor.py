@@ -205,6 +205,12 @@ class Executor:
 
         # Build prompt and context using role config
         context = assemble_context(task, self.project_root)
+        self.audit_log.log(
+            "context_assembled",
+            task_id=task["id"],
+            total_chars=context.size_info["total_chars"],
+            estimated_tokens=context.size_info["estimated_tokens"],
+        )
         role_name = task.get("role", "implementer")
 
         # Load role config and derive constraints + system prompt
