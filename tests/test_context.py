@@ -1,8 +1,15 @@
 """Tests for context assembly."""
 
+import warnings
 from pathlib import Path
 
-from corc.context import assemble_context, _extract_section, _load_blacklist
+from corc.context import (
+    ContextResult,
+    assemble_context,
+    _extract_section,
+    _load_blacklist,
+    _normalize_slug,
+)
 
 
 def test_basic_assembly(tmp_path):
@@ -214,3 +221,196 @@ def test_blacklist_appears_after_context_bundle(tmp_path):
     bundle_end = ctx.index("</file>")
     blacklist_start = ctx.index("<blacklist>")
     assert blacklist_start > bundle_end
+
+
+# ---------------------------------------------------------------------------
+# Slug normalization tests
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_slug_basic():
+    """Basic slug normalization: lowercase, hyphens, strip specials."""
+    assert _normalize_slug("Module 1: Knowledge Store") == "module-1-knowledge-store"
+
+
+def test_normalize_slug_ampersand():
+    """Ampersand is stripped from slugs."""
+    assert _normalize_slug("Roles & Permissions") == "roles-permissions"
+
+
+def test_normalize_slug_dots():
+    """Dots are stripped from slugs."""
+    assert _normalize_slug("10. Context Assembly") == "10-context-assembly"
+
+
+def test_normalize_slug_parens_colon():
+    """Parentheses and colons are stripped."""
+    assert _normalize_slug("Setup (advanced): Config") == "setup-advanced-config"
+
+
+def test_normalize_slug_multiple_specials():
+    """Multiple special characters are all stripped."""
+    assert _normalize_slug("A & B: C (D) 1.2") == "a-b-c-d-12"
+
+
+# ---------------------------------------------------------------------------
+# _extract_section with special characters
+# ---------------------------------------------------------------------------
+
+
+def test_extract_section_with_ampersand():
+    """Slug with & in heading matches correctly."""
+    content = """# Top
+
+## Roles & Permissions
+
+Permission details here.
+
+## Other Section
+
+Other stuff.
+"""
+    section = _extract_section(content, "roles-permissions")
+    assert "Permission details here" in section
+    assert "Other stuff" not in section
+
+
+def test_extract_section_with_numbered_prefix():
+    """Slug with '10.' prefix in heading matches correctly."""
+    content = """# Spec
+
+## 10. Context Assembly
+
+Context assembly details.
+
+## 11. Dispatch
+
+Dispatch details.
+"""
+    section = _extract_section(content, "10-context-assembly")
+    assert "Context assembly details" in section
+    assert "Dispatch details" not in section
+
+
+def test_extract_section_with_dots_in_heading():
+    """Heading with dots normalizes correctly."""
+    content = """# Spec
+
+## v2.0 Release Notes
+
+Release notes here.
+
+## Changelog
+
+Changes.
+"""
+    section = _extract_section(content, "v20-release-notes")
+    assert "Release notes here" in section
+    assert "Changes" not in section
+
+
+def test_extract_section_unmatched_emits_warning():
+    """Unmatched section slug emits warnings.warn and returns full content."""
+    content = """# Top
+
+## Section A
+
+Content A.
+"""
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        result = _extract_section(content, "nonexistent-section")
+        assert len(w) == 1
+        assert "nonexistent-section" in str(w[0].message)
+        assert "not found" in str(w[0].message)
+    # Fallback: returns full content
+    assert result == content
+
+
+def test_extract_section_existing_slug_no_warning():
+    """Matched section slug does NOT emit a warning."""
+    content = """# Top
+
+## Section A
+
+Content A.
+
+## Section B
+
+Content B.
+"""
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        result = _extract_section(content, "section-a")
+        assert len(w) == 0
+    assert "Content A" in result
+    assert "Content B" not in result
+
+
+# ---------------------------------------------------------------------------
+# Context size metadata tests
+# ---------------------------------------------------------------------------
+
+
+def test_assemble_context_returns_context_result(tmp_path):
+    """assemble_context returns a ContextResult with size_info."""
+    task = {
+        "name": "test",
+        "done_when": "done",
+        "context_bundle": [],
+    }
+    ctx = assemble_context(task, tmp_path)
+    assert isinstance(ctx, ContextResult)
+    assert isinstance(ctx.size_info, dict)
+    assert "total_chars" in ctx.size_info
+    assert "estimated_tokens" in ctx.size_info
+
+
+def test_context_size_info_values(tmp_path):
+    """size_info total_chars matches actual string length."""
+    (tmp_path / "doc.md").write_text("Hello world content.")
+    task = {
+        "name": "test",
+        "done_when": "done",
+        "context_bundle": ["doc.md"],
+    }
+    ctx = assemble_context(task, tmp_path)
+    assert ctx.size_info["total_chars"] == len(ctx)
+    assert ctx.size_info["estimated_tokens"] == len(ctx) // 4
+
+
+def test_context_result_behaves_as_string(tmp_path):
+    """ContextResult works as a normal string for all operations."""
+    task = {
+        "name": "test",
+        "done_when": "done",
+        "context_bundle": [],
+    }
+    ctx = assemble_context(task, tmp_path)
+    # String operations work
+    assert "TASK DEFINITION" in ctx
+    assert ctx.startswith("=== TASK DEFINITION ===")
+    assert isinstance(ctx, str)
+
+
+def test_context_size_grows_with_content(tmp_path):
+    """Larger context bundles produce larger size_info values."""
+    task_empty = {
+        "name": "test",
+        "done_when": "done",
+        "context_bundle": [],
+    }
+    ctx_empty = assemble_context(task_empty, tmp_path)
+
+    (tmp_path / "big.md").write_text("x" * 10000)
+    task_big = {
+        "name": "test",
+        "done_when": "done",
+        "context_bundle": ["big.md"],
+    }
+    ctx_big = assemble_context(task_big, tmp_path)
+
+    assert ctx_big.size_info["total_chars"] > ctx_empty.size_info["total_chars"]
+    assert (
+        ctx_big.size_info["estimated_tokens"] > ctx_empty.size_info["estimated_tokens"]
+    )

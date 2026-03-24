@@ -7,8 +7,39 @@ Same task + same files on disk = same context output.
 """
 
 import json
+import re
+import warnings
 from pathlib import Path
 from typing import Any
+
+
+def _normalize_slug(text: str) -> str:
+    """Normalize text into a URL-style slug for heading matching.
+
+    Lowercases, replaces whitespace with hyphens, strips all characters
+    that are not alphanumeric or hyphens.  This handles &, ., :, (), digits,
+    and any other special characters consistently.
+    """
+    text = text.lower().strip()
+    text = re.sub(r"\s+", "-", text)
+    text = re.sub(r"[^a-z0-9-]", "", text)
+    # Collapse multiple consecutive hyphens
+    text = re.sub(r"-{2,}", "-", text)
+    return text.strip("-")
+
+
+class ContextResult(str):
+    """String subclass that carries context size metadata.
+
+    Behaves exactly like a str for all existing callers, but also
+    exposes a ``size_info`` dict with ``total_chars`` and
+    ``estimated_tokens`` keys.
+    """
+
+    def __new__(cls, content: str, size_info: dict[str, int]):
+        instance = super().__new__(cls, content)
+        instance.size_info = size_info
+        return instance
 
 
 def _load_blacklist(project_root: Path) -> str | None:
@@ -101,7 +132,17 @@ def assemble_context(
         parts.append(blacklist.strip())
         parts.append("</blacklist>\n")
 
-    return "\n".join(parts)
+    context_str = "\n".join(parts)
+    total_chars = len(context_str)
+    # Rough estimate: ~4 chars per token (common heuristic for English text)
+    estimated_tokens = total_chars // 4
+
+    size_info = {
+        "total_chars": total_chars,
+        "estimated_tokens": estimated_tokens,
+    }
+
+    return ContextResult(context_str, size_info)
 
 
 def _get_task_status_from_mutations(task_id: str, mutations: list[dict]) -> str:
@@ -220,11 +261,16 @@ def generate_catch_up_summary(
 def _extract_section(content: str, section_slug: str) -> str:
     """Extract a markdown section by heading slug.
 
-    Matches headings where the slug (lowercased, hyphenated) matches.
-    Returns everything from that heading to the next heading of same or higher level.
+    Matches headings where the normalized slug matches.  Normalization
+    uses :func:`_normalize_slug` which strips all non-alphanumeric
+    characters (handles ``&``, ``.``, ``:``, ``()``, digits, etc.).
+
+    Returns everything from that heading to the next heading of same or
+    higher level.  Emits :func:`warnings.warn` and returns the full
+    content when no section matches.
     """
     lines = content.split("\n")
-    section_slug = section_slug.lower().replace(" ", "-")
+    normalized_input = _normalize_slug(section_slug)
 
     capturing = False
     capture_level = 0
@@ -234,15 +280,9 @@ def _extract_section(content: str, section_slug: str) -> str:
         if line.startswith("#"):
             level = len(line) - len(line.lstrip("#"))
             heading_text = line.lstrip("#").strip()
-            slug = (
-                heading_text.lower()
-                .replace(" ", "-")
-                .replace(":", "")
-                .replace("(", "")
-                .replace(")", "")
-            )
+            slug = _normalize_slug(heading_text)
 
-            if not capturing and section_slug in slug:
+            if not capturing and normalized_input in slug:
                 capturing = True
                 capture_level = level
                 captured.append(line)
@@ -256,7 +296,13 @@ def _extract_section(content: str, section_slug: str) -> str:
 
     if captured:
         return "\n".join(captured)
-    return content  # Fallback: return full content if section not found
+
+    warnings.warn(
+        f"Section slug '{section_slug}' (normalized: '{normalized_input}') "
+        f"not found in document — returning full content as fallback",
+        stacklevel=2,
+    )
+    return content
 
 
 def validate_context_bundle_paths(
