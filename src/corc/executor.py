@@ -39,7 +39,9 @@ from corc.pr import (
 )
 from corc.repo_policy import get_repo_policy
 from corc.worktree import (
+    ProtectedBranchError,
     WorktreeError,
+    assert_not_protected,
     create_worktree,
     merge_main_into_worktree,
     merge_worktree,
@@ -721,12 +723,28 @@ class Executor:
         When no pr_info is given, falls back to the direct git merge
         (optimistic merge strategy).
 
+        For human-only repos, direct merge and PR merge are both blocked.
+        Only PR creation is allowed; merging must be done by a human.
+
         Returns merge status:
         - "merged": successfully merged to main
         - "no_changes": nothing to merge
         - "conflict": merge conflict detected / PR merge failed
+        - "blocked": blocked by human-only merge policy
         - "error": unexpected error
         """
+        # Deterministic guard: block all merges for human-only repos
+        policy = get_repo_policy(self.project_root)
+        if policy.is_human_only:
+            self.audit_log.log(
+                "merge_blocked_human_only",
+                task_id=task_id,
+                worktree_path=str(worktree_path),
+                merge_policy="human-only",
+                reason="Merge blocked — repo has human-only merge policy",
+            )
+            return "blocked"
+
         if pr_info and pr_info.number:
             return self._try_pr_merge(task_id, worktree_path, pr_info)
 
@@ -747,6 +765,13 @@ class Executor:
                     worktree_path=str(worktree_path),
                 )
                 return "conflict"
+        except ProtectedBranchError as e:
+            self.audit_log.log(
+                "merge_blocked_protected_branch",
+                task_id=task_id,
+                error=str(e),
+            )
+            return "blocked"
         except Exception as e:
             self.audit_log.log(
                 "worktree_merge_error",

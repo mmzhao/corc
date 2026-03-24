@@ -166,6 +166,44 @@ class MockDispatcher(AgentDispatcher):
         return self.result
 
 
+class CommittingDispatcher(AgentDispatcher):
+    """Dispatcher that creates a commit in the worktree.
+
+    Unlike MockDispatcher, this ensures there are commits ahead of main
+    so that _create_pr_from_worktree doesn't bail early.
+    """
+
+    def __init__(self, result=None):
+        self.result = result or AgentResult(
+            output="Mock output: task completed.",
+            exit_code=0,
+            duration_s=0.1,
+        )
+        self.dispatched = []
+        self.received_cwd = None
+
+    def dispatch(
+        self,
+        prompt,
+        system_prompt,
+        constraints,
+        pid_callback=None,
+        event_callback=None,
+        cwd=None,
+    ):
+        self.dispatched.append((prompt, system_prompt, constraints))
+        self.received_cwd = cwd
+        if cwd:
+            (Path(cwd) / "agent_work.py").write_text("# work\n")
+            subprocess.run(
+                ["git", "add", "agent_work.py"], cwd=cwd, capture_output=True
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "Agent work"], cwd=cwd, capture_output=True
+            )
+        return self.result
+
+
 # ===========================================================================
 # Unit tests: pr.py functions
 # ===========================================================================
@@ -544,7 +582,7 @@ class TestExecutorPullsMain:
         # Agent should still have run in a worktree
         assert len(completed) == 1
         assert dispatcher.received_cwd is not None
-        assert ".corc/worktrees/" in dispatcher.received_cwd
+        assert ".claude/worktrees/" in dispatcher.received_cwd
         executor.shutdown()
 
     def test_executor_does_not_pull_for_conflict_worktree(
@@ -613,11 +651,13 @@ class TestExecutorCreatesPR:
             title="[corc] Task 1 (t1)",
         )
 
+        # Mock _create_pr_from_worktree directly: the real method does a
+        # subprocess git-log check that fails in test repos with no commits.
         with (
             patch("corc.executor.pull_main", return_value=False),
-            patch("corc.executor.push_branch", return_value=(True, "")),
-            patch("corc.executor.create_pr", return_value=(mock_pr_info, "")),
-            patch("corc.executor.get_worktree_branch", return_value="corc/t1-1"),
+            patch.object(
+                executor, "_create_pr_from_worktree", return_value=mock_pr_info
+            ),
         ):
             executor.dispatch(task)
             time.sleep(0.5)
@@ -669,7 +709,7 @@ class TestExecutorCreatesPR:
         self, git_repo, mutation_log, work_state, audit_log, session_logger
     ):
         """Executor logs pr_created audit event."""
-        dispatcher = MockDispatcher()
+        dispatcher = CommittingDispatcher()
         _create_task(mutation_log, "t1", "Task 1")
         work_state.refresh()
         task = work_state.get_task("t1")
@@ -713,7 +753,7 @@ class TestExecutorCreatesPR:
         self, git_repo, mutation_log, work_state, audit_log, session_logger
     ):
         """Executor handles push failure gracefully."""
-        dispatcher = MockDispatcher()
+        dispatcher = CommittingDispatcher()
         _create_task(mutation_log, "t1", "Task 1")
         work_state.refresh()
         task = work_state.get_task("t1")
@@ -751,7 +791,7 @@ class TestExecutorCreatesPR:
         self, git_repo, mutation_log, work_state, audit_log, session_logger
     ):
         """pr_push_failed audit event includes the error message from push_branch."""
-        dispatcher = MockDispatcher()
+        dispatcher = CommittingDispatcher()
         _create_task(mutation_log, "t1", "Task 1")
         work_state.refresh()
         task = work_state.get_task("t1")
@@ -790,7 +830,7 @@ class TestExecutorCreatesPR:
         self, git_repo, mutation_log, work_state, audit_log, session_logger
     ):
         """pr_creation_failed audit event includes the error message from create_pr."""
-        dispatcher = MockDispatcher()
+        dispatcher = CommittingDispatcher()
         _create_task(mutation_log, "t1", "Task 1")
         work_state.refresh()
         task = work_state.get_task("t1")
@@ -1369,7 +1409,7 @@ class TestNoPushToMain:
         self, git_repo, mutation_log, work_state, audit_log, session_logger
     ):
         """Executor pushes worktree branch, never main."""
-        dispatcher = MockDispatcher()
+        dispatcher = CommittingDispatcher()
         _create_task(mutation_log, "t1", "Task 1")
         work_state.refresh()
         task = work_state.get_task("t1")
@@ -1512,7 +1552,7 @@ class TestEndToEndPRWorkflow:
         self, git_repo, mutation_log, work_state, audit_log, session_logger
     ):
         """Full flow for auto repo: pull → dispatch → PR create → validate → comment → merge."""
-        dispatcher = MockDispatcher()
+        dispatcher = CommittingDispatcher()
         _create_task(mutation_log, "t1", "Implement feature")
         work_state.refresh()
         task = work_state.get_task("t1")
@@ -1587,7 +1627,7 @@ class TestEndToEndPRWorkflow:
         self, git_repo, mutation_log, work_state, audit_log, session_logger
     ):
         """Full flow for human-only repo: pull → dispatch → PR create → validate → comment → notify (no merge)."""
-        dispatcher = MockDispatcher()
+        dispatcher = CommittingDispatcher()
         _create_task(mutation_log, "t1", "Fix production bug")
         work_state.refresh()
         task = work_state.get_task("t1")

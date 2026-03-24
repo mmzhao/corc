@@ -21,6 +21,12 @@ from pathlib import Path
 _INSTALLABLE_FILES = ("pyproject.toml", "setup.py", "setup.cfg")
 
 
+class ProtectedBranchError(Exception):
+    """Raised when an operation is blocked by human-only merge policy."""
+
+    pass
+
+
 class WorktreeError(Exception):
     """Raised when a git worktree operation fails."""
 
@@ -33,7 +39,7 @@ def create_worktree(
     """Create a git worktree for an agent to work in.
 
     Creates a new worktree branching from the current HEAD. The worktree
-    is placed under .corc/worktrees/{task_id}-{attempt} and the branch
+    is placed under .claude/worktrees/{task_id}-{attempt} and the branch
     is named corc/{task_id}-{attempt}.
 
     Args:
@@ -48,7 +54,7 @@ def create_worktree(
         WorktreeError: If git worktree add fails.
     """
     project_root = Path(project_root)
-    worktree_dir = project_root / ".corc" / "worktrees"
+    worktree_dir = project_root / ".claude" / "worktrees"
     worktree_dir.mkdir(parents=True, exist_ok=True)
 
     worktree_name = f"{task_id}-{attempt}"
@@ -132,6 +138,32 @@ def remove_worktree(
     return True
 
 
+def assert_not_protected(project_root: Path, branch: str) -> None:
+    """Raise ProtectedBranchError if repo is human-only and branch is protected.
+
+    This is a deterministic guard that prevents merge_worktree and direct
+    push operations from executing against protected branches in repos
+    with a human-only merge policy.
+
+    Args:
+        project_root: Path to the project root.
+        branch: The target branch name.
+
+    Raises:
+        ProtectedBranchError: If the repo has human-only merge policy and
+            the branch is in the protected_branches list.
+    """
+    from corc.repo_policy import get_repo_policy
+
+    policy = get_repo_policy(project_root)
+    if policy.is_human_only and branch in policy.protected_branches:
+        raise ProtectedBranchError(
+            f"Cannot merge/push to protected branch '{branch}' — "
+            f"repo '{policy.name}' has merge_policy=human-only. "
+            f"All merges must go through human-reviewed PRs."
+        )
+
+
 def merge_worktree(project_root: Path, worktree_path: Path) -> bool:
     """Merge changes from a worktree branch back into the main branch.
 
@@ -144,6 +176,9 @@ def merge_worktree(project_root: Path, worktree_path: Path) -> bool:
     Data files (mutations.jsonl, audit.jsonl, sessions/) are excluded from
     git tracking entirely, so they never cause merge conflicts.
 
+    IMPORTANT: This function is blocked for repos with human-only merge
+    policy. Calling it for such repos raises ProtectedBranchError.
+
     Args:
         project_root: The main repository root directory.
         worktree_path: Path to the worktree whose branch to merge.
@@ -153,9 +188,15 @@ def merge_worktree(project_root: Path, worktree_path: Path) -> bool:
 
     Raises:
         WorktreeError: If the merge cannot be attempted.
+        ProtectedBranchError: If repo has human-only merge policy.
     """
     project_root = Path(project_root)
     worktree_path = Path(worktree_path)
+
+    # Deterministic guard: block merge for human-only repos
+    current_branch = _get_current_branch(project_root)
+    if current_branch:
+        assert_not_protected(project_root, current_branch)
 
     branch_name = _get_worktree_branch(project_root, worktree_path)
     if not branch_name:

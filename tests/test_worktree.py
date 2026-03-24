@@ -193,12 +193,12 @@ class TestCreateWorktree:
     """Test create_worktree() function."""
 
     def test_creates_worktree_directory(self, git_repo):
-        """Worktree directory is created under .corc/worktrees/."""
+        """Worktree directory is created under .claude/worktrees/."""
         worktree_path, branch_name = create_worktree(git_repo, "task-1", attempt=1)
 
         assert worktree_path.exists()
         assert worktree_path.is_dir()
-        assert str(worktree_path).endswith(".corc/worktrees/task-1-1")
+        assert str(worktree_path).endswith(".claude/worktrees/task-1-1")
 
     def test_creates_correct_branch(self, git_repo):
         """Worktree branch is named corc/{task_id}-{attempt}."""
@@ -297,7 +297,7 @@ class TestRemoveWorktree:
     def test_nonexistent_worktree_returns_false(self, git_repo):
         """Removing a nonexistent worktree returns False."""
         result = remove_worktree(
-            git_repo, git_repo / ".corc" / "worktrees" / "nonexistent"
+            git_repo, git_repo / ".claude" / "worktrees" / "nonexistent"
         )
         assert result is False
 
@@ -650,7 +650,7 @@ class TestExecutorWorktreeLifecycle:
 
         # Agent should have received a worktree cwd
         assert dispatcher.received_cwd is not None
-        assert ".corc/worktrees/" in dispatcher.received_cwd
+        assert ".claude/worktrees/" in dispatcher.received_cwd
         executor.shutdown()
 
     def test_executor_passes_worktree_as_cwd(
@@ -708,7 +708,7 @@ class TestExecutorWorktreeLifecycle:
         agents = work_state.get_agents_for_task("t1")
         assert len(agents) == 1
         assert agents[0]["worktree_path"] is not None
-        assert ".corc/worktrees/t1-1" in agents[0]["worktree_path"]
+        assert ".claude/worktrees/t1-1" in agents[0]["worktree_path"]
         executor.shutdown()
 
     def test_executor_cleans_up_worktree_after_completion(
@@ -744,6 +744,7 @@ class TestExecutorWorktreeLifecycle:
         self, git_repo, mutation_log, work_state, audit_log, session_logger
     ):
         """Changes made in worktree are merged back to main after completion."""
+        from corc.pr import PRInfo
 
         class CommittingDispatcher(AgentDispatcher):
             """Dispatcher that creates a file in the cwd (worktree)."""
@@ -784,12 +785,20 @@ class TestExecutorWorktreeLifecycle:
             project_root=git_repo,
         )
 
-        executor.dispatch(task)
-        time.sleep(0.5)
-        completed = executor.poll_completed()
+        # Mock PR creation to return a PR (no real remote needed)
+        mock_pr = PRInfo(
+            url="https://github.com/test/repo/pull/1",
+            number=1,
+            branch="corc/t1-1",
+            title="Test PR",
+        )
+        with patch.object(executor, "_create_pr_from_worktree", return_value=mock_pr):
+            executor.dispatch(task)
+            time.sleep(0.5)
+            completed = executor.poll_completed()
 
         assert len(completed) == 1
-        # File should now exist in the main repo
+        # File should now exist in the main repo (merged back)
         assert (git_repo / "agent_output.py").exists()
         executor.shutdown()
 
@@ -894,6 +903,8 @@ class TestWorktreeAuditEvents:
         self, git_repo, mutation_log, work_state, audit_log, session_logger
     ):
         """Audit log records worktree_removed event after cleanup."""
+        from corc.pr import PRInfo
+
         dispatcher = CwdTrackingDispatcher()
         _create_task(mutation_log, "t1", "Task 1")
         work_state.refresh()
@@ -908,9 +919,17 @@ class TestWorktreeAuditEvents:
             project_root=git_repo,
         )
 
-        executor.dispatch(task)
-        time.sleep(0.5)
-        executor.poll_completed()
+        # Mock PR creation so the executor follows the merge+cleanup path
+        mock_pr = PRInfo(
+            url="https://github.com/test/repo/pull/1",
+            number=1,
+            branch="corc/t1-1",
+            title="Test PR",
+        )
+        with patch.object(executor, "_create_pr_from_worktree", return_value=mock_pr):
+            executor.dispatch(task)
+            time.sleep(0.5)
+            executor.poll_completed()
 
         events = audit_log.read_for_task("t1")
         event_types = [e["event_type"] for e in events]
@@ -921,6 +940,8 @@ class TestWorktreeAuditEvents:
         self, git_repo, mutation_log, work_state, audit_log, session_logger
     ):
         """Audit log records worktree_merged event."""
+        from corc.pr import PRInfo
+
         dispatcher = CwdTrackingDispatcher()
         _create_task(mutation_log, "t1", "Task 1")
         work_state.refresh()
@@ -935,9 +956,17 @@ class TestWorktreeAuditEvents:
             project_root=git_repo,
         )
 
-        executor.dispatch(task)
-        time.sleep(0.5)
-        executor.poll_completed()
+        # Mock PR creation so the executor follows the merge path
+        mock_pr = PRInfo(
+            url="https://github.com/test/repo/pull/1",
+            number=1,
+            branch="corc/t1-1",
+            title="Test PR",
+        )
+        with patch.object(executor, "_create_pr_from_worktree", return_value=mock_pr):
+            executor.dispatch(task)
+            time.sleep(0.5)
+            executor.poll_completed()
 
         events = audit_log.read_for_task("t1")
         event_types = [e["event_type"] for e in events]
@@ -1186,6 +1215,198 @@ class TestWorktreePythonPathIsolation:
         idx = sys.path.index(main_src)
         # Check no worktree src/ comes before it
         for i in range(idx):
-            assert ".corc/worktrees/" not in sys.path[i], (
+            assert ".claude/worktrees/" not in sys.path[i], (
                 f"Worktree path found before main src/ in sys.path: {sys.path[i]}"
             )
+
+
+# ===========================================================================
+# Human-only merge policy enforcement tests
+# ===========================================================================
+
+
+class TestHumanOnlyMergeBlocking:
+    """Test that merge_worktree and git push are blocked for human-only repos.
+
+    These tests verify deterministic enforcement in code (not hooks):
+    - merge_worktree raises ProtectedBranchError for human-only repos
+    - assert_not_protected raises for human-only repos on protected branches
+    - Executor.try_merge_worktree returns "blocked" for human-only repos
+    - Executor never calls merge_worktree for human-only repos
+    - Failed PR creation for human-only repos marks the task as failed
+    """
+
+    def test_assert_not_protected_raises_for_human_only(self, git_repo):
+        """assert_not_protected raises ProtectedBranchError for human-only repo on protected branch."""
+        from corc.worktree import assert_not_protected, ProtectedBranchError
+        from corc.repo_policy import RepoPolicy
+
+        policy = RepoPolicy(name="test-repo", merge_policy="human-only")
+        with patch("corc.repo_policy.get_repo_policy", return_value=policy):
+            with pytest.raises(ProtectedBranchError, match="human-only"):
+                assert_not_protected(git_repo, "main")
+
+    def test_assert_not_protected_allows_auto_merge(self, git_repo):
+        """assert_not_protected does NOT raise for auto merge repos."""
+        from corc.worktree import assert_not_protected
+        from corc.repo_policy import RepoPolicy
+
+        policy = RepoPolicy(name="test-repo", merge_policy="auto")
+        with patch("corc.repo_policy.get_repo_policy", return_value=policy):
+            # Should not raise
+            assert_not_protected(git_repo, "main")
+
+    def test_assert_not_protected_allows_non_protected_branch(self, git_repo):
+        """assert_not_protected allows human-only repos on non-protected branches."""
+        from corc.worktree import assert_not_protected
+        from corc.repo_policy import RepoPolicy
+
+        policy = RepoPolicy(
+            name="test-repo",
+            merge_policy="human-only",
+            protected_branches=["main"],
+        )
+        with patch("corc.repo_policy.get_repo_policy", return_value=policy):
+            # Feature branch should be allowed
+            assert_not_protected(git_repo, "corc/task-1-1")
+
+    def test_merge_worktree_blocked_for_human_only(self, git_repo):
+        """merge_worktree raises ProtectedBranchError for human-only repos."""
+        from corc.worktree import ProtectedBranchError
+        from corc.repo_policy import RepoPolicy
+
+        wt, branch = create_worktree(git_repo, "task-block", attempt=1)
+
+        # Make a change so there's something to merge
+        (wt / "blocked.py").write_text("# should not merge\n")
+        subprocess.run(["git", "add", "blocked.py"], cwd=str(wt), capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Blocked change"],
+            cwd=str(wt),
+            capture_output=True,
+        )
+
+        policy = RepoPolicy(name="test-repo", merge_policy="human-only")
+        with patch("corc.repo_policy.get_repo_policy", return_value=policy):
+            with pytest.raises(ProtectedBranchError):
+                merge_worktree(git_repo, wt)
+
+        # Verify the file was NOT merged into main
+        assert not (git_repo / "blocked.py").exists()
+
+    def test_executor_try_merge_returns_blocked_for_human_only(
+        self, git_repo, mutation_log, work_state, audit_log, session_logger
+    ):
+        """Executor.try_merge_worktree returns 'blocked' for human-only repos."""
+        from corc.repo_policy import RepoPolicy
+
+        dispatcher = CwdTrackingDispatcher()
+        executor = Executor(
+            dispatcher=dispatcher,
+            mutation_log=mutation_log,
+            state=work_state,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            project_root=git_repo,
+        )
+
+        wt, branch = create_worktree(git_repo, "task-try-merge", attempt=1)
+
+        policy = RepoPolicy(name="test-repo", merge_policy="human-only")
+        with patch("corc.executor.get_repo_policy", return_value=policy):
+            status = executor.try_merge_worktree("task-try-merge", wt)
+
+        assert status == "blocked"
+        executor.shutdown()
+
+    def test_executor_never_calls_merge_worktree_for_human_only(
+        self, git_repo, mutation_log, work_state, audit_log, session_logger
+    ):
+        """Executor.poll_completed never calls merge_worktree for human-only repos."""
+        from corc.repo_policy import RepoPolicy
+
+        dispatcher = CwdTrackingDispatcher()
+        _create_task(mutation_log, "t-hm", "Human Only Task")
+        work_state.refresh()
+        task = work_state.get_task("t-hm")
+
+        executor = Executor(
+            dispatcher=dispatcher,
+            mutation_log=mutation_log,
+            state=work_state,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            project_root=git_repo,
+        )
+
+        policy = RepoPolicy(name="test-repo", merge_policy="human-only")
+        with (
+            patch("corc.executor.get_repo_policy", return_value=policy),
+            patch("corc.executor.merge_worktree") as mock_merge,
+            patch("corc.executor.pull_main", return_value=True),
+        ):
+            executor.dispatch(task)
+            time.sleep(0.5)
+            completed = executor.poll_completed()
+
+        # merge_worktree should never have been called
+        mock_merge.assert_not_called()
+        executor.shutdown()
+
+    def test_failed_pr_for_human_only_results_in_task_failure(
+        self, git_repo, mutation_log, work_state, audit_log, session_logger
+    ):
+        """If PR creation fails for a human-only repo, task fails (not completes)."""
+        from corc.repo_policy import RepoPolicy
+
+        dispatcher = CwdTrackingDispatcher()
+        _create_task(mutation_log, "t-pr-fail", "PR Fail Task")
+        work_state.refresh()
+        task = work_state.get_task("t-pr-fail")
+
+        executor = Executor(
+            dispatcher=dispatcher,
+            mutation_log=mutation_log,
+            state=work_state,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            project_root=git_repo,
+        )
+
+        policy = RepoPolicy(name="test-repo", merge_policy="human-only")
+        with (
+            patch("corc.executor.get_repo_policy", return_value=policy),
+            patch("corc.executor.pull_main", return_value=True),
+            patch.object(executor, "_create_pr_from_worktree", return_value=None),
+        ):
+            executor.dispatch(task)
+            time.sleep(0.5)
+            completed = executor.poll_completed()
+
+        assert len(completed) == 1
+        # Task should be marked as failed (exit_code=1)
+        assert completed[0].result.exit_code == 1
+        assert "PR creation failed" in completed[0].result.output
+        assert completed[0].pr_info is None
+        executor.shutdown()
+
+    def test_git_push_to_main_blocked_for_human_only(self, git_repo):
+        """assert_not_protected blocks push-like operations to protected branches."""
+        from corc.worktree import assert_not_protected, ProtectedBranchError
+        from corc.repo_policy import RepoPolicy
+
+        policy = RepoPolicy(name="test-repo", merge_policy="human-only")
+        with patch("corc.repo_policy.get_repo_policy", return_value=policy):
+            # Pushing to main should be blocked
+            with pytest.raises(ProtectedBranchError):
+                assert_not_protected(git_repo, "main")
+
+            # Pushing to master should also be blocked if it's in protected_branches
+            policy2 = RepoPolicy(
+                name="test-repo",
+                merge_policy="human-only",
+                protected_branches=["main", "master"],
+            )
+        with patch("corc.repo_policy.get_repo_policy", return_value=policy2):
+            with pytest.raises(ProtectedBranchError):
+                assert_not_protected(git_repo, "master")
