@@ -159,6 +159,31 @@ def _deduplicate_task_agents(task: dict) -> dict:
     return {**task, "agents": _deduplicate_agents(agents)}
 
 
+def _format_attempt_count(task: dict) -> str | None:
+    """Format the attempt count for display, e.g. 'attempt 2/3'.
+
+    Returns ``None`` for first-attempt tasks (attempt_count == 0) so
+    that no retry indicator clutters the display for normal runs.
+    Only returns a string when the task is on a retry (attempt_count >= 1).
+
+    Uses ``attempt_count`` and ``max_retries`` from the task dict.
+    ``attempt_count`` represents completed attempts (0 = first try).
+    Display shows ``attempt_count + 1`` as the current attempt number
+    and ``max_retries + 1`` as the total allowed attempts.
+    """
+    attempt_count = task.get("attempt_count", 0)
+    if not isinstance(attempt_count, int) or attempt_count < 1:
+        return None
+    max_retries = task.get("max_retries", 3)
+    if not isinstance(max_retries, int):
+        max_retries = 3
+    # Current attempt = attempt_count + 1 (attempt_count is completed attempts)
+    # Total attempts = max_retries + 1 (max_retries is number of retries after first)
+    current = attempt_count + 1
+    total = max_retries + 1
+    return f"attempt {current}/{total}"
+
+
 def _elapsed_since(iso_ts: str) -> str:
     """Human-readable elapsed time since an ISO timestamp.
 
@@ -329,6 +354,9 @@ def build_streaming_detail_panel(
         header = Text()
         header.append(f"  🔄 {_name(task)}", style="bold yellow")
         header.append(f"  ({_tid(task)})", style="dim")
+        attempt_str = _format_attempt_count(task)
+        if attempt_str:
+            header.append(f"  🔁 {attempt_str}", style="yellow")
         lines.append(header)
 
         # ── Checklist progress ─────────────────────────────────────
@@ -464,6 +492,11 @@ def build_active_plan_panel(
             if elapsed:
                 line.append(f"  ⏱ {elapsed}", style="yellow")
 
+            # Attempt count (only shown on retries)
+            attempt_str = _format_attempt_count(t)
+            if attempt_str:
+                line.append(f"  🔁 {attempt_str}", style="yellow")
+
             # Agent info — deduplicate to show only latest per task
             agents = _deduplicate_agents(t.get("agents", []))
             if agents:
@@ -554,6 +587,11 @@ def build_active_plan_panel(
             line.append(f"{_name(t):<30}", style=style)
             line.append(f"  {_tid(t)}", style="dim")
             line.append(f"  [{status}]", style="dim")
+            # Attempt count for failed/escalated tasks
+            if status in ("failed", "escalated"):
+                attempt_str = _format_attempt_count(t)
+                if attempt_str:
+                    line.append(f"  🔁 {attempt_str}", style=style)
             lines.append(line)
         lines.append(Text(""))
 
