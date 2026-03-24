@@ -44,6 +44,44 @@ from corc.worktree import (
 )
 
 
+def resolve_target_repo(task: dict, project_root: Path) -> Path:
+    """Resolve the effective repo root for a task.
+
+    If the task has a ``target_repo`` field, looks up the repo name via
+    :class:`~corc.repo.RepoManager` and returns its filesystem path.
+    Falls back to *project_root* (the corc repo) when ``target_repo``
+    is ``None`` or empty.
+
+    Args:
+        task: Task dict, may contain a ``target_repo`` key.
+        project_root: The corc project root (default fallback).
+
+    Returns:
+        Path to the repo the task should operate against.
+
+    Raises:
+        ValueError: If ``target_repo`` is set but the repo is not
+            registered in the config.
+    """
+    target_repo_name = task.get("target_repo")
+    if not target_repo_name:
+        return Path(project_root)
+
+    from corc.config import load_config
+    from corc.repo import RepoManager, RepoNotFoundError
+
+    cfg = load_config(project_root)
+    mgr = RepoManager(cfg)
+    try:
+        repo_config = mgr.get(target_repo_name)
+    except RepoNotFoundError:
+        raise ValueError(
+            f"target_repo '{target_repo_name}' is not registered. "
+            f"Use 'corc repo add' to register it first."
+        )
+    return Path(repo_config["path"])
+
+
 @dataclass
 class CompletedTask:
     """A task that has finished executing, with its result."""
@@ -55,6 +93,7 @@ class CompletedTask:
     agent_id: str | None = None
     merge_status: str | None = None
     pr_info: PRInfo | None = None
+    target_repo_path: Path | None = None
 
 
 class Executor:
@@ -90,7 +129,9 @@ class Executor:
         self.role_loader = role_loader or RoleLoader(project_root)
         self.defer_merge = defer_merge
         self._pool = ThreadPoolExecutor(max_workers=max_workers)
-        self._futures: dict[Future, tuple[dict, int, Path | None, str | None]] = {}
+        self._futures: dict[
+            Future, tuple[dict, int, Path | None, str | None, Path]
+        ] = {}
         # Worktrees saved for conflict retry: task_id → worktree_path
         self._conflict_worktrees: dict[str, Path] = {}
 
@@ -99,8 +140,14 @@ class Executor:
 
         Creates a git worktree for isolation, marks the task as running,
         builds prompt/context, submits to thread pool.
+
+        When a task has a ``target_repo``, worktrees, context assembly,
+        and PR operations target that repo instead of the corc project root.
         """
         attempt = self.session_logger.get_latest_attempt(task["id"]) + 1
+
+        # Resolve the effective repo root (target_repo or corc project_root)
+        repo_root = resolve_target_repo(task, self.project_root)
 
         # Check for a saved conflict worktree (from a previous merge conflict)
         worktree_path = None
@@ -119,17 +166,17 @@ class Executor:
         else:
             # Pull latest main before creating worktree so branch starts
             # from the most recent state.
-            pulled = pull_main(self.project_root)
+            pulled = pull_main(repo_root)
             self.audit_log.log(
                 "main_pulled",
                 task_id=task["id"],
                 success=pulled,
             )
 
-            # Create git worktree for agent isolation
+            # Create git worktree for agent isolation (in target repo)
             try:
                 worktree_path, branch_name = create_worktree(
-                    self.project_root, task["id"], attempt
+                    repo_root, task["id"], attempt
                 )
                 self.audit_log.log(
                     "worktree_created",
@@ -173,8 +220,8 @@ class Executor:
             worktree_path=str(worktree_path) if worktree_path else None,
         )
 
-        # Check for stale context bundle files
-        stale_files = check_context_staleness(task, self.project_root)
+        # Check for stale context bundle files (against target repo)
+        stale_files = check_context_staleness(task, repo_root)
         if stale_files:
             stale_names = [s["file"] for s in stale_files]
             self.audit_log.log(
@@ -184,8 +231,8 @@ class Executor:
                 details=stale_files,
             )
 
-        # Build prompt and context using role config
-        context = assemble_context(task, self.project_root)
+        # Build prompt and context using role config (resolve from target repo)
+        context = assemble_context(task, repo_root)
         role_name = task.get("role", "implementer")
 
         # Load role config and derive constraints + system prompt
@@ -238,7 +285,7 @@ class Executor:
             event_callback=event_callback,
             cwd=cwd,
         )
-        self._futures[future] = (task, attempt, worktree_path, agent_id)
+        self._futures[future] = (task, attempt, worktree_path, agent_id, repo_root)
 
     def _make_event_callback(self, task_id: str, attempt: int):
         """Create a streaming event callback for a dispatch.
@@ -283,7 +330,7 @@ class Executor:
         return callback
 
     def _create_pr_from_worktree(
-        self, task: dict, worktree_path: Path
+        self, task: dict, worktree_path: Path, repo_root: Path | None = None
     ) -> PRInfo | None:
         """Push worktree branch and create a PR.
 
@@ -294,12 +341,14 @@ class Executor:
         Args:
             task: The task dict.
             worktree_path: Path to the worktree.
+            repo_root: The repo to run PR operations against (defaults to project_root).
 
         Returns:
             PRInfo if PR was created successfully, None otherwise.
         """
+        effective_root = repo_root or self.project_root
         task_id = task["id"]
-        branch_name = get_worktree_branch(self.project_root, worktree_path)
+        branch_name = get_worktree_branch(effective_root, worktree_path)
         if not branch_name:
             self.audit_log.log(
                 "pr_creation_skipped",
@@ -309,7 +358,7 @@ class Executor:
             return None
 
         # Push the branch to remote
-        pushed = push_branch(self.project_root, branch_name)
+        pushed = push_branch(effective_root, branch_name)
         if not pushed:
             self.audit_log.log(
                 "pr_push_failed",
@@ -319,7 +368,7 @@ class Executor:
             return None
 
         # Create the PR
-        pr_info = create_pr(self.project_root, branch_name, task)
+        pr_info = create_pr(effective_root, branch_name, task)
         if pr_info:
             self.audit_log.log(
                 "pr_created",
@@ -350,7 +399,9 @@ class Executor:
         done_futures = [f for f in self._futures if f.done()]
 
         for future in done_futures:
-            task, attempt, worktree_path, agent_id = self._futures.pop(future)
+            task, attempt, worktree_path, agent_id, repo_root = self._futures.pop(
+                future
+            )
             try:
                 result = future.result()
             except Exception as e:
@@ -379,12 +430,12 @@ class Executor:
             # Create PR from worktree branch (PR-based workflow)
             pr_info = None
             if worktree_path and result.exit_code == 0:
-                pr_info = self._create_pr_from_worktree(task, worktree_path)
+                pr_info = self._create_pr_from_worktree(task, worktree_path, repo_root)
 
             if not self.defer_merge and worktree_path:
                 # Legacy behavior: merge and clean up immediately
                 # Respect repo merge policy: human-only repos skip the merge
-                policy = get_repo_policy(self.project_root)
+                policy = get_repo_policy(repo_root)
                 if policy.is_human_only:
                     self.audit_log.log(
                         "worktree_merge_skipped",
@@ -394,9 +445,7 @@ class Executor:
                         reason="Merge policy is human-only; PR left for human review",
                     )
                     try:
-                        remove_worktree(
-                            self.project_root, worktree_path, remove_branch=False
-                        )
+                        remove_worktree(repo_root, worktree_path, remove_branch=False)
                         self.audit_log.log(
                             "worktree_removed",
                             task_id=task["id"],
@@ -409,7 +458,9 @@ class Executor:
                             error=str(e),
                         )
                 else:
-                    self._merge_and_cleanup_worktree(task["id"], worktree_path)
+                    self._merge_and_cleanup_worktree(
+                        task["id"], worktree_path, repo_root
+                    )
 
             completed.append(
                 CompletedTask(
@@ -419,15 +470,19 @@ class Executor:
                     worktree_path=worktree_path,
                     agent_id=agent_id,
                     pr_info=pr_info,
+                    target_repo_path=repo_root,
                 )
             )
 
         return completed
 
-    def _merge_and_cleanup_worktree(self, task_id: str, worktree_path: Path):
+    def _merge_and_cleanup_worktree(
+        self, task_id: str, worktree_path: Path, repo_root: Path | None = None
+    ):
         """Merge worktree changes back to main and remove the worktree."""
+        effective_root = repo_root or self.project_root
         try:
-            merged = merge_worktree(self.project_root, worktree_path)
+            merged = merge_worktree(effective_root, worktree_path)
             if merged:
                 self.audit_log.log(
                     "worktree_merged",
@@ -448,7 +503,7 @@ class Executor:
             )
 
         try:
-            remove_worktree(self.project_root, worktree_path)
+            remove_worktree(effective_root, worktree_path)
             self.audit_log.log(
                 "worktree_removed",
                 task_id=task_id,
@@ -619,7 +674,7 @@ class Executor:
     @property
     def in_flight_task_ids(self) -> set[str]:
         """Set of task IDs currently tracked by the executor."""
-        return {task["id"] for task, _attempt, _wt, _aid in self._futures.values()}
+        return {task["id"] for task, _attempt, _wt, _aid, _rr in self._futures.values()}
 
     def shutdown(self, wait: bool = True):
         """Shutdown the thread pool, optionally waiting for in-flight tasks."""

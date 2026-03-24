@@ -204,6 +204,8 @@ class Daemon:
         #    The processor handles failed vs escalated decisions based on
         #    attempt count and max_retries per task.
         for item in completed:
+            # Use target repo path if set, otherwise fall back to corc project root
+            effective_root = item.target_repo_path or self.project_root
             proc_result = process_completed(
                 task=item.task,
                 result=item.result,
@@ -212,7 +214,7 @@ class Daemon:
                 state=self.state,
                 audit_log=self.audit_log,
                 session_logger=self.session_logger,
-                project_root=self.project_root,
+                project_root=effective_root,
                 pr_info=item.pr_info,
             )
 
@@ -290,7 +292,8 @@ class Daemon:
         task_id = item.task["id"]
         worktree_path = item.worktree_path
         pr_info = item.pr_info
-        policy = get_repo_policy(self.project_root)
+        effective_root = item.target_repo_path or self.project_root
+        policy = get_repo_policy(effective_root)
 
         if policy.is_human_only:
             # Human-only: PR is open, task is pending_merge (set by processor).
@@ -309,7 +312,7 @@ class Daemon:
         if proc_result.pr_merged:
             # Processor already merged the PR via gh pr merge.
             # Pull main to sync local repo with the merged state.
-            pull_main(self.project_root)
+            pull_main(effective_root)
             self.mutation_log.append(
                 "task_updated",
                 {"merge_status": "merged"},

@@ -4,6 +4,7 @@ import json
 import sys
 import time
 import uuid
+from pathlib import Path
 
 import click
 
@@ -155,6 +156,11 @@ def task():
     is_flag=True,
     help="Create task in draft status (not scheduled until approved)",
 )
+@click.option(
+    "--target-repo",
+    default=None,
+    help="Registered repo name for cross-repo dispatch (default: corc repo)",
+)
 def task_create(
     name,
     done_when,
@@ -167,6 +173,7 @@ def task_create(
     priority,
     task_type,
     draft,
+    target_repo,
 ):
     """Create a new task."""
     # Lint done_when criteria (with type-specific rules)
@@ -186,10 +193,35 @@ def task_create(
     bundle = [b.strip() for b in context_bundle.split(",") if b.strip()]
     cl = [c.strip() for c in checklist.split(",") if c.strip()]
 
-    # Validate context bundle paths exist
+    # Validate target_repo exists via RepoManager
     project_root = paths["root"] if isinstance(paths, dict) else paths.root
+    context_root = project_root  # default: resolve context against corc repo
+    if target_repo:
+        from corc.repo import RepoManager, RepoNotFoundError
+
+        cfg = load_config()
+        mgr = RepoManager(cfg)
+        try:
+            repo_config = mgr.get(target_repo)
+            target_repo_path = Path(repo_config["path"])
+            if not target_repo_path.exists():
+                click.echo(
+                    f"Error: target repo '{target_repo}' path does not exist: {target_repo_path}",
+                    err=True,
+                )
+                sys.exit(1)
+            context_root = target_repo_path
+        except RepoNotFoundError:
+            click.echo(
+                f"Error: target repo '{target_repo}' is not registered. "
+                f"Use 'corc repo add' to register it first.",
+                err=True,
+            )
+            sys.exit(1)
+
+    # Validate context bundle paths exist (against target repo root)
     if bundle:
-        missing = validate_context_bundle_paths(bundle, project_root)
+        missing = validate_context_bundle_paths(bundle, context_root)
         if missing:
             for m in missing:
                 click.echo(
@@ -204,7 +236,7 @@ def task_create(
                 sys.exit(1)
 
     # Record file mtimes at creation time for staleness detection
-    bundle_mtimes = record_context_mtimes(bundle, project_root)
+    bundle_mtimes = record_context_mtimes(bundle, context_root)
 
     task_data = {
         "id": task_id,
@@ -219,6 +251,8 @@ def task_create(
         "priority": priority,
         "task_type": task_type,
     }
+    if target_repo:
+        task_data["target_repo"] = target_repo
     if draft:
         task_data["status"] = "draft"
 
@@ -231,8 +265,9 @@ def task_create(
     al.log("task_created", task_id=task_id, name=name)
     type_str = f" [{task_type}]" if task_type != "implementation" else ""
     status_str = " [draft]" if draft else ""
+    repo_str = f" [repo={target_repo}]" if target_repo else ""
     click.echo(
-        f"Created task {task_id}: {name}{type_str}{status_str} (priority {priority})"
+        f"Created task {task_id}: {name}{type_str}{status_str}{repo_str} (priority {priority})"
     )
 
 
@@ -456,6 +491,8 @@ def task_status(task_id):
     click.echo(f"Type: {t.get('task_type', 'implementation')}")
     click.echo(f"Priority: {t.get('priority', 100)}")
     click.echo(f"Role: {t.get('role', 'unset')}")
+    if t.get("target_repo"):
+        click.echo(f"Target repo: {t['target_repo']}")
     click.echo(f"Done when: {t['done_when']}")
     if t.get("depends_on"):
         click.echo(f"Depends on: {', '.join(t['depends_on'])}")
