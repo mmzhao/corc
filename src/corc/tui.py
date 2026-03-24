@@ -16,10 +16,12 @@ Press 'q' to quit, or Ctrl+C.  ↑/↓ to scroll streaming detail.
 """
 
 import json
+import os
 import sys
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 from rich.console import Console
 from rich.layout import Layout
@@ -27,6 +29,52 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from rich.live import Live
+
+
+# ── Auto-reload support ──────────────────────────────────────────────────
+
+# Files the TUI watches for changes (relative to this module's directory).
+_TUI_WATCH_FILES = ("tui.py", "queries.py")
+
+
+class ReloadRequested(Exception):
+    """Raised when watched source files change and the TUI should restart."""
+
+    def __init__(self, changed_files: list[str]):
+        self.changed_files = changed_files
+        super().__init__(f"Source files changed: {', '.join(changed_files)}")
+
+
+def _get_watched_file_mtimes() -> dict[str, float]:
+    """Snapshot modification times for the TUI source files we watch.
+
+    Returns a dict mapping absolute file path → mtime for each file in
+    ``_TUI_WATCH_FILES`` that exists on disk.
+    """
+    src_dir = Path(__file__).resolve().parent
+    mtimes: dict[str, float] = {}
+    for name in _TUI_WATCH_FILES:
+        filepath = src_dir / name
+        try:
+            mtimes[str(filepath)] = filepath.stat().st_mtime
+        except OSError:
+            pass
+    return mtimes
+
+
+def _check_for_source_changes(
+    baseline: dict[str, float],
+) -> list[str]:
+    """Compare current mtimes against *baseline* and return changed file paths.
+
+    Returns an empty list if nothing changed.
+    """
+    current = _get_watched_file_mtimes()
+    changed: list[str] = []
+    for path, mtime in current.items():
+        if path not in baseline or baseline[path] != mtime:
+            changed.append(path)
+    return changed
 
 
 # ── Event type -> Rich style mapping ─────────────────────────────────────
@@ -872,6 +920,7 @@ def run_active_dashboard(
     max_events: int = 20,
     refresh_per_second: float = 2.0,
     console: Console | None = None,
+    auto_reload: bool = False,
 ) -> None:
     """Run the active-plan-focused dashboard until 'q' or Ctrl+C.
 
@@ -887,11 +936,21 @@ def run_active_dashboard(
     calling ``query_api.get_task_stream_events()`` for every running
     task.  Arrow keys scroll the streaming panel up/down.
 
+    When *auto_reload* is ``True``, the dashboard monitors its own
+    source files (``tui.py`` and ``queries.py``) for changes.  If a
+    change is detected, the function raises :class:`ReloadRequested`
+    so the caller can reload modules and restart the TUI.
+
     Args:
         query_api: A QueryAPI instance (from corc.queries).
         max_events: Maximum events to show in the bottom panel.
         refresh_per_second: How often to redraw.
         console: Optional Rich Console (for testing).
+        auto_reload: Watch source files and raise ReloadRequested on change.
+
+    Raises:
+        ReloadRequested: When auto_reload is True and a watched source file
+            is modified on disk.
     """
     console = console or Console()
     stop_event = threading.Event()
@@ -904,11 +963,38 @@ def run_active_dashboard(
 
     interval = 1.0 / refresh_per_second
 
+    # Snapshot source file mtimes for auto-reload detection
+    baseline_mtimes: dict[str, float] = {}
+    if auto_reload:
+        baseline_mtimes = _get_watched_file_mtimes()
+
     try:
         with Live(
             console=console, refresh_per_second=refresh_per_second, screen=False
         ) as live:
             while not stop_event.is_set():
+                # ── Auto-reload check ──────────────────────────────
+                if auto_reload:
+                    changed = _check_for_source_changes(baseline_mtimes)
+                    if changed:
+                        # Show brief reload indicator before restarting
+                        names = [os.path.basename(p) for p in changed]
+                        reload_msg = Text()
+                        reload_msg.append(
+                            f"  ⟳ Reloading TUI — changed: {', '.join(names)}",
+                            style="bold yellow",
+                        )
+                        live.update(
+                            Panel(
+                                reload_msg,
+                                title="[bold] Reloading [/bold]",
+                                border_style="yellow",
+                            )
+                        )
+                        live.refresh()
+                        stop_event.set()
+                        raise ReloadRequested(changed)
+
                 # Refresh underlying state
                 query_api.work_state.refresh()
 

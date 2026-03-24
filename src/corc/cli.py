@@ -1261,12 +1261,33 @@ def watch(last_n):
 
 
 def _watch_dashboard(last_n):
-    from corc.tui import run_active_dashboard
+    import importlib
+
+    from corc.tui import run_active_dashboard, ReloadRequested
     from corc.queries import QueryAPI
 
     paths, ml, ws, al, sl, _ = _get_all()
     query_api = QueryAPI(ws, al, sl)
-    run_active_dashboard(query_api, max_events=last_n)
+
+    while True:
+        try:
+            run_active_dashboard(query_api, max_events=last_n, auto_reload=True)
+            break  # Normal exit (user pressed 'q')
+        except ReloadRequested:
+            # Reload the TUI and queries modules so the next iteration
+            # uses the updated code.
+            import corc.queries
+            import corc.tui
+
+            importlib.reload(corc.queries)
+            importlib.reload(corc.tui)
+
+            # Re-import from the freshly-reloaded modules
+            from corc.tui import run_active_dashboard, ReloadRequested
+            from corc.queries import QueryAPI
+
+            # Re-create QueryAPI with the reloaded QueryAPI class
+            query_api = QueryAPI(ws, al, sl)
 
 
 def _watch_plain(last_n):
