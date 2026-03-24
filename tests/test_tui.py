@@ -17,6 +17,7 @@ Tests cover:
 
 import io
 import json
+import os
 import time
 import threading
 from datetime import datetime, timezone, timedelta
@@ -3317,3 +3318,405 @@ class TestStreamingDetailPanelAttemptCount:
         for line in lines:
             if "no-retry" in line:
                 assert "attempt" not in line
+
+
+# ── Daemon status helpers ─────────────────────────────────────────────────
+
+
+from corc.tui import get_daemon_status, build_daemon_status_header
+
+
+class TestGetDaemonStatus:
+    """Test get_daemon_status() with real filesystem artifacts."""
+
+    def test_stopped_when_no_pid_file(self, tmp_path):
+        """No PID file means daemon is stopped."""
+        corc_dir = tmp_path / ".corc"
+        corc_dir.mkdir()
+        result = get_daemon_status(corc_dir)
+        assert result["status"] == "stopped"
+        assert result["pid"] is None
+
+    def test_stopped_when_pid_file_has_dead_process(self, tmp_path):
+        """PID file pointing to non-existent process means stopped."""
+        corc_dir = tmp_path / ".corc"
+        corc_dir.mkdir()
+        pid_file = corc_dir / "daemon.pid"
+        pid_file.write_text("999999999")  # Very unlikely to be a real PID
+        result = get_daemon_status(corc_dir)
+        assert result["status"] == "stopped"
+        assert result["pid"] is None
+
+    def test_stopped_when_pid_file_has_invalid_content(self, tmp_path):
+        """PID file with non-numeric content means stopped."""
+        corc_dir = tmp_path / ".corc"
+        corc_dir.mkdir()
+        pid_file = corc_dir / "daemon.pid"
+        pid_file.write_text("not-a-pid")
+        result = get_daemon_status(corc_dir)
+        assert result["status"] == "stopped"
+        assert result["pid"] is None
+
+    def test_running_when_pid_file_has_live_process(self, tmp_path):
+        """PID file with live process and no pause lock means running."""
+        corc_dir = tmp_path / ".corc"
+        corc_dir.mkdir()
+        pid_file = corc_dir / "daemon.pid"
+        # Use our own PID — guaranteed to be alive
+        pid_file.write_text(str(os.getpid()))
+        result = get_daemon_status(corc_dir)
+        assert result["status"] == "running"
+        assert result["pid"] == os.getpid()
+
+    def test_running_has_uptime(self, tmp_path):
+        """Running daemon shows uptime."""
+        corc_dir = tmp_path / ".corc"
+        corc_dir.mkdir()
+        pid_file = corc_dir / "daemon.pid"
+        pid_file.write_text(str(os.getpid()))
+        result = get_daemon_status(corc_dir)
+        assert result["uptime"] is not None
+
+    def test_paused_when_pause_lock_exists(self, tmp_path):
+        """PID file with live process + pause lock means paused."""
+        corc_dir = tmp_path / ".corc"
+        corc_dir.mkdir()
+        pid_file = corc_dir / "daemon.pid"
+        pid_file.write_text(str(os.getpid()))
+        # Write pause lock
+        pause_lock = corc_dir / "pause.lock"
+        pause_data = {
+            "reason": "Manual pause for review",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "test",
+        }
+        pause_lock.write_text(json.dumps(pause_data))
+        result = get_daemon_status(corc_dir)
+        assert result["status"] == "paused"
+        assert result["reason"] == "Manual pause for review"
+        assert result["pid"] == os.getpid()
+
+    def test_slot_usage_from_work_state(self, tmp_path):
+        """Running daemon shows slot usage from work state."""
+        corc_dir = tmp_path / ".corc"
+        corc_dir.mkdir()
+        pid_file = corc_dir / "daemon.pid"
+        pid_file.write_text(str(os.getpid()))
+
+        # Mock work state
+        ws = MagicMock()
+        ws.list_tasks.side_effect = lambda status=None: {
+            "running": [{"id": "r1"}, {"id": "r2"}],
+            "assigned": [{"id": "a1"}],
+        }.get(status, [])
+
+        result = get_daemon_status(corc_dir, parallel=3, work_state=ws)
+        assert result["status"] == "running"
+        assert result["slots_used"] == 3
+        assert result["slots_total"] == 3
+
+    def test_slot_defaults(self, tmp_path):
+        """Without work state, slots_used defaults to 0."""
+        corc_dir = tmp_path / ".corc"
+        corc_dir.mkdir()
+        pid_file = corc_dir / "daemon.pid"
+        pid_file.write_text(str(os.getpid()))
+        result = get_daemon_status(corc_dir, parallel=5)
+        assert result["slots_used"] == 0
+        assert result["slots_total"] == 5
+
+    def test_corc_dir_does_not_exist(self, tmp_path):
+        """Non-existent corc_dir means stopped."""
+        corc_dir = tmp_path / ".corc"
+        # Don't create it
+        result = get_daemon_status(corc_dir)
+        assert result["status"] == "stopped"
+
+
+class TestBuildDaemonStatusHeader:
+    """Test build_daemon_status_header() rendering for each state."""
+
+    def test_running_status_green(self):
+        """Running status shows green indicator with uptime and slots."""
+        status = {
+            "status": "running",
+            "pid": 12345,
+            "uptime": "5m 30s",
+            "reason": None,
+            "slots_used": 2,
+            "slots_total": 3,
+        }
+        header = build_daemon_status_header(status)
+        text = _render_to_plain(header)
+        assert "RUNNING" in text
+        assert "5m 30s" in text
+        assert "2/3 agents active" in text
+
+    def test_running_status_styled_green(self):
+        """Running status uses green styling."""
+        status = {
+            "status": "running",
+            "pid": 12345,
+            "uptime": "1m 0s",
+            "reason": None,
+            "slots_used": 0,
+            "slots_total": 1,
+        }
+        header = build_daemon_status_header(status)
+        colored = _render_to_str(header)
+        plain = _render_to_plain(header)
+        # Should have ANSI color codes
+        assert colored != plain
+
+    def test_paused_status_yellow(self):
+        """Paused status shows yellow indicator with reason."""
+        status = {
+            "status": "paused",
+            "pid": 12345,
+            "uptime": "10m 0s",
+            "reason": "Agent escalation: test failure",
+            "slots_used": 0,
+            "slots_total": 3,
+        }
+        header = build_daemon_status_header(status)
+        text = _render_to_plain(header)
+        assert "PAUSED" in text
+        assert "Agent escalation: test failure" in text
+
+    def test_paused_shows_uptime(self):
+        """Paused status still shows uptime."""
+        status = {
+            "status": "paused",
+            "pid": 12345,
+            "uptime": "2h 15m",
+            "reason": "manual pause",
+            "slots_used": 0,
+            "slots_total": 1,
+        }
+        header = build_daemon_status_header(status)
+        text = _render_to_plain(header)
+        assert "2h 15m" in text
+
+    def test_stopped_status_red(self):
+        """Stopped status shows red indicator."""
+        status = {
+            "status": "stopped",
+            "pid": None,
+            "uptime": None,
+            "reason": None,
+            "slots_used": 0,
+            "slots_total": 1,
+        }
+        header = build_daemon_status_header(status)
+        text = _render_to_plain(header)
+        assert "STOPPED" in text
+        assert "daemon is not running" in text
+
+    def test_stopped_status_styled_different(self):
+        """Stopped status uses ANSI styling (red)."""
+        status = {
+            "status": "stopped",
+            "pid": None,
+            "uptime": None,
+            "reason": None,
+            "slots_used": 0,
+            "slots_total": 1,
+        }
+        header = build_daemon_status_header(status)
+        colored = _render_to_str(header)
+        plain = _render_to_plain(header)
+        assert colored != plain
+
+    def test_running_no_uptime(self):
+        """Running status without uptime still renders."""
+        status = {
+            "status": "running",
+            "pid": 12345,
+            "uptime": None,
+            "reason": None,
+            "slots_used": 1,
+            "slots_total": 2,
+        }
+        header = build_daemon_status_header(status)
+        text = _render_to_plain(header)
+        assert "RUNNING" in text
+        assert "1/2 agents active" in text
+
+    def test_paused_no_reason(self):
+        """Paused status without reason still renders."""
+        status = {
+            "status": "paused",
+            "pid": 12345,
+            "uptime": "5m 0s",
+            "reason": None,
+            "slots_used": 0,
+            "slots_total": 1,
+        }
+        header = build_daemon_status_header(status)
+        text = _render_to_plain(header)
+        assert "PAUSED" in text
+
+
+class TestDaemonStatusInDashboard:
+    """Test daemon status header integration in the active dashboard layout."""
+
+    def test_dashboard_with_daemon_status_running(self):
+        """Dashboard with daemon_status shows header panel."""
+        daemon_status = {
+            "status": "running",
+            "pid": 12345,
+            "uptime": "3m 10s",
+            "reason": None,
+            "slots_used": 1,
+            "slots_total": 2,
+        }
+        layout = build_active_dashboard(
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            daemon_status=daemon_status,
+        )
+        text = _render_to_plain(layout, width=120)
+        assert "RUNNING" in text
+        assert "1/2 agents active" in text
+        assert "Daemon" in text
+        assert "Active Plan" in text
+
+    def test_dashboard_with_daemon_status_paused(self):
+        """Dashboard with paused daemon shows yellow header."""
+        daemon_status = {
+            "status": "paused",
+            "pid": 12345,
+            "uptime": "10m 0s",
+            "reason": "Budget exceeded",
+            "slots_used": 0,
+            "slots_total": 3,
+        }
+        layout = build_active_dashboard(
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            daemon_status=daemon_status,
+        )
+        text = _render_to_plain(layout, width=120)
+        assert "PAUSED" in text
+        assert "Budget exceeded" in text
+
+    def test_dashboard_with_daemon_status_stopped(self):
+        """Dashboard with stopped daemon shows red header."""
+        daemon_status = {
+            "status": "stopped",
+            "pid": None,
+            "uptime": None,
+            "reason": None,
+            "slots_used": 0,
+            "slots_total": 1,
+        }
+        layout = build_active_dashboard(
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            daemon_status=daemon_status,
+        )
+        text = _render_to_plain(layout, width=120)
+        assert "STOPPED" in text
+        assert "daemon is not running" in text
+
+    def test_dashboard_without_daemon_status(self):
+        """Dashboard without daemon_status has no Daemon header."""
+        layout = build_active_dashboard([], [], [], [], [], [])
+        text = _render_to_plain(layout, width=120)
+        assert "Daemon" not in text
+        assert "Active Plan" in text
+
+    def test_dashboard_layout_has_daemon_header_child(self):
+        """When daemon_status is provided, layout has daemon_header child."""
+        daemon_status = {
+            "status": "running",
+            "pid": 12345,
+            "uptime": "1m",
+            "reason": None,
+            "slots_used": 0,
+            "slots_total": 1,
+        }
+        layout = build_active_dashboard(
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            daemon_status=daemon_status,
+        )
+        child_names = [c.name for c in layout.children]
+        assert "daemon_header" in child_names
+        assert "main" in child_names
+
+    def test_dashboard_renders_with_all_panels_and_daemon_status(self):
+        """Full three-panel layout with daemon status renders without error."""
+        running = [_make_task("r1", "active-work", status="running")]
+        daemon_status = {
+            "status": "running",
+            "pid": 12345,
+            "uptime": "5m 0s",
+            "reason": None,
+            "slots_used": 1,
+            "slots_total": 2,
+        }
+        layout = build_active_dashboard(
+            running,
+            [],
+            [],
+            [],
+            [],
+            [],
+            stream_events_by_task={},
+            daemon_status=daemon_status,
+        )
+        text = _render_to_plain(layout, width=120)
+        assert "RUNNING" in text
+        assert "Active Plan" in text
+        assert "Streaming Detail" in text
+        assert "Events" in text
+
+    def test_dashboard_border_color_matches_status(self):
+        """Daemon header panel border matches the status color."""
+        for status, expected_color in [
+            ("running", "green"),
+            ("paused", "yellow"),
+            ("stopped", "red"),
+        ]:
+            daemon_status = {
+                "status": status,
+                "pid": 12345 if status != "stopped" else None,
+                "uptime": "1m" if status != "stopped" else None,
+                "reason": "test" if status == "paused" else None,
+                "slots_used": 0,
+                "slots_total": 1,
+            }
+            layout = build_active_dashboard(
+                [],
+                [],
+                [],
+                [],
+                [],
+                [],
+                daemon_status=daemon_status,
+            )
+            # The daemon_header child contains a Panel — check its border style
+            header_layout = layout["daemon_header"]
+            # Access the renderable which should be a Panel
+            panel = header_layout._renderable
+            assert panel.border_style == expected_color, (
+                f"Expected {expected_color} border for status={status}, "
+                f"got {panel.border_style}"
+            )

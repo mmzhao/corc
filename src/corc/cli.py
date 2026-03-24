@@ -1309,9 +1309,20 @@ def _watch_dashboard(last_n):
     paths, ml, ws, al, sl, _ = _get_all()
     query_api = QueryAPI(ws, al, sl)
 
+    # Load parallel config for daemon status display
+    cfg = load_config()
+    corc_dir = paths["corc_dir"]
+    parallel = cfg.get("daemon.parallel", 1)
+
     while True:
         try:
-            run_active_dashboard(query_api, max_events=last_n, auto_reload=True)
+            run_active_dashboard(
+                query_api,
+                max_events=last_n,
+                auto_reload=True,
+                corc_dir=corc_dir,
+                parallel=parallel,
+            )
             break  # Normal exit (user pressed 'q')
         except ReloadRequested:
             # Reload the TUI and queries modules so the next iteration
