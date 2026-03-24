@@ -232,6 +232,15 @@ class QueryAPI:
         """Most recent *n* audit log events across all log files."""
         return self.audit_log.read_recent(n)
 
+    def get_today_total_cost(self) -> float:
+        """Sum all task_cost events from today's audit log."""
+        events = self.audit_log.read_today()
+        return sum(
+            float(e.get("cost_usd", 0))
+            for e in events
+            if e.get("event_type") == "task_cost"
+        )
+
     def get_task_stream_events(self, task_id: str) -> list[dict]:
         """Stream events from the latest session attempt for a task.
 
