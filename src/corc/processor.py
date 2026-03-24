@@ -95,7 +95,12 @@ def process_completed(
         error_msg = f"Agent exited with code {result.exit_code}"
         error_detail = result.output[:1000] if result.output else error_msg
 
-        if attempt > max_retries:
+        # SIGTERM (exit code 143) is an infrastructure failure —
+        # the task itself did not fail, so don't burn retry budget
+        # and never escalate based on infrastructure failures alone.
+        is_infrastructure = result.exit_code == 143
+
+        if not is_infrastructure and attempt >= max_retries:
             # Retries exhausted — escalate
             _escalate_task(
                 task,
@@ -113,9 +118,7 @@ def process_completed(
                 "exit_code": result.exit_code,
                 "attempt_count": attempt,
             }
-            # SIGTERM (exit code 143) is an infrastructure failure —
-            # the task itself did not fail, so don't burn retry budget.
-            if result.exit_code == 143:
+            if is_infrastructure:
                 fail_data["infrastructure"] = True
             mutation_log.append(
                 "task_failed",
@@ -262,7 +265,7 @@ def process_completed(
     else:
         failed_details = [d for passed, d in details if not passed]
 
-        if attempt > max_retries:
+        if attempt >= max_retries:
             # Retries exhausted — escalate
             error_msg = f"Validation failed: {'; '.join(failed_details[:3])}"
             _escalate_task(

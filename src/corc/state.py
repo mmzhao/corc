@@ -419,7 +419,7 @@ class WorkState:
                 # Include failed tasks that haven't exceeded max_retries
                 attempt_count = task.get("attempt_count", 0)
                 max_retries = task.get("max_retries", 3)
-                if attempt_count <= max_retries:
+                if attempt_count < max_retries:
                     ready.append(task)
         # Sort by priority ascending: lower number = higher priority
         ready.sort(key=lambda t: t.get("priority", 100))
