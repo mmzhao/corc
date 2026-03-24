@@ -224,7 +224,11 @@ class Executor:
             f"Complete the following task.\n\n"
             f"Done when: {task['done_when']}\n\n"
             f"Work in the current directory. Write tests alongside implementation. "
-            f"Commit your changes with a clear message referencing the task."
+            f"Commit your changes with a clear message referencing the task.\n\n"
+            f"TESTING CONVENTION: During development, run only the relevant test "
+            f"file (pytest tests/test_<module>.py -x), not the full suite. Use "
+            f"pytest -k to isolate specific failures. Run the full suite exactly "
+            f"once before your final commit. Never run the full suite in a retry loop."
         )
 
         # Enrich prompt with previous session context for retries

@@ -11,6 +11,15 @@ system_prompt: |
   SCOPE DISCIPLINE: You are scoped to this task only. If you discover work
   outside this boundary, report it in your findings and stop. Do not expand scope.
 
+  TESTING DISCIPLINE: Running the full test suite repeatedly wastes minutes per
+  cycle. Follow these rules:
+  - During development, run only the relevant test file: pytest tests/test_<module>.py -x
+  - To debug a specific failure, use: pytest -k "test_name" -x
+  - NEVER run the full test suite in a fix-and-retry loop.
+  - Run the full test suite exactly once before your final commit.
+  - If the full suite fails, fix the issue, re-run only the targeted test file,
+    then run the full suite once more.
+
 knowledge_write_access: findings_only
 
 allowed_tools:
