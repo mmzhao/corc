@@ -20,6 +20,16 @@ from pathlib import Path
 # accidental editable installs that would hijack the shared Python path.
 _INSTALLABLE_FILES = ("pyproject.toml", "setup.py", "setup.cfg")
 
+# Data files/directories that are auto-resolved during merge by keeping main's
+# version (--ours).  These files are written exclusively by the daemon on main;
+# agents never modify them.  This prevents the #1 source of merge conflicts
+# (data/mutations.jsonl diverging because the daemon appends while agents run).
+_DATA_PATHS_OURS = (
+    "data/mutations.jsonl",
+    "data/audit.jsonl",
+    "data/sessions/",
+)
+
 
 class WorktreeError(Exception):
     """Raised when a git worktree operation fails."""
@@ -135,8 +145,14 @@ def remove_worktree(
 def merge_worktree(project_root: Path, worktree_path: Path) -> bool:
     """Merge changes from a worktree branch back into the main branch.
 
-    Performs a simple merge of the worktree's branch into the current
-    HEAD of the main repo. Uses --no-ff to preserve branch history.
+    Uses a two-step merge to auto-resolve data file conflicts:
+    1. ``git merge --no-ff --no-commit`` stages the merge without committing.
+    2. ``git checkout --ours`` for data files (mutations.jsonl, audit.jsonl,
+       sessions/) keeps main's version — agents never write these files.
+    3. ``git commit`` finalises the merge.
+
+    This eliminates the #1 source of merge conflicts: data/mutations.jsonl
+    diverging because the daemon appends to it on main while agents run.
 
     Args:
         project_root: The main repository root directory.
@@ -167,17 +183,65 @@ def merge_worktree(project_root: Path, worktree_path: Path) -> bool:
         # No new commits — nothing to merge
         return True
 
-    # Attempt the merge
+    # Step 1: Start the merge without committing
     result = subprocess.run(
-        ["git", "merge", "--no-ff", branch_name, "-m", f"Merge {branch_name}"],
+        ["git", "merge", "--no-ff", "--no-commit", branch_name],
         capture_output=True,
         text=True,
         cwd=str(project_root),
         timeout=60,
     )
 
-    if result.returncode != 0:
-        # Merge conflict — abort the merge
+    # Even if there are conflicts (returncode != 0), we may be able to
+    # auto-resolve them if they're only in data files.  Check below.
+
+    # Step 2: For each data path, resolve to main's version (--ours).
+    # If the path doesn't exist in the repo, git checkout --ours is a no-op
+    # (it will fail silently, which is fine).
+    for data_path in _DATA_PATHS_OURS:
+        subprocess.run(
+            ["git", "checkout", "--ours", "--", data_path],
+            capture_output=True,
+            cwd=str(project_root),
+            timeout=10,
+        )
+        # Stage the resolved file so it's no longer marked as conflicted
+        subprocess.run(
+            ["git", "add", "--", data_path],
+            capture_output=True,
+            cwd=str(project_root),
+            timeout=10,
+        )
+
+    # Check if there are still unresolved conflicts after auto-resolving data files
+    status_result = subprocess.run(
+        ["git", "diff", "--name-only", "--diff-filter=U"],
+        capture_output=True,
+        text=True,
+        cwd=str(project_root),
+        timeout=30,
+    )
+    if status_result.stdout.strip():
+        # Still have unresolved conflicts in non-data files — abort
+        subprocess.run(
+            ["git", "merge", "--abort"],
+            capture_output=True,
+            cwd=str(project_root),
+            timeout=30,
+        )
+        return False
+
+    # Step 3: Commit the merge
+    commit_result = subprocess.run(
+        ["git", "commit", "--no-edit", "-m", f"Merge {branch_name}"],
+        capture_output=True,
+        text=True,
+        cwd=str(project_root),
+        timeout=60,
+    )
+
+    if commit_result.returncode != 0:
+        # Commit failed unexpectedly — abort
         subprocess.run(
             ["git", "merge", "--abort"],
             capture_output=True,
