@@ -3,9 +3,12 @@
 import warnings
 from pathlib import Path
 
+import pytest
+
 from corc.context import (
     ContextResult,
     assemble_context,
+    _extract_python_symbols,
     _extract_section,
     _load_blacklist,
     _normalize_slug,
@@ -414,3 +417,209 @@ def test_context_size_grows_with_content(tmp_path):
     assert (
         ctx_big.size_info["estimated_tokens"] > ctx_empty.size_info["estimated_tokens"]
     )
+
+
+# ---------------------------------------------------------------------------
+# Python symbol extraction (:: syntax) tests
+# ---------------------------------------------------------------------------
+
+SAMPLE_PYTHON = '''\
+"""Module docstring."""
+
+import os
+from pathlib import Path
+
+
+def hello():
+    """Say hello."""
+    return "hello"
+
+
+def goodbye():
+    """Say goodbye."""
+    return "goodbye"
+
+
+class Greeter:
+    """A greeter class."""
+
+    def greet(self):
+        return "hi"
+
+
+def private_helper():
+    return 42
+'''
+
+
+DECORATED_PYTHON = """\
+import functools
+
+
+@functools.lru_cache
+def cached_fn():
+    return 1
+
+
+@some_decorator
+@another_decorator
+def multi_decorated():
+    return 2
+"""
+
+
+def test_extract_single_function():
+    """:: with one symbol extracts only that function plus imports."""
+    result = _extract_python_symbols(SAMPLE_PYTHON, ["hello"])
+    assert "def hello():" in result
+    assert 'return "hello"' in result
+    # Other symbols should NOT be present
+    assert "def goodbye():" not in result
+    assert "class Greeter" not in result
+    assert "def private_helper" not in result
+
+
+def test_extract_multiple_symbols():
+    """:: with comma-separated symbols extracts all named symbols."""
+    result = _extract_python_symbols(SAMPLE_PYTHON, ["hello", "goodbye"])
+    assert "def hello():" in result
+    assert "def goodbye():" in result
+    assert "class Greeter" not in result
+    assert "def private_helper" not in result
+
+
+def test_extract_class():
+    """:: can extract a top-level class."""
+    result = _extract_python_symbols(SAMPLE_PYTHON, ["Greeter"])
+    assert "class Greeter:" in result
+    assert "def greet(self):" in result
+    assert "def hello():" not in result
+
+
+def test_extract_includes_import_block():
+    """Extracted symbols are prepended with the import block."""
+    result = _extract_python_symbols(SAMPLE_PYTHON, ["hello"])
+    assert "import os" in result
+    assert "from pathlib import Path" in result
+    # Module docstring is part of the import block
+    assert "Module docstring" in result
+
+
+def test_extract_missing_symbol_warns_and_falls_back():
+    """Missing symbol emits a warning and returns full file content."""
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        result = _extract_python_symbols(SAMPLE_PYTHON, ["nonexistent"])
+        assert len(w) == 1
+        assert "nonexistent" in str(w[0].message)
+        assert "not found" in str(w[0].message)
+    # Full content returned as fallback
+    assert "def hello():" in result
+    assert "def goodbye():" in result
+    assert "class Greeter" in result
+
+
+def test_extract_partial_missing_symbol_falls_back():
+    """If any requested symbol is missing, full file is returned."""
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        result = _extract_python_symbols(SAMPLE_PYTHON, ["hello", "does_not_exist"])
+        assert len(w) == 1
+    assert "def goodbye():" in result  # full file fallback
+
+
+def test_extract_preserves_decorators():
+    """Extracted symbol includes its decorators."""
+    result = _extract_python_symbols(DECORATED_PYTHON, ["cached_fn"])
+    assert "@functools.lru_cache" in result
+    assert "def cached_fn():" in result
+
+
+def test_extract_preserves_multiple_decorators():
+    """Extracted symbol includes all of its decorators."""
+    result = _extract_python_symbols(DECORATED_PYTHON, ["multi_decorated"])
+    assert "@some_decorator" in result
+    assert "@another_decorator" in result
+    assert "def multi_decorated():" in result
+
+
+def test_extract_no_import_block():
+    """File with no imports still extracts the symbol."""
+    code = "def foo():\n    return 1\n"
+    result = _extract_python_symbols(code, ["foo"])
+    assert "def foo():" in result
+    assert "return 1" in result
+
+
+# ---------------------------------------------------------------------------
+# assemble_context with :: syntax (integration tests)
+# ---------------------------------------------------------------------------
+
+
+def test_assemble_context_symbol_extraction(tmp_path):
+    """assemble_context handles :: syntax for Python symbol extraction."""
+    (tmp_path / "mod.py").write_text(SAMPLE_PYTHON)
+    task = {
+        "name": "test",
+        "done_when": "done",
+        "context_bundle": ["mod.py::hello"],
+    }
+    ctx = assemble_context(task, tmp_path)
+    assert "def hello():" in ctx
+    assert "import os" in ctx
+    assert "def goodbye():" not in ctx
+
+
+def test_assemble_context_multiple_symbols(tmp_path):
+    """assemble_context extracts multiple comma-separated symbols."""
+    (tmp_path / "mod.py").write_text(SAMPLE_PYTHON)
+    task = {
+        "name": "test",
+        "done_when": "done",
+        "context_bundle": ["mod.py::hello, goodbye"],
+    }
+    ctx = assemble_context(task, tmp_path)
+    assert "def hello():" in ctx
+    assert "def goodbye():" in ctx
+    assert "class Greeter" not in ctx
+
+
+def test_assemble_context_symbol_missing_fallback(tmp_path):
+    """Missing symbol in :: ref falls back to full file content."""
+    (tmp_path / "mod.py").write_text(SAMPLE_PYTHON)
+    task = {
+        "name": "test",
+        "done_when": "done",
+        "context_bundle": ["mod.py::nonexistent"],
+    }
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        ctx = assemble_context(task, tmp_path)
+        symbol_warnings = [x for x in w if "not found" in str(x.message)]
+        assert len(symbol_warnings) >= 1
+    # Full file content as fallback
+    assert "def hello():" in ctx
+    assert "def goodbye():" in ctx
+
+
+def test_assemble_context_non_python_symbol_raises(tmp_path):
+    """:: on a non-Python file raises ValueError."""
+    (tmp_path / "readme.md").write_text("# Readme\nSome content.")
+    task = {
+        "name": "test",
+        "done_when": "done",
+        "context_bundle": ["readme.md::something"],
+    }
+    with pytest.raises(ValueError, match="only supported for Python"):
+        assemble_context(task, tmp_path)
+
+
+def test_assemble_context_symbol_file_not_found(tmp_path):
+    """:: ref with missing file produces a warning, not a crash."""
+    task = {
+        "name": "test",
+        "done_when": "done",
+        "context_bundle": ["missing.py::hello"],
+    }
+    ctx = assemble_context(task, tmp_path)
+    assert "WARNING: File not found" in ctx
