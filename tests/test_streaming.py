@@ -1522,8 +1522,11 @@ class TestTUIStreamingEvents:
         assert "Read" in text
         assert "task-abc" in text
 
-    def test_assistant_message_event_rendered(self):
-        """assistant_message events show content in the panel."""
+    def test_assistant_message_event_filtered_from_events_panel(self):
+        """assistant_message events are filtered out of the events panel.
+
+        These noisy events are shown in the streaming detail panel instead.
+        """
         events = [
             {
                 "timestamp": "2026-03-22T10:00:00.000Z",
@@ -1542,11 +1545,15 @@ class TestTUIStreamingEvents:
         console.print(panel)
         text = buf.getvalue()
 
-        assert "assistant_message" in text
-        assert "Let me analyze the code structure." in text
+        assert "assistant_message" not in text
+        assert "Let me analyze the code structure." not in text
 
     def test_mixed_events_rendered(self):
-        """Mixed traditional and streaming events render together."""
+        """Mixed traditional and streaming events render together.
+
+        assistant_message events are filtered out of the events panel;
+        structural events (dispatched, tool_use, completed) still appear.
+        """
         events = [
             {
                 "timestamp": "2026-03-22T10:00:00.000Z",
@@ -1584,13 +1591,14 @@ class TestTUIStreamingEvents:
         text = buf.getvalue()
 
         assert "task_dispatched" in text
-        assert "assistant_message" in text
+        assert "assistant_message" not in text  # filtered out
         assert "tool_use" in text
         assert "task_completed" in text
         assert "Bash" in text
 
-    def test_multiline_assistant_content(self):
-        """assistant_message with multiline content is shown fully."""
+    def test_multiline_assistant_content_filtered(self):
+        """assistant_message events (even with multiline content) are filtered
+        out of the events panel — they appear in the streaming panel instead."""
         events = [
             {
                 "timestamp": "2026-03-22T10:00:00.000Z",
@@ -1609,6 +1617,5 @@ class TestTUIStreamingEvents:
         console.print(panel)
         text = buf.getvalue()
 
-        assert "Line 1 of reasoning." in text
-        assert "Line 2 of reasoning." in text
-        assert "Line 3." in text
+        assert "Line 1 of reasoning." not in text
+        assert "assistant_message" not in text
