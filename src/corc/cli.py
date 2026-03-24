@@ -456,6 +456,8 @@ def task_status(task_id):
     click.echo(f"Type: {t.get('task_type', 'implementation')}")
     click.echo(f"Priority: {t.get('priority', 100)}")
     click.echo(f"Role: {t.get('role', 'unset')}")
+    if t.get("target_repo"):
+        click.echo(f"Target repo: {t['target_repo']}")
     click.echo(f"Done when: {t['done_when']}")
     if t.get("depends_on"):
         click.echo(f"Depends on: {', '.join(t['depends_on'])}")
