@@ -10,6 +10,8 @@ into agent reasoning and tool calls.
 
 import json
 import logging
+import os
+import signal
 import subprocess
 import threading
 import time
@@ -24,6 +26,41 @@ logger = logging.getLogger(__name__)
 
 # Read defaults from centralized config
 _DISPATCH_DEFAULTS = DEFAULTS["dispatch"]
+
+
+def kill_agent_process(pid: int) -> bool:
+    """Kill an agent process reliably.
+
+    Sends SIGTERM first, waits briefly, then SIGKILL if still alive.
+    Returns True if the process was successfully killed or was already dead.
+    """
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True  # Already dead
+    except (PermissionError, OSError):
+        logger.warning("kill_agent_process: cannot signal pid=%d", pid)
+        return False
+
+    # Give the process a moment to handle SIGTERM
+    for _ in range(5):
+        time.sleep(0.1)
+        try:
+            os.kill(pid, 0)  # Check if still alive
+        except ProcessLookupError:
+            return True  # Process exited
+        except (PermissionError, OSError):
+            break  # Still alive but can't check — escalate to SIGKILL
+
+    # Process still alive after grace period — force kill
+    try:
+        os.kill(pid, signal.SIGKILL)
+        return True
+    except ProcessLookupError:
+        return True  # Died between check and kill
+    except (PermissionError, OSError):
+        logger.warning("kill_agent_process: SIGKILL failed for pid=%d", pid)
+        return False
 
 
 @dataclass
@@ -102,6 +139,10 @@ class ClaudeCodeDispatcher(AgentDispatcher):
         start = time.time()
         timed_out = False
 
+        # Snapshot the timeout at dispatch time so hot-reload of this module
+        # does not change the timeout for an already-running agent.
+        timeout_s = _DISPATCH_DEFAULTS["agent_timeout_s"]
+
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -126,7 +167,9 @@ class ClaudeCodeDispatcher(AgentDispatcher):
         stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
         stderr_thread.start()
 
-        # Watchdog: kill process if it exceeds timeout
+        # Watchdog: kill process if it exceeds timeout.
+        # The timeout_s value is snapshotted above to be resilient to
+        # hot-reload changing the module-level _DISPATCH_DEFAULTS dict.
         def _kill_on_timeout():
             nonlocal timed_out
             timed_out = True
@@ -135,7 +178,8 @@ class ClaudeCodeDispatcher(AgentDispatcher):
             except OSError:
                 pass
 
-        timer = threading.Timer(_DISPATCH_DEFAULTS["agent_timeout_s"], _kill_on_timeout)
+        timer = threading.Timer(timeout_s, _kill_on_timeout)
+        timer.daemon = True  # Don't prevent process exit if main thread dies
         timer.start()
 
         result_text = ""
@@ -179,7 +223,7 @@ class ClaudeCodeDispatcher(AgentDispatcher):
 
         if timed_out:
             return AgentResult(
-                output=f"[TIMEOUT: agent exceeded {_DISPATCH_DEFAULTS['agent_timeout_s']}s limit]",
+                output=f"[TIMEOUT: agent exceeded {timeout_s}s limit]",
                 exit_code=-1,
                 duration_s=time.time() - start,
             )

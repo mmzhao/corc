@@ -1199,3 +1199,280 @@ class TestKillDaemonMidTask:
         assert summary["agents_dead_no_output"] == 1
         task = state.get_task("t1")
         assert task["status"] == "failed"
+
+
+# ===========================================================================
+# Unit tests: orphaned agents killed on startup reconciliation
+# ===========================================================================
+
+
+class TestOrphanedAgentKill:
+    """Test that orphaned agents exceeding timeout are killed during reconciliation."""
+
+    def test_orphaned_agent_killed_on_timeout(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
+        """An alive agent that has exceeded agent_timeout_s is killed and marked failed."""
+        # Start a real process to simulate an orphaned agent
+        proc = subprocess.Popen(
+            ["sleep", "30"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        real_pid = proc.pid
+
+        _create_task(mutation_log, "t1", "Orphaned Task")
+        _start_task(mutation_log, "t1")
+        _create_agent(mutation_log, "agent-1", "t1", pid=real_pid)
+        work_state.refresh()
+
+        # Verify the process is alive
+        from corc.reconcile import is_pid_alive
+
+        assert is_pid_alive(real_pid) is True
+
+        # Reconcile with a very short timeout (0 seconds) — agent is "too old"
+        summary = reconcile_on_startup(
+            state=work_state,
+            mutation_log=mutation_log,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            project_root=tmp_project,
+            pid_checker=lambda pid: True,  # Agent is "alive"
+            agent_timeout_s=0,  # Zero timeout — every alive agent is overdue
+        )
+
+        # Cleanup the process handle
+        proc.wait(timeout=5)
+
+        assert summary["agents_killed_timeout"] == 1
+        assert summary["agents_alive"] == 0
+        assert summary["agents_dead_no_output"] == 1
+
+        # Task should be marked failed (agent killed, no output)
+        task = work_state.get_task("t1")
+        assert task["status"] == "failed"
+
+        # Process should be dead
+        assert is_pid_alive(real_pid) is False
+
+    def test_alive_agent_within_timeout_not_killed(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
+        """An alive agent within the timeout is re-attached, not killed."""
+        proc = subprocess.Popen(
+            ["sleep", "30"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        real_pid = proc.pid
+
+        _create_task(mutation_log, "t1", "Active Task")
+        _start_task(mutation_log, "t1")
+        _create_agent(mutation_log, "agent-1", "t1", pid=real_pid)
+        work_state.refresh()
+
+        try:
+            summary = reconcile_on_startup(
+                state=work_state,
+                mutation_log=mutation_log,
+                audit_log=audit_log,
+                session_logger=session_logger,
+                project_root=tmp_project,
+                pid_checker=lambda pid: True,  # Agent is alive
+                agent_timeout_s=99999,  # Very long timeout — agent is within limits
+            )
+
+            assert summary["agents_killed_timeout"] == 0
+            assert summary["agents_alive"] == 1
+            assert len(summary["alive_agents"]) == 1
+
+            # Task should still be running
+            task = work_state.get_task("t1")
+            assert task["status"] == "running"
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def test_orphaned_agent_killed_with_output(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
+        """An orphaned agent killed on timeout that has session output → output is processed."""
+        proc = subprocess.Popen(
+            ["sleep", "30"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        real_pid = proc.pid
+
+        _create_task(mutation_log, "t1", "Task With Output", done_when="do it")
+        _start_task(mutation_log, "t1")
+        _create_agent(mutation_log, "agent-1", "t1", pid=real_pid)
+        work_state.refresh()
+
+        # Agent left output before we reconcile
+        session_logger.log_dispatch("t1", 1, "prompt", "system", ["Read"], 3.0)
+        session_logger.log_output("t1", 1, "Completed successfully!", 0, 5.0)
+
+        summary = reconcile_on_startup(
+            state=work_state,
+            mutation_log=mutation_log,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            project_root=tmp_project,
+            pid_checker=lambda pid: True,  # Agent is alive
+            agent_timeout_s=0,  # Immediate timeout
+        )
+
+        proc.wait(timeout=5)
+
+        assert summary["agents_killed_timeout"] == 1
+        assert summary["agents_dead_with_output"] == 1
+
+        # Task should be completed because output was processed
+        task = work_state.get_task("t1")
+        assert task["status"] == "completed"
+
+    def test_mixed_agents_some_killed_some_kept(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
+        """Mix of agents: one within timeout (kept), one exceeding (killed)."""
+        proc1 = subprocess.Popen(
+            ["sleep", "30"], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        proc2 = subprocess.Popen(
+            ["sleep", "30"], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+
+        # t1: agent recently started (within timeout)
+        _create_task(mutation_log, "t1", "Recent Task")
+        _start_task(mutation_log, "t1")
+        _create_agent(mutation_log, "agent-1", "t1", pid=proc1.pid)
+
+        # t2: agent started a long time ago — manually backdate the timestamp
+        _create_task(mutation_log, "t2", "Old Task")
+        # Use a backdated mutation to simulate an old task start
+        mutation_log.append(
+            "task_started",
+            {"attempt": 1},
+            reason="Test: old task",
+            task_id="t2",
+        )
+        _create_agent(mutation_log, "agent-2", "t2", pid=proc2.pid)
+        work_state.refresh()
+
+        # Patch _get_agent_age to return different ages for different tasks
+        from unittest.mock import patch as mock_patch
+
+        original_get_agent_age = __import__(
+            "corc.reconcile", fromlist=["_get_agent_age"]
+        )._get_agent_age
+
+        def mock_get_agent_age(task, ml):
+            if task["id"] == "t1":
+                return 10.0  # 10 seconds old — within timeout
+            elif task["id"] == "t2":
+                return 5000.0  # 5000 seconds old — exceeds timeout
+            return original_get_agent_age(task, ml)
+
+        try:
+            with mock_patch(
+                "corc.reconcile._get_agent_age", side_effect=mock_get_agent_age
+            ):
+                summary = reconcile_on_startup(
+                    state=work_state,
+                    mutation_log=mutation_log,
+                    audit_log=audit_log,
+                    session_logger=session_logger,
+                    project_root=tmp_project,
+                    pid_checker=lambda pid: True,  # Both agents alive
+                    agent_timeout_s=1800,  # 30 min timeout
+                )
+
+            assert summary["agents_alive"] == 1  # t1 kept
+            assert summary["agents_killed_timeout"] == 1  # t2 killed
+            assert len(summary["alive_agents"]) == 1
+            assert summary["alive_agents"][0]["task"]["id"] == "t1"
+        finally:
+            proc1.kill()
+            proc1.wait()
+            proc2.wait(timeout=5)
+
+    def test_reconcile_audit_logs_killed_agents(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
+        """Killing orphaned agents generates proper audit log events."""
+        proc = subprocess.Popen(
+            ["sleep", "30"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        _create_task(mutation_log, "t1", "Audited Kill Task")
+        _start_task(mutation_log, "t1")
+        _create_agent(mutation_log, "agent-1", "t1", pid=proc.pid)
+        work_state.refresh()
+
+        reconcile_on_startup(
+            state=work_state,
+            mutation_log=mutation_log,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            project_root=tmp_project,
+            pid_checker=lambda pid: True,
+            agent_timeout_s=0,
+        )
+
+        proc.wait(timeout=5)
+
+        events = audit_log.read_today()
+        event_types = [e["event_type"] for e in events]
+        assert "reconcile_agent_killed_timeout" in event_types
+
+
+# ===========================================================================
+# Unit tests: _get_agent_age helper
+# ===========================================================================
+
+
+class TestGetAgentAge:
+    """Test the _get_agent_age helper function."""
+
+    def test_age_from_task_updated_field(self, mutation_log, tmp_project):
+        """Computes age from task's 'updated' timestamp."""
+        from corc.reconcile import _get_agent_age
+
+        # Create a task with a known timestamp
+        _create_task(mutation_log, "t1", "Task 1")
+        _start_task(mutation_log, "t1")
+
+        # Build a fake task dict with a recent 'updated' timestamp
+        from datetime import datetime
+
+        recent_ts = datetime.now().isoformat()
+        task = {"id": "t1", "updated": recent_ts}
+
+        age = _get_agent_age(task, mutation_log)
+        assert age is not None
+        assert age < 5  # Should be very recent (< 5 seconds)
+
+    def test_age_from_old_timestamp(self, mutation_log, tmp_project):
+        """Old tasks have a large age."""
+        from corc.reconcile import _get_agent_age
+        from datetime import datetime, timedelta
+
+        old_ts = (datetime.now() - timedelta(hours=2)).isoformat()
+        task = {"id": "t1", "updated": old_ts}
+
+        age = _get_agent_age(task, mutation_log)
+        assert age is not None
+        assert age > 7000  # At least ~2 hours in seconds
+
+    def test_age_none_when_no_timestamp(self, mutation_log, tmp_project):
+        """Returns None when task has no usable timestamp."""
+        from corc.reconcile import _get_agent_age
+
+        task = {"id": "t1"}  # No 'updated' field
+        age = _get_agent_age(task, mutation_log)
+        # Should return None since no timestamp available and no matching mutations
+        assert age is None
