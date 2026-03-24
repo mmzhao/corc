@@ -533,6 +533,9 @@ class Executor:
                         task_id=task["id"],
                         reason="PR creation failed — all repos require PRs",
                     )
+                    # Clean up worktree immediately when not deferring merge
+                    if not self.defer_merge:
+                        self.cleanup_worktree(task["id"], worktree_path)
                     # Return as failed so retry/escalation kicks in
                     completed.append(
                         CompletedTask(
@@ -544,6 +547,7 @@ class Executor:
                                 duration_s=result.duration_s,
                             ),
                             worktree_path=worktree_path,
+                            agent_id=agent_id,
                             pr_info=None,
                             attempt=attempt,
                         )

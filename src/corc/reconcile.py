@@ -292,49 +292,103 @@ def is_claude_process(pid: int) -> bool:
 
 
 def clean_stale_worktrees(state: WorkState, project_root: Path) -> int:
-    """Remove git worktrees for dead agents.
+    """Remove git worktrees that are no longer needed.
 
-    Finds agents with worktree_path set, checks if the agent process
-    is dead, and removes the worktree if so.
+    Three-pass cleanup:
+
+    1. **Agent-referenced worktrees** — for each agent with a ``worktree_path``,
+       remove the worktree if the agent's task is in a terminal state
+       (completed / failed / escalated) *or* the agent process is dead.
+    2. **Orphaned filesystem worktrees** — scan ``.corc/worktrees/`` for
+       directories not associated with any actively-running task's agent.
+    3. **Git worktree prune** — ask git to clean up stale internal references.
 
     Returns the number of worktrees cleaned.
     """
+    # Terminal task statuses — worktrees for these tasks are always stale
+    _TERMINAL_STATUSES = {"completed", "failed", "escalated"}
+
     cleaned = 0
     agents = state.list_agents()
+    # Track worktree paths that are actively in use (running task, alive agent)
+    active_worktree_paths: set[str] = set()
 
+    # --- Pass 1: Agent-referenced worktrees ---
     for agent in agents:
         worktree_path = agent.get("worktree_path")
         if not worktree_path:
             continue
 
         worktree = Path(worktree_path)
+
+        # Check task status — terminal tasks always get cleaned
+        task_id = agent.get("task_id")
+        task = state.get_task(task_id) if task_id else None
+        task_is_terminal = task is not None and task["status"] in _TERMINAL_STATUSES
+
         if not worktree.exists():
             continue
 
         pid = agent.get("pid")
-        if pid and is_pid_alive(pid):
-            continue  # Agent still alive, don't clean worktree
+        agent_alive = pid is not None and is_pid_alive(pid)
 
-        # Agent is dead and worktree exists — clean up
-        try:
-            result = subprocess.run(
-                ["git", "worktree", "remove", "--force", str(worktree)],
-                capture_output=True,
-                timeout=30,
-                cwd=str(project_root),
-            )
-            if result.returncode == 0:
-                cleaned += 1
-            else:
-                # git worktree remove failed — try manual cleanup
-                _remove_dir(worktree)
-                cleaned += 1
-        except (subprocess.SubprocessError, FileNotFoundError, OSError):
-            # If git worktree remove fails, try manual cleanup
-            _remove_dir(worktree)
-            cleaned += 1
+        # Keep the worktree only if the task is non-terminal AND agent is alive
+        if not task_is_terminal and agent_alive:
+            active_worktree_paths.add(str(worktree.resolve()))
+            continue
+
+        # Stale — remove
+        cleaned += _remove_worktree_dir(worktree, project_root)
+
+    # --- Pass 2: Orphaned filesystem worktrees ---
+    worktrees_dir = project_root / ".corc" / "worktrees"
+    if worktrees_dir.exists():
+        for child in worktrees_dir.iterdir():
+            if not child.is_dir():
+                continue
+            if str(child.resolve()) in active_worktree_paths:
+                continue
+            # Not tracked by any active agent — orphan
+            cleaned += _remove_worktree_dir(child, project_root)
+
+    # --- Pass 3: Git worktree prune ---
+    _git_worktree_prune(project_root)
 
     return cleaned
+
+
+def _remove_worktree_dir(worktree: Path, project_root: Path) -> int:
+    """Remove a single worktree directory. Returns 1 on success, 0 on skip."""
+    if not worktree.exists():
+        return 0
+    try:
+        result = subprocess.run(
+            ["git", "worktree", "remove", "--force", str(worktree)],
+            capture_output=True,
+            timeout=30,
+            cwd=str(project_root),
+        )
+        if result.returncode == 0:
+            return 1
+        # git worktree remove failed — try manual cleanup
+        _remove_dir(worktree)
+        return 1
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        _remove_dir(worktree)
+        return 1
+
+
+def _git_worktree_prune(project_root: Path):
+    """Run ``git worktree prune`` to clean stale internal references."""
+    try:
+        subprocess.run(
+            ["git", "worktree", "prune"],
+            capture_output=True,
+            cwd=str(project_root),
+            timeout=30,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        pass
 
 
 def _remove_dir(path: Path):
