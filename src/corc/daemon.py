@@ -301,14 +301,35 @@ class Daemon:
 
         When no PR exists: task already failed in executor (PR is mandatory).
 
-        If validation failed: clean up worktree (processor already set
-        the appropriate failed/escalated status).
+        If validation failed and task is terminal (escalated or cancelled):
+        clean up worktree. If task is retriable (failed but under max_retries):
+        preserve the worktree for reuse by the next dispatch.
         """
         task_id = item.task["id"]
         worktree_path = item.worktree_path
 
         if not proc_result.passed:
-            # Validation failed — clean up worktree, processor already marked failed/escalated
+            # Validation failed — processor already marked failed/escalated.
+            # Check if the task will be retried: preserve worktree for retry
+            # so the next agent can build on previous work.
+            self.state.refresh()
+            task_now = self.state.get_task(task_id)
+            if task_now and task_now["status"] == "failed":
+                max_retries = task_now.get("max_retries", 3)
+                attempt_count = task_now.get("attempt_count", 0)
+                if attempt_count <= max_retries:
+                    # Retriable — save worktree for next dispatch
+                    self.executor.set_conflict_worktree(task_id, worktree_path)
+                    self.audit_log.log(
+                        "worktree_preserved_for_retry",
+                        task_id=task_id,
+                        worktree_path=str(worktree_path),
+                        attempt_count=attempt_count,
+                        max_retries=max_retries,
+                    )
+                    return
+
+            # Terminal state (escalated/cancelled) or non-retriable — clean up
             self.executor.cleanup_worktree(task_id, worktree_path)
             return
 
