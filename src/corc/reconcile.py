@@ -299,14 +299,14 @@ def clean_stale_worktrees(state: WorkState, project_root: Path) -> int:
     1. **Agent-referenced worktrees** — for each agent with a ``worktree_path``,
        remove the worktree if the agent's task is in a terminal state
        (completed / failed / escalated) *or* the agent process is dead.
-    2. **Orphaned filesystem worktrees** — scan ``.corc/worktrees/`` for
+    2. **Orphaned filesystem worktrees** — scan ``.claude/worktrees/`` for
        directories not associated with any actively-running task's agent.
     3. **Git worktree prune** — ask git to clean up stale internal references.
 
     Returns the number of worktrees cleaned.
     """
     # Terminal task statuses — worktrees for these tasks are always stale
-    _TERMINAL_STATUSES = {"completed", "failed", "escalated"}
+    _TERMINAL_STATUSES = {"completed", "failed", "escalated", "cancelled"}
 
     cleaned = 0
     agents = state.list_agents()
@@ -341,7 +341,7 @@ def clean_stale_worktrees(state: WorkState, project_root: Path) -> int:
         cleaned += _remove_worktree_dir(worktree, project_root)
 
     # --- Pass 2: Orphaned filesystem worktrees ---
-    worktrees_dir = project_root / ".corc" / "worktrees"
+    worktrees_dir = project_root / ".claude" / "worktrees"
     if worktrees_dir.exists():
         for child in worktrees_dir.iterdir():
             if not child.is_dir():

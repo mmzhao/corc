@@ -252,7 +252,7 @@ class Daemon:
             # Retriable failures don't count — they'll be retried.
             self.state.refresh()
             task = self.state.get_task(item.task["id"])
-            if task and task["status"] in ("completed", "escalated"):
+            if task and task["status"] in ("completed", "escalated", "cancelled"):
                 self._tasks_completed += 1
                 # Track chaos recovery: if this task had a chaos event, mark it recovered
                 if self._chaos_monkey and task["status"] == "completed":
@@ -663,7 +663,7 @@ class Daemon:
         if self.target_task_id and self._tasks_completed > 0:
             # Check if the target task is done (terminal state)
             task = self.state.get_task(self.target_task_id)
-            if task and task["status"] in ("completed", "escalated"):
+            if task and task["status"] in ("completed", "escalated", "cancelled"):
                 return True
         return False
 
