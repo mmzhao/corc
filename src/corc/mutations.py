@@ -20,6 +20,7 @@ MUTATION_TYPES = {
     "task_completed",
     "task_failed",
     "task_escalated",
+    "task_cancelled",
     "task_handed_off",
     "task_paused",
     "task_pending_merge",
