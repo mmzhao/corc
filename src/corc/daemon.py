@@ -677,9 +677,15 @@ class Daemon:
         self._pid_file.write_text(str(os.getpid()))
 
     def _cleanup(self):
-        """Shutdown executor and remove PID file."""
+        """Shutdown executor and remove PID file.
+
+        Uses wait=False so that ``corc stop`` returns immediately even when
+        agents are still running.  In-flight agents become orphans; the next
+        ``corc start`` reconciles them (re-attaches alive ones, processes
+        dead ones).
+        """
         self.audit_log.log("daemon_stopping")
-        self.executor.shutdown(wait=True)
+        self.executor.shutdown(wait=False)
         if self._pid_file.exists():
             self._pid_file.unlink()
         self.audit_log.log("daemon_stopped")
