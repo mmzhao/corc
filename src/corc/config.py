@@ -50,6 +50,7 @@ def get_paths(root: Path | None = None) -> dict:
         "corc_dir": root / ".corc",
         "ratings_dir": root / "data" / "ratings",
         "retry_outcomes": root / "data" / "retry_outcomes.jsonl",
+        "planning_feedback": root / "data" / "planning_feedback.jsonl",
     }
 
 

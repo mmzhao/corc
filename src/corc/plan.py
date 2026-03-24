@@ -93,6 +93,14 @@ How to verify the feature works correctly.
 Key planning decisions: why decomposed this way, why certain dependencies exist, \
 what alternatives were considered.
 ```
+
+## Feedback-Aware Planning
+If a **Planning Feedback** section is present below, use it actively:
+- Adjust done-when specificity based on calibration data (specific criteria produce better outcomes)
+- Prefer context bundle sizes that correlate with higher scores
+- Avoid patterns that appear in recent failures
+- Follow operator-curated planning lessons
+- Note quality trends and adapt: if scores are declining, plan more conservatively (smaller tasks, more review gates)
 """
 
 
@@ -200,6 +208,26 @@ def _get_repo_context(project_root: Path) -> str:
                 pass
 
     return "\n".join(lines) if lines else "  (no repo context available)"
+
+
+def _get_planning_feedback(paths: dict) -> str:
+    """Build the Planning Feedback section from recorded outcomes and lessons.
+
+    Returns an empty string if the planning_feedback module cannot compute
+    a meaningful section (e.g. no feedback data at all).
+    """
+    from corc.planning_feedback import (
+        PlanningFeedbackStore,
+        build_planning_feedback_section,
+    )
+
+    feedback_path = paths.get("planning_feedback")
+    if feedback_path is None:
+        return ""
+
+    store = PlanningFeedbackStore(feedback_path)
+    corc_dir = paths["corc_dir"]
+    return build_planning_feedback_section(store, corc_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +350,7 @@ def build_system_prompt(
     - Knowledge store summary
     - Work state summary
     - Repository context
+    - Planning feedback (self-improvement section from execution outcomes)
     - (optional) Seed document content
     - (optional) Previous draft for resume
     """
@@ -376,6 +405,12 @@ def build_system_prompt(
         parts.append(
             f"Previous session started: {resume_meta.get('timestamp', 'unknown')}"
         )
+        parts.append("")
+
+    # Planning feedback (self-improvement section)
+    feedback = _get_planning_feedback(paths)
+    if feedback:
+        parts.append(feedback)
         parts.append("")
 
     return "\n".join(parts)
