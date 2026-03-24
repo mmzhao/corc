@@ -6,6 +6,7 @@ assembles into a single context document for injection.
 Same task + same files on disk = same context output.
 """
 
+import ast
 import json
 import re
 import warnings
@@ -57,6 +58,91 @@ def _load_blacklist(project_root: Path) -> str | None:
     return None
 
 
+def _extract_python_symbols(content: str, symbols: list[str]) -> str:
+    """Extract top-level Python symbols (functions/classes) plus the import block.
+
+    Uses ``ast.parse`` to find top-level ``FunctionDef``, ``AsyncFunctionDef``,
+    and ``ClassDef`` nodes matching the requested *symbols*.  Each extracted
+    symbol includes its decorators.
+
+    The **import block** (module docstring if it is the very first statement,
+    plus all contiguous ``import`` / ``from … import`` statements at the top
+    of the file) is always prepended.
+
+    If *any* requested symbol is not found the function emits a
+    ``warnings.warn`` for each missing name and returns the **full file
+    content** as a fallback so the caller never silently drops information.
+
+    If the file cannot be parsed (``SyntaxError``) the full content is
+    returned with a warning.
+    """
+    try:
+        tree = ast.parse(content)
+    except SyntaxError as exc:
+        warnings.warn(
+            f"Failed to parse Python source for symbol extraction: {exc}",
+            stacklevel=3,
+        )
+        return content
+
+    lines = content.splitlines(keepends=True)
+
+    # --- import block ---------------------------------------------------
+    # Everything from line 1 up to (but not including) the first top-level
+    # statement that is NOT an import, importfrom, or a module-docstring
+    # (a lone Expr(Constant(str)) as the very first statement).
+    import_end = 0  # exclusive, 0-based line index
+    for i, node in enumerate(tree.body):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            import_end = node.end_lineno  # 1-based → use directly as exclusive
+        elif (
+            i == 0
+            and isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            # Module docstring – include it in the import block
+            import_end = node.end_lineno
+        else:
+            break
+
+    import_block = "".join(lines[:import_end]).rstrip("\n")
+
+    # --- find requested symbols -----------------------------------------
+    symbol_map: dict[str, ast.AST] = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            symbol_map[node.name] = node
+
+    missing = [s for s in symbols if s not in symbol_map]
+    if missing:
+        for name in missing:
+            warnings.warn(
+                f"Symbol '{name}' not found in source — falling back to full file",
+                stacklevel=3,
+            )
+        return content
+
+    # --- extract line ranges for each symbol ----------------------------
+    extracted_parts: list[str] = []
+    if import_block:
+        extracted_parts.append(import_block)
+
+    for sym_name in symbols:
+        node = symbol_map[sym_name]
+        # Start line includes decorators if present
+        start_line = node.lineno  # 1-based
+        if node.decorator_list:
+            start_line = node.decorator_list[0].lineno
+        end_line = node.end_lineno  # 1-based, inclusive
+
+        # Convert to 0-based slicing
+        symbol_text = "".join(lines[start_line - 1 : end_line]).rstrip("\n")
+        extracted_parts.append(symbol_text)
+
+    return "\n\n".join(extracted_parts)
+
+
 def assemble_context(
     task: dict,
     project_root: Path,
@@ -106,7 +192,18 @@ def assemble_context(
     for ref in bundle:
         ref_str = str(ref)
         section = None
-        if "#" in ref_str:
+        symbols: list[str] | None = None
+
+        # Parse :: symbol extraction syntax (before # section syntax)
+        if "::" in ref_str:
+            ref_str, symbols_str = ref_str.split("::", 1)
+            symbols = [s.strip() for s in symbols_str.split(",") if s.strip()]
+            if not ref_str.endswith(".py"):
+                raise ValueError(
+                    f"Symbol extraction (::) is only supported for Python files, "
+                    f"got: {ref}"
+                )
+        elif "#" in ref_str:
             ref_str, section = ref_str.rsplit("#", 1)
 
         file_path = project_root / ref_str
@@ -116,9 +213,17 @@ def assemble_context(
             parts.append("</file>\n")
             continue
 
+        if file_path.is_dir():
+            parts.append(f'<file path="{ref}">')
+            parts.append(f"[WARNING: Path is a directory, not a file: {file_path}]")
+            parts.append("</file>\n")
+            continue
+
         content = file_path.read_text()
 
-        if section:
+        if symbols:
+            content = _extract_python_symbols(content, symbols)
+        elif section:
             content = _extract_section(content, section)
 
         parts.append(f'<file path="{ref}">')
@@ -322,7 +427,9 @@ def validate_context_bundle_paths(
     for ref in context_bundle:
         ref_str = str(ref)
         file_part = ref_str
-        if "#" in ref_str:
+        if "::" in ref_str:
+            file_part = ref_str.split("::", 1)[0]
+        elif "#" in ref_str:
             file_part = ref_str.rsplit("#", 1)[0]
 
         full_path = project_root / file_part
@@ -358,8 +465,10 @@ def record_context_mtimes(
     mtimes: dict[str, float] = {}
     for ref in context_bundle:
         ref_str = str(ref)
-        # Strip section fragment (e.g. "spec.md#design" → "spec.md")
-        if "#" in ref_str:
+        # Strip symbol or section fragment
+        if "::" in ref_str:
+            ref_str = ref_str.split("::", 1)[0]
+        elif "#" in ref_str:
             ref_str = ref_str.rsplit("#", 1)[0]
 
         file_path = project_root / ref_str

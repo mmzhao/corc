@@ -3,9 +3,12 @@
 import warnings
 from pathlib import Path
 
+import pytest
+
 from corc.context import (
     ContextResult,
     assemble_context,
+    _extract_python_symbols,
     _extract_section,
     _load_blacklist,
     _normalize_slug,
@@ -414,3 +417,208 @@ def test_context_size_grows_with_content(tmp_path):
     assert (
         ctx_big.size_info["estimated_tokens"] > ctx_empty.size_info["estimated_tokens"]
     )
+
+
+# ---------------------------------------------------------------------------
+# Python symbol extraction tests (:: syntax)
+# ---------------------------------------------------------------------------
+
+SAMPLE_PY_SOURCE = '''\
+"""Module docstring."""
+
+import os
+import sys
+from pathlib import Path
+
+
+def alpha():
+    """First function."""
+    return 1
+
+
+def beta(x, y):
+    """Second function."""
+    return x + y
+
+
+class Gamma:
+    """A class."""
+
+    def method(self):
+        pass
+
+
+def delta():
+    return "last"
+'''
+
+
+def test_extract_single_function():
+    """Extract a single top-level function."""
+    result = _extract_python_symbols(SAMPLE_PY_SOURCE, ["alpha"])
+    assert "def alpha():" in result
+    assert "return 1" in result
+    # Should not contain other symbols
+    assert "def beta" not in result
+    assert "class Gamma" not in result
+
+
+def test_extract_multiple_symbols():
+    """Extract multiple comma-separated symbols."""
+    result = _extract_python_symbols(SAMPLE_PY_SOURCE, ["alpha", "delta"])
+    assert "def alpha():" in result
+    assert "def delta():" in result
+    assert "def beta" not in result
+
+
+def test_extract_class():
+    """Extract a top-level class."""
+    result = _extract_python_symbols(SAMPLE_PY_SOURCE, ["Gamma"])
+    assert "class Gamma:" in result
+    assert "def method(self):" in result
+    assert "def alpha" not in result
+
+
+def test_import_block_included():
+    """The import block (with module docstring) is always prepended."""
+    result = _extract_python_symbols(SAMPLE_PY_SOURCE, ["delta"])
+    assert '"""Module docstring."""' in result
+    assert "import os" in result
+    assert "import sys" in result
+    assert "from pathlib import Path" in result
+
+
+def test_missing_symbol_warns_and_falls_back():
+    """Missing symbol emits warning and returns full file content."""
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        result = _extract_python_symbols(SAMPLE_PY_SOURCE, ["nonexistent"])
+        assert len(w) == 1
+        assert "nonexistent" in str(w[0].message)
+        assert "not found" in str(w[0].message)
+    # Full content returned as fallback
+    assert "def alpha" in result
+    assert "def beta" in result
+    assert "class Gamma" in result
+
+
+def test_partial_missing_symbol_falls_back():
+    """If one of several requested symbols is missing, fall back to full file."""
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        result = _extract_python_symbols(SAMPLE_PY_SOURCE, ["alpha", "nonexistent"])
+        assert len(w) == 1
+    # Full file returned
+    assert "def beta" in result
+    assert "class Gamma" in result
+
+
+def test_extract_with_decorators():
+    """Decorators are included in the extraction."""
+    source = """\
+import os
+
+
+@some_decorator
+def decorated():
+    pass
+
+
+@first
+@second
+def multi_decorated():
+    pass
+"""
+    result = _extract_python_symbols(source, ["decorated"])
+    assert "@some_decorator" in result
+    assert "def decorated():" in result
+    assert "def multi_decorated" not in result
+
+    result2 = _extract_python_symbols(source, ["multi_decorated"])
+    assert "@first" in result2
+    assert "@second" in result2
+    assert "def multi_decorated():" in result2
+
+
+def test_no_import_block():
+    """Files without imports still work — just the symbols are returned."""
+    source = """\
+def only_func():
+    return 42
+"""
+    result = _extract_python_symbols(source, ["only_func"])
+    assert "def only_func():" in result
+    assert "return 42" in result
+
+
+# ---------------------------------------------------------------------------
+# assemble_context integration tests for :: syntax
+# ---------------------------------------------------------------------------
+
+
+def test_assemble_context_symbol_extraction(tmp_path):
+    """assemble_context with :: extracts only requested symbols."""
+    (tmp_path / "mod.py").write_text(SAMPLE_PY_SOURCE)
+    task = {
+        "name": "test",
+        "done_when": "done",
+        "context_bundle": ["mod.py::alpha"],
+    }
+    ctx = assemble_context(task, tmp_path)
+    assert "def alpha():" in ctx
+    assert "def beta" not in ctx
+    assert "import os" in ctx
+
+
+def test_assemble_context_multiple_symbols(tmp_path):
+    """assemble_context with :: and comma-separated symbols."""
+    (tmp_path / "mod.py").write_text(SAMPLE_PY_SOURCE)
+    task = {
+        "name": "test",
+        "done_when": "done",
+        "context_bundle": ["mod.py::alpha,Gamma"],
+    }
+    ctx = assemble_context(task, tmp_path)
+    assert "def alpha():" in ctx
+    assert "class Gamma:" in ctx
+    assert "def beta" not in ctx
+
+
+def test_assemble_context_missing_symbol_fallback(tmp_path):
+    """assemble_context falls back to full file when symbol is missing."""
+    (tmp_path / "mod.py").write_text(SAMPLE_PY_SOURCE)
+    task = {
+        "name": "test",
+        "done_when": "done",
+        "context_bundle": ["mod.py::nonexistent"],
+    }
+    with warnings.catch_warnings(record=True):
+        warnings.simplefilter("always")
+        ctx = assemble_context(task, tmp_path)
+    # Full file included as fallback
+    assert "def alpha" in ctx
+    assert "def beta" in ctx
+    assert "class Gamma" in ctx
+
+
+def test_assemble_context_non_python_raises(tmp_path):
+    """:: syntax on non-Python files raises ValueError."""
+    (tmp_path / "readme.md").write_text("# Hello")
+    task = {
+        "name": "test",
+        "done_when": "done",
+        "context_bundle": ["readme.md::something"],
+    }
+    with pytest.raises(ValueError, match="only supported for Python"):
+        assemble_context(task, tmp_path)
+
+
+def test_assemble_context_missing_py_file_with_symbols(tmp_path):
+    """:: syntax on a missing .py file produces a file-not-found warning."""
+    task = {
+        "name": "test",
+        "done_when": "done",
+        "context_bundle": ["missing.py::foo"],
+    }
+    ctx = assemble_context(task, tmp_path)
+    assert "WARNING: File not found" in ctx
