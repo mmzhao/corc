@@ -204,9 +204,10 @@ class Daemon:
             else:
                 ready = get_ready_tasks(self.state, self.parallel)
 
-            # 2. Executor: dispatch ready tasks
+            # 2. Executor: dispatch ready tasks (skip already in-flight)
             for task in ready:
-                self.executor.dispatch(task)
+                if not self.executor.is_in_flight(task["id"]):
+                    self.executor.dispatch(task)
 
         # 3a. Chaos monkey: randomly kill agents / corrupt state
         self._chaos_tick()
