@@ -181,16 +181,20 @@ def get_daemon_status(
     return result
 
 
-def build_daemon_status_header(daemon_status: dict) -> Text:
+def build_daemon_status_header(
+    daemon_status: dict, session_cost_usd: float | None = None
+) -> Text:
     """Build a Rich Text object showing daemon status for the TUI header.
 
     Renders a single line with:
       - Green ``● RUNNING`` with uptime and slot usage when running
       - Yellow ``● PAUSED`` with reason when paused
       - Red ``● STOPPED`` when daemon is not running
+      - Session cost total when available
 
     Args:
         daemon_status: Dict from :func:`get_daemon_status`.
+        session_cost_usd: Running session cost total (optional).
 
     Returns:
         A Rich Text object suitable for inclusion in a Panel or Layout.
@@ -227,6 +231,9 @@ def build_daemon_status_header(daemon_status: dict) -> Text:
         text.append("STOPPED", style="bold red")
         text.append("  — daemon is not running", style="red")
 
+    if session_cost_usd is not None and session_cost_usd > 0:
+        text.append(f"  💰 ${session_cost_usd:.2f}", style="bold green")
+
     return text
 
 
@@ -256,7 +263,7 @@ EVENT_STYLES = {
 PANEL_NAMES = ("active_plan", "streaming", "events")
 
 # Border style applied to the focused (active) panel
-FOCUSED_BORDER_STYLE = "bold bright_white"
+FOCUSED_BORDER_STYLE = "bold bright_cyan"
 
 # Default border styles for each panel when not focused
 _DEFAULT_BORDER_STYLES = {
@@ -984,10 +991,17 @@ def build_event_panel(
             border_style=border,
         )
 
+    # Filter out assistant_message spam — these are shown in the streaming
+    # detail panel instead.  The events panel should only show structural
+    # events (task lifecycle, cost, dispatches).
+    _EVENTS_PANEL_SKIP = frozenset({"assistant_message"})
+
     lines: list[Text] = []
     for e in display_events:
-        ts = e.get("timestamp", "")[:19].replace("T", " ")
         etype = e.get("event_type", "unknown")
+        if etype in _EVENTS_PANEL_SKIP:
+            continue
+        ts = e.get("timestamp", "")[:19].replace("T", " ")
         tid = e.get("task_id", "")[:8] if e.get("task_id") else ""
         style = EVENT_STYLES.get(etype, "white")
 
@@ -1023,15 +1037,6 @@ def build_event_panel(
         if extra:
             line.append(f"  {extra}", style="dim")
         lines.append(line)
-
-        # Show full assistant message content on subsequent lines
-        # (verbose output -- no truncation)
-        if e.get("content") and etype == "assistant_message":
-            for content_line in e["content"].split("\n"):
-                detail = Text()
-                detail.append("                           ", style="dim")
-                detail.append(content_line, style="blue dim")
-                lines.append(detail)
 
     # Session cost total (computed from ALL events, not just displayed ones)
     session_total = _format_session_cost_total(events)
@@ -1225,7 +1230,16 @@ def build_active_dashboard(
 
     # Wrap with daemon status header if provided
     if daemon_status is not None:
-        header_content = build_daemon_status_header(daemon_status)
+        # Compute session cost from events
+        session_cost = (
+            sum(
+                float(e.get("cost_usd", 0))
+                for e in events
+                if e.get("event_type") == "task_cost"
+            )
+            or None
+        )
+        header_content = build_daemon_status_header(daemon_status, session_cost)
         header_panel = Panel(
             header_content,
             title="[bold] Daemon [/bold]",
