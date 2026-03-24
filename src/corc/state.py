@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     max_retries INTEGER DEFAULT 3,
     merge_status TEXT,
     priority INTEGER DEFAULT 100,
-    task_type TEXT DEFAULT 'implementation'
+    task_type TEXT DEFAULT 'implementation',
+    target_repo TEXT
 );
 
 CREATE TABLE IF NOT EXISTS agents (
@@ -113,6 +114,7 @@ class WorkState:
             ("merge_status", "TEXT"),
             ("priority", "INTEGER DEFAULT 100"),
             ("task_type", "TEXT DEFAULT 'implementation'"),
+            ("target_repo", "TEXT"),
         ]
         for col_name, col_type in migrations:
             if col_name not in existing:
@@ -143,8 +145,8 @@ class WorkState:
             self.conn.execute(
                 """INSERT OR REPLACE INTO tasks(id, name, description, status, role, depends_on,
                    done_when, checklist, context_bundle, context_bundle_mtimes,
-                   created, updated, attempt_count, max_retries, priority, task_type)
-                   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   created, updated, attempt_count, max_retries, priority, task_type, target_repo)
+                   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     data["id"],
                     data["name"],
@@ -162,6 +164,7 @@ class WorkState:
                     data.get("max_retries", 3),
                     data.get("priority", 100),
                     data.get("task_type", "implementation"),
+                    data.get("target_repo"),
                 ),
             )
         elif t == "task_assigned":
@@ -232,6 +235,7 @@ class WorkState:
                 "merge_status",
                 "priority",
                 "task_type",
+                "target_repo",
             ):
                 if field in data:
                     val = data[field]

@@ -517,3 +517,77 @@ def test_task_updated_all_fields(state):
     assert task["attempt_count"] == 2
     assert task["max_retries"] == 5
     assert task["merge_status"] == "merged"
+
+
+def test_target_repo_on_task_created(state):
+    """task_created mutation should store target_repo."""
+    ml, ws = state
+    ml.append(
+        "task_created",
+        {
+            "id": "t1",
+            "name": "cross-repo task",
+            "done_when": "done",
+            "target_repo": "fdp",
+        },
+        reason="test",
+    )
+    ws.refresh()
+
+    task = ws.get_task("t1")
+    assert task is not None
+    assert task["target_repo"] == "fdp"
+
+
+def test_target_repo_default_none(state):
+    """Tasks without target_repo should have None."""
+    ml, ws = state
+    ml.append(
+        "task_created",
+        {"id": "t1", "name": "local task", "done_when": "done"},
+        reason="test",
+    )
+    ws.refresh()
+
+    task = ws.get_task("t1")
+    assert task["target_repo"] is None
+
+
+def test_target_repo_via_task_updated(state):
+    """task_updated mutation should update target_repo."""
+    ml, ws = state
+    ml.append(
+        "task_created",
+        {"id": "t1", "name": "task", "done_when": "done"},
+        reason="test",
+    )
+    ws.refresh()
+
+    task = ws.get_task("t1")
+    assert task["target_repo"] is None
+
+    ml.append(
+        "task_updated",
+        {"target_repo": "fdp"},
+        reason="set target repo",
+        task_id="t1",
+    )
+    ws.refresh()
+
+    task = ws.get_task("t1")
+    assert task["target_repo"] == "fdp"
+
+
+def test_migration_adds_target_repo_column(tmp_path):
+    """Opening a database with old schema should add target_repo column."""
+    db_path = tmp_path / "state.db"
+    _create_old_schema_db(db_path)
+
+    old_columns = _get_column_names(db_path)
+    assert "target_repo" not in old_columns
+
+    ml = MutationLog(tmp_path / "mutations.jsonl")
+    WorkState(db_path, ml)
+
+    new_columns = _get_column_names(db_path)
+    assert "target_repo" in new_columns
