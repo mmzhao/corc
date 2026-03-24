@@ -290,6 +290,110 @@ def task_prioritize(task_id, priority):
     click.echo(f"Task {task_id} priority updated to {priority}.")
 
 
+@task.command("deprioritize")
+@click.argument("task_id")
+def task_deprioritize(task_id):
+    """Shelve a task: set priority to -1 and kill its agent process.
+
+    Deprioritized tasks are not dispatched by the daemon until
+    explicitly re-enabled with 'corc task reprioritize'.
+
+    If the task is currently running, its agent process is killed
+    and the task is reset to pending with priority -1.
+    """
+    import os as _os
+    import signal as _signal
+
+    _, ml, ws, al, _, _ = _get_all()
+    t = ws.get_task(task_id)
+    if not t:
+        click.echo(f"Task {task_id} not found.")
+        sys.exit(1)
+
+    if t.get("priority") == -1:
+        click.echo(f"Task {task_id} is already deprioritized.")
+        return
+
+    old_priority = t.get("priority", 100)
+    was_running = t["status"] == "running"
+
+    # Kill agent process if running
+    if was_running:
+        agents = ws.get_agents_for_task(task_id)
+        killed = False
+        for agent in agents:
+            pid = agent.get("pid")
+            if pid:
+                try:
+                    _os.kill(pid, _signal.SIGTERM)
+                    killed = True
+                    click.echo(f"Killed agent process (PID {pid}).")
+                except (ProcessLookupError, PermissionError):
+                    pass  # Process already dead
+
+        if not killed:
+            click.echo("Warning: no agent process found to kill.", err=True)
+
+    # Set priority to -1 and status to pending (shelved)
+    update_data = {"priority": -1, "status": "pending"}
+    ml.append(
+        "task_updated",
+        update_data,
+        reason=f"Deprioritized (shelved) via CLI; was priority {old_priority}, status {t['status']}",
+        task_id=task_id,
+    )
+    al.log(
+        "task_deprioritized",
+        task_id=task_id,
+        old_priority=old_priority,
+        was_running=was_running,
+    )
+    click.echo(f"Task {task_id} deprioritized (priority -1, status pending).")
+    click.echo("Use 'corc task reprioritize' to re-enable.")
+
+
+@task.command("reprioritize")
+@click.argument("task_id")
+@click.option(
+    "--priority",
+    default=100,
+    type=int,
+    help="New priority value (default: 100)",
+)
+def task_reprioritize(task_id, priority):
+    """Re-enable a deprioritized task so the daemon can dispatch it.
+
+    Restores the task to a dispatchable priority. By default sets
+    priority to 100; use --priority to set a specific value.
+    """
+    _, ml, ws, al, _, _ = _get_all()
+    t = ws.get_task(task_id)
+    if not t:
+        click.echo(f"Task {task_id} not found.")
+        sys.exit(1)
+
+    if t.get("priority") != -1:
+        click.echo(
+            f"Task {task_id} is not deprioritized (current priority: {t.get('priority', 100)})."
+        )
+        return
+
+    if priority < 0:
+        click.echo("Error: priority must be >= 0.", err=True)
+        sys.exit(1)
+
+    ml.append(
+        "task_updated",
+        {"priority": priority},
+        reason=f"Reprioritized to {priority} via CLI (was deprioritized)",
+        task_id=task_id,
+    )
+    al.log("task_reprioritized", task_id=task_id, priority=priority)
+    click.echo(
+        f"Task {task_id} reprioritized to {priority}. Daemon will dispatch when ready."
+    )
+
+
 @task.command("approve")
 @click.argument("task_id", required=False, default=None)
 @click.option("--all", "approve_all", is_flag=True, help="Approve all draft tasks")
