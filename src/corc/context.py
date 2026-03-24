@@ -116,6 +116,12 @@ def assemble_context(
             parts.append("</file>\n")
             continue
 
+        if file_path.is_dir():
+            parts.append(f'<file path="{ref}">')
+            parts.append(f"[WARNING: Path is a directory, not a file: {file_path}]")
+            parts.append("</file>\n")
+            continue
+
         content = file_path.read_text()
 
         if section:
