@@ -9,7 +9,7 @@ Usage:
 
     cfg = load_config()              # loads from .corc/config.yaml (or defaults)
     cfg = load_config(root)          # loads from <root>/.corc/config.yaml
-    cfg.get("dispatch.agent_timeout_s")   # => 1800
+    cfg.get("dispatch.agent_timeout_s")   # => 3600
     cfg.get("retry.default_retries")      # => 2
 """
 
@@ -62,7 +62,7 @@ DEFAULTS: dict[str, Any] = {
     # --- Dispatch / agent constraints ---
     "dispatch": {
         "provider": "claude-code",
-        "agent_timeout_s": 1800,
+        "agent_timeout_s": 3600,
         "default_allowed_tools": ["Read", "Edit", "Write", "Bash", "Grep", "Glob"],
     },
     # --- Daemon ---
@@ -161,7 +161,7 @@ class CorcConfig:
     """Centralized configuration loaded from .corc/config.yaml.
 
     Provides dot-notation access to nested keys via get():
-        cfg.get("dispatch.agent_timeout_s")  => 1800
+        cfg.get("dispatch.agent_timeout_s")  => 3600
         cfg.get("retry.default_retries")     => 2
 
     Falls back to DEFAULTS for any missing key, so the system works

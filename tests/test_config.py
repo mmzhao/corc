@@ -76,7 +76,7 @@ class TestDefaults:
         """load_config returns defaults when no config.yaml exists."""
         (tmp_project / ".corc" / "config.yaml").unlink(missing_ok=True)
         cfg = load_config(tmp_project)
-        assert cfg.get("dispatch.agent_timeout_s") == 1800
+        assert cfg.get("dispatch.agent_timeout_s") == 3600
         assert cfg.get("retry.default_retries") == 2
         assert cfg.get("retry.reduced_retries") == 1
         assert cfg.get("retry.increased_retries") == 3
@@ -103,19 +103,19 @@ class TestDefaults:
         config_path = tmp_project / ".corc" / "config.yaml"
         config_path.write_text("")
         cfg = load_config(tmp_project)
-        assert cfg.get("dispatch.agent_timeout_s") == 1800
+        assert cfg.get("dispatch.agent_timeout_s") == 3600
 
     def test_defaults_via_constructor(self):
         """CorcConfig() with no data returns pure defaults."""
         cfg = CorcConfig()
-        assert cfg.get("dispatch.agent_timeout_s") == 1800
+        assert cfg.get("dispatch.agent_timeout_s") == 3600
         assert cfg.get("retry.default_retries") == 2
 
     def test_system_works_without_config_file(self, tmp_path):
         """System works even when no .corc directory exists."""
         cfg = load_config(tmp_path)
         # Should still return defaults
-        assert cfg.get("dispatch.agent_timeout_s") == 1800
+        assert cfg.get("dispatch.agent_timeout_s") == 3600
         assert cfg.get("retry.default_retries") == 2
 
 
@@ -177,7 +177,7 @@ class TestGetSet:
 
     def test_get_dotted_key(self):
         cfg = CorcConfig()
-        assert cfg.get("dispatch.agent_timeout_s") == 1800
+        assert cfg.get("dispatch.agent_timeout_s") == 3600
 
     def test_get_top_level_section(self):
         cfg = CorcConfig()
@@ -350,7 +350,7 @@ class TestAsDict:
         d = cfg.as_dict()
         d["dispatch"]["agent_timeout_s"] = 99999
         # Original should be unchanged
-        assert cfg.get("dispatch.agent_timeout_s") == 1800
+        assert cfg.get("dispatch.agent_timeout_s") == 3600
 
     def test_as_dict_contains_all_sections(self):
         cfg = CorcConfig()
@@ -513,7 +513,7 @@ class TestConfigCLI:
             cli, ["config", "show", "--key", "dispatch.agent_timeout_s"]
         )
         assert result.exit_code == 0
-        assert "1800" in result.output
+        assert "3600" in result.output
 
     def test_config_show_section(self, tmp_project, monkeypatch):
         from click.testing import CliRunner
@@ -590,14 +590,14 @@ class TestEdgeCases:
         config_path.write_text("this: is: not: valid: [yaml")
         cfg = load_config(tmp_project)
         # Should still get defaults
-        assert cfg.get("dispatch.agent_timeout_s") == 1800
+        assert cfg.get("dispatch.agent_timeout_s") == 3600
 
     def test_non_dict_yaml(self, tmp_project):
         """Non-dict YAML (e.g. a string) falls back to defaults."""
         config_path = tmp_project / ".corc" / "config.yaml"
         config_path.write_text('"just a string"')
         cfg = load_config(tmp_project)
-        assert cfg.get("dispatch.agent_timeout_s") == 1800
+        assert cfg.get("dispatch.agent_timeout_s") == 3600
 
     def test_notifications_section_defaults(self):
         """Notifications section has full SPEC defaults."""
