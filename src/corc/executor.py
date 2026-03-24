@@ -83,6 +83,37 @@ def _resolve_repo_root(project_root: Path, task: dict) -> Path:
     return project_root
 
 
+def _get_default_branch(repo_root: Path) -> str:
+    """Detect the default branch (main or master) for a repo."""
+    try:
+        result = subprocess.run(
+            ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=str(repo_root),
+            timeout=5,
+        )
+        if result.returncode == 0:
+            # e.g. "refs/remotes/origin/master" -> "master"
+            return result.stdout.strip().rsplit("/", 1)[-1]
+    except (subprocess.SubprocessError, OSError):
+        pass
+    # Fallback: check if master exists
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "master"],
+            capture_output=True,
+            text=True,
+            cwd=str(repo_root),
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return "master"
+    except (subprocess.SubprocessError, OSError):
+        pass
+    return "main"
+
+
 @dataclass
 class CompletedTask:
     """A task that has finished executing, with its result."""
@@ -446,6 +477,13 @@ class Executor:
                         + cache_read * 1.50 / 1_000_000
                     )
 
+                # Skip cost event if there's no meaningful cost or token data
+                has_tokens = (
+                    token_state["input_tokens"] > 0 or token_state["output_tokens"] > 0
+                )
+                if not total_cost and not has_tokens:
+                    return
+
                 self.audit_log.log(
                     "task_cost",
                     task_id=task_id,
@@ -618,10 +656,11 @@ class Executor:
             )
             return None
 
-        # Check if branch has commits ahead of main before pushing
+        # Check if branch has commits ahead of the default branch before pushing
+        default_branch = _get_default_branch(effective_root)
         try:
             diff_check = subprocess.run(
-                ["git", "log", "--oneline", f"main..{branch_name}"],
+                ["git", "log", "--oneline", f"{default_branch}..{branch_name}"],
                 capture_output=True,
                 text=True,
                 cwd=str(effective_root),
@@ -650,8 +689,10 @@ class Executor:
             )
             return None
 
-        # Create the PR
-        pr_info, pr_error = create_pr(effective_root, branch_name, task)
+        # Create the PR against the detected default branch
+        pr_info, pr_error = create_pr(
+            effective_root, branch_name, task, base_branch=default_branch
+        )
         if pr_info:
             self.audit_log.log(
                 "pr_created",
