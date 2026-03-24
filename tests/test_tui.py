@@ -37,6 +37,7 @@ from corc.tui import (
     build_active_dashboard,
     EVENT_STYLES,
     _elapsed_since,
+    _format_attempt_count,
     _parse_stream_content,
     _format_tool_call,
     _truncate_reasoning,
@@ -2505,3 +2506,304 @@ class TestQueryAPIDuplicateAgents:
         api = self._make_query_api(tasks, agents)
         running = api.get_running_tasks_with_agents()
         assert len(running[0]["agents"]) == 1
+
+
+# ── _format_attempt_count ────────────────────────────────────────────────
+
+
+class TestFormatAttemptCount:
+    """Tests for _format_attempt_count — retry attempt display formatter."""
+
+    def test_first_attempt_returns_none(self):
+        """First attempt (attempt_count=0) shows no retry indicator."""
+        task = _make_task("t1", "first-try", attempt_count=0, max_retries=3)
+        assert _format_attempt_count(task) is None
+
+    def test_missing_attempt_count_returns_none(self):
+        """Tasks without attempt_count field show no retry indicator."""
+        task = _make_task("t1", "no-field")
+        assert _format_attempt_count(task) is None
+
+    def test_second_attempt(self):
+        """After first failure (attempt_count=1), shows 'attempt 2/4'."""
+        task = _make_task("t1", "retry", attempt_count=1, max_retries=3)
+        result = _format_attempt_count(task)
+        assert result == "attempt 2/4"
+
+    def test_third_attempt(self):
+        """After two failures (attempt_count=2), shows 'attempt 3/4'."""
+        task = _make_task("t1", "retry", attempt_count=2, max_retries=3)
+        result = _format_attempt_count(task)
+        assert result == "attempt 3/4"
+
+    def test_last_attempt(self):
+        """On last retry (attempt_count=max_retries), shows final attempt."""
+        task = _make_task("t1", "last-try", attempt_count=3, max_retries=3)
+        result = _format_attempt_count(task)
+        assert result == "attempt 4/4"
+
+    def test_custom_max_retries(self):
+        """Respects custom max_retries value."""
+        task = _make_task("t1", "custom", attempt_count=1, max_retries=5)
+        result = _format_attempt_count(task)
+        assert result == "attempt 2/6"
+
+    def test_default_max_retries(self):
+        """Uses default max_retries=3 when not specified."""
+        task = _make_task("t1", "default", attempt_count=1)
+        result = _format_attempt_count(task)
+        assert result == "attempt 2/4"
+
+    def test_zero_max_retries(self):
+        """With max_retries=0, only one attempt allowed."""
+        task = _make_task("t1", "no-retry", attempt_count=1, max_retries=0)
+        result = _format_attempt_count(task)
+        # attempt_count=1 means one failure happened; total=1
+        assert result == "attempt 2/1"
+
+    def test_negative_attempt_count_returns_none(self):
+        """Negative attempt_count is treated as no retries."""
+        task = _make_task("t1", "negative", attempt_count=-1, max_retries=3)
+        assert _format_attempt_count(task) is None
+
+    def test_non_integer_attempt_count_returns_none(self):
+        """Non-integer attempt_count returns None."""
+        task = _make_task("t1", "bad-type", attempt_count="2", max_retries=3)
+        assert _format_attempt_count(task) is None
+
+    def test_non_integer_max_retries_defaults(self):
+        """Non-integer max_retries falls back to default 3."""
+        task = _make_task("t1", "bad-max", attempt_count=1, max_retries="bad")
+        result = _format_attempt_count(task)
+        assert result == "attempt 2/4"
+
+
+# ── Attempt count in Active Plan Panel ───────────────────────────────────
+
+
+class TestActivePlanPanelAttemptCount:
+    """Test attempt count display in the DAG status / active plan panel."""
+
+    def test_running_task_retry_shows_attempt(self):
+        """Running task on retry shows attempt count."""
+        running = [
+            _make_task(
+                "t1",
+                "retry-task",
+                status="running",
+                attempt_count=1,
+                max_retries=3,
+            )
+        ]
+        panel = build_active_plan_panel(running, [], [], [])
+        text = _render_to_plain(panel)
+        assert "attempt 2/4" in text
+
+    def test_running_task_first_attempt_no_indicator(self):
+        """Running task on first attempt shows no retry indicator."""
+        running = [
+            _make_task(
+                "t1",
+                "first-run",
+                status="running",
+                attempt_count=0,
+                max_retries=3,
+            )
+        ]
+        panel = build_active_plan_panel(running, [], [], [])
+        text = _render_to_plain(panel)
+        assert "attempt " not in text
+
+    def test_running_task_no_attempt_count_field(self):
+        """Running task without attempt_count field shows no retry indicator."""
+        running = [_make_task("t1", "no-retry-info", status="running")]
+        panel = build_active_plan_panel(running, [], [], [])
+        text = _render_to_plain(panel)
+        assert "attempt " not in text
+
+    def test_failed_task_shows_attempt_in_other(self):
+        """Failed task in OTHER section shows attempt count."""
+        other = [
+            _make_task(
+                "t1",
+                "failed-task",
+                status="failed",
+                attempt_count=2,
+                max_retries=3,
+            )
+        ]
+        panel = build_active_plan_panel([], [], [], [], other_active=other)
+        text = _render_to_plain(panel)
+        assert "attempt 3/4" in text
+
+    def test_failed_task_first_attempt_no_indicator(self):
+        """Failed task on first attempt shows no retry indicator."""
+        other = [
+            _make_task(
+                "t1",
+                "first-fail",
+                status="failed",
+                attempt_count=0,
+                max_retries=3,
+            )
+        ]
+        panel = build_active_plan_panel([], [], [], [], other_active=other)
+        text = _render_to_plain(panel)
+        assert "attempt " not in text
+
+    def test_escalated_task_shows_attempt(self):
+        """Escalated task shows attempt count."""
+        other = [
+            _make_task(
+                "t1",
+                "escalated-task",
+                status="escalated",
+                attempt_count=3,
+                max_retries=3,
+            )
+        ]
+        panel = build_active_plan_panel([], [], [], [], other_active=other)
+        text = _render_to_plain(panel)
+        assert "attempt 4/4" in text
+
+    def test_pending_merge_no_attempt_shown(self):
+        """Non-failed/non-escalated OTHER tasks don't show attempt count."""
+        other = [
+            _make_task(
+                "t1",
+                "merge-task",
+                status="pending_merge",
+                attempt_count=1,
+                max_retries=3,
+            )
+        ]
+        panel = build_active_plan_panel([], [], [], [], other_active=other)
+        text = _render_to_plain(panel)
+        assert "attempt " not in text
+
+    def test_multiple_running_tasks_with_different_attempts(self):
+        """Multiple running tasks show their own attempt counts."""
+        running = [
+            _make_task(
+                "t1",
+                "first-try-task",
+                status="running",
+                attempt_count=0,
+                max_retries=3,
+            ),
+            _make_task(
+                "t2",
+                "retry-task",
+                status="running",
+                attempt_count=2,
+                max_retries=3,
+            ),
+        ]
+        panel = build_active_plan_panel(running, [], [], [])
+        text = _render_to_plain(panel)
+        # Only the retry task should show attempt info
+        assert "attempt 3/4" in text
+        # "first-try-task" should not have attempt info
+        # Find the line with "first-try-task" and check it has no "attempt"
+        lines = text.split("\n")
+        for line in lines:
+            if "first-try-task" in line:
+                assert "attempt" not in line
+
+
+# ── Attempt count in Streaming Detail Panel ──────────────────────────────
+
+
+class TestStreamingDetailPanelAttemptCount:
+    """Test attempt count display in the agent detail / streaming panel."""
+
+    def test_retry_task_shows_attempt_in_header(self):
+        """Running retry task shows attempt count in streaming panel header."""
+        running = [
+            _make_task(
+                "t1",
+                "streaming-retry",
+                status="running",
+                attempt_count=1,
+                max_retries=3,
+            )
+        ]
+        panel = build_streaming_detail_panel(running, {})
+        text = _render_to_plain(panel)
+        assert "attempt 2/4" in text
+
+    def test_first_attempt_no_indicator_in_streaming(self):
+        """First attempt task shows no retry indicator in streaming panel."""
+        running = [
+            _make_task(
+                "t1",
+                "first-run-task",
+                status="running",
+                attempt_count=0,
+                max_retries=3,
+            )
+        ]
+        panel = build_streaming_detail_panel(running, {})
+        text = _render_to_plain(panel)
+        assert "attempt " not in text
+
+    def test_no_attempt_field_no_indicator_in_streaming(self):
+        """Task without attempt_count field shows no retry indicator."""
+        running = [_make_task("t1", "plain-task", status="running")]
+        panel = build_streaming_detail_panel(running, {})
+        text = _render_to_plain(panel)
+        assert "attempt " not in text
+
+    def test_retry_with_stream_events(self):
+        """Retry task with stream events shows both attempt count and events."""
+        running = [
+            _make_task(
+                "t1",
+                "retry-with-events",
+                status="running",
+                attempt_count=2,
+                max_retries=5,
+            )
+        ]
+        events = {
+            "t1": [
+                _make_stream_entry(
+                    "tool_use",
+                    {
+                        "type": "tool_use",
+                        "tool": {"name": "Read", "input": {"file_path": "/src/app.py"}},
+                    },
+                ),
+            ]
+        }
+        panel = build_streaming_detail_panel(running, events)
+        text = _render_to_plain(panel)
+        assert "attempt 3/6" in text
+        assert "/src/app.py" in text
+
+    def test_multiple_tasks_different_attempts_streaming(self):
+        """Multiple tasks in streaming panel show correct attempt counts."""
+        running = [
+            _make_task(
+                "t1",
+                "no-retry",
+                status="running",
+                attempt_count=0,
+                max_retries=3,
+            ),
+            _make_task(
+                "t2",
+                "on-retry",
+                status="running",
+                attempt_count=1,
+                max_retries=2,
+            ),
+        ]
+        panel = build_streaming_detail_panel(running, {})
+        text = _render_to_plain(panel)
+        # Only the retry task should show attempt
+        assert "attempt 2/3" in text
+        lines = text.split("\n")
+        for line in lines:
+            if "no-retry" in line:
+                assert "attempt" not in line
