@@ -136,6 +136,15 @@ class WorkState:
             )
             self.conn.commit()
 
+    def _task_is_completed(self, task_id: str | None) -> bool:
+        """Check if a task currently has 'completed' status in SQLite."""
+        if task_id is None:
+            return False
+        row = self.conn.execute(
+            "SELECT status FROM tasks WHERE id=?", (task_id,)
+        ).fetchone()
+        return row is not None and row["status"] == "completed"
+
     def _apply_mutation(self, entry: dict):
         t = entry["type"]
         data = entry["data"]
@@ -174,6 +183,9 @@ class WorkState:
                 (data["agent_id"], entry["ts"], task_id),
             )
         elif t == "task_started":
+            # Completed tasks are terminal — don't regress to running
+            if self._task_is_completed(task_id):
+                return
             self.conn.execute(
                 "UPDATE tasks SET status='running', updated=? WHERE id=?",
                 (entry["ts"], task_id),
@@ -194,6 +206,9 @@ class WorkState:
                 ),
             )
         elif t == "task_failed":
+            # Completed tasks are terminal — don't regress to failed
+            if self._task_is_completed(task_id):
+                return
             if data.get("infrastructure"):
                 # Infrastructure failure (daemon crash, SIGTERM) — do not
                 # increment attempt_count so it doesn't burn retry budget.
