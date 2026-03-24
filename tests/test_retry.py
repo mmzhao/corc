@@ -17,7 +17,12 @@ from corc.dispatch import AgentDispatcher, AgentResult, Constraints
 from corc.executor import Executor
 from corc.mutations import MutationLog
 from corc.processor import process_completed
-from corc.retry import RetryPolicy, create_escalation, get_retry_context, resolve_escalation
+from corc.retry import (
+    RetryPolicy,
+    create_escalation,
+    get_retry_context,
+    resolve_escalation,
+)
 from corc.sessions import SessionLogger
 from corc.state import WorkState
 
@@ -30,14 +35,23 @@ from corc.state import WorkState
 class FailNTimesDispatcher(AgentDispatcher):
     """Dispatcher that fails N times, then succeeds."""
 
-    def __init__(self, fail_count: int = 2, fail_output: str = "Error: something went wrong"):
+    def __init__(
+        self, fail_count: int = 2, fail_output: str = "Error: something went wrong"
+    ):
         self.fail_count = fail_count
         self.fail_output = fail_output
         self.call_count = 0
         self.dispatched: list[tuple[str, str]] = []
 
-    def dispatch(self, prompt: str, system_prompt: str, constraints: Constraints,
-                 pid_callback=None, event_callback=None, cwd=None) -> AgentResult:
+    def dispatch(
+        self,
+        prompt: str,
+        system_prompt: str,
+        constraints: Constraints,
+        pid_callback=None,
+        event_callback=None,
+        cwd=None,
+    ) -> AgentResult:
         self.call_count += 1
         self.dispatched.append((prompt, system_prompt))
         if self.call_count <= self.fail_count:
@@ -61,8 +75,15 @@ class AlwaysFailDispatcher(AgentDispatcher):
         self.call_count = 0
         self.dispatched: list[tuple[str, str]] = []
 
-    def dispatch(self, prompt: str, system_prompt: str, constraints: Constraints,
-                 pid_callback=None, event_callback=None, cwd=None) -> AgentResult:
+    def dispatch(
+        self,
+        prompt: str,
+        system_prompt: str,
+        constraints: Constraints,
+        pid_callback=None,
+        event_callback=None,
+        cwd=None,
+    ) -> AgentResult:
         self.call_count += 1
         self.dispatched.append((prompt, system_prompt))
         return AgentResult(
@@ -79,8 +100,15 @@ class TimeoutDispatcher(AgentDispatcher):
         self.call_count = 0
         self.dispatched: list[tuple[str, str]] = []
 
-    def dispatch(self, prompt: str, system_prompt: str, constraints: Constraints,
-                 pid_callback=None, event_callback=None, cwd=None) -> AgentResult:
+    def dispatch(
+        self,
+        prompt: str,
+        system_prompt: str,
+        constraints: Constraints,
+        pid_callback=None,
+        event_callback=None,
+        cwd=None,
+    ) -> AgentResult:
         self.call_count += 1
         self.dispatched.append((prompt, system_prompt))
         return AgentResult(
@@ -125,20 +153,31 @@ def session_logger(tmp_project):
     return SessionLogger(tmp_project / "data" / "sessions")
 
 
-def _create_task(mutation_log, task_id, name, done_when="do the thing",
-                 depends_on=None, role="implementer", max_retries=3):
+def _create_task(
+    mutation_log,
+    task_id,
+    name,
+    done_when="do the thing",
+    depends_on=None,
+    role="implementer",
+    max_retries=3,
+):
     """Helper to create a task via mutation log."""
-    mutation_log.append("task_created", {
-        "id": task_id,
-        "name": name,
-        "description": f"Test task: {name}",
-        "role": role,
-        "depends_on": depends_on or [],
-        "done_when": done_when,
-        "checklist": [],
-        "context_bundle": [],
-        "max_retries": max_retries,
-    }, reason="Test setup")
+    mutation_log.append(
+        "task_created",
+        {
+            "id": task_id,
+            "name": name,
+            "description": f"Test task: {name}",
+            "role": role,
+            "depends_on": depends_on or [],
+            "done_when": done_when,
+            "checklist": [],
+            "context_bundle": [],
+            "max_retries": max_retries,
+        },
+        reason="Test setup",
+    )
 
 
 # ===========================================================================
@@ -207,8 +246,12 @@ class TestRetryContext:
     def test_context_includes_previous_session(self, session_logger):
         """Retry context includes the previous attempt's session log."""
         # Simulate a failed first attempt
-        session_logger.log_dispatch("t1", 1, "Do the task", "You are an implementer", ["Read"], 3.0)
-        session_logger.log_output("t1", 1, "Error: file not found", exit_code=1, duration_s=5.0)
+        session_logger.log_dispatch(
+            "t1", 1, "Do the task", "You are an implementer", ["Read"], 3.0
+        )
+        session_logger.log_output(
+            "t1", 1, "Error: file not found", exit_code=1, duration_s=5.0
+        )
         session_logger.log_validation("t1", 1, False, "Agent exited with error")
 
         context = get_retry_context("t1", 2, session_logger)
@@ -281,8 +324,11 @@ class TestEscalation:
         task = work_state.get_task("t1")
 
         create_escalation(
-            task=task, attempt=3, error="error",
-            session_logger=session_logger, mutation_log=mutation_log,
+            task=task,
+            attempt=3,
+            error="error",
+            session_logger=session_logger,
+            mutation_log=mutation_log,
         )
 
         entries = mutation_log.read_all()
@@ -297,8 +343,11 @@ class TestEscalation:
         task = work_state.get_task("t1")
 
         esc = create_escalation(
-            task=task, attempt=3, error="persistent failure",
-            session_logger=session_logger, mutation_log=mutation_log,
+            task=task,
+            attempt=3,
+            error="persistent failure",
+            session_logger=session_logger,
+            mutation_log=mutation_log,
         )
 
         work_state.refresh()
@@ -315,11 +364,16 @@ class TestEscalation:
         task = work_state.get_task("t1")
 
         esc = create_escalation(
-            task=task, attempt=3, error="error",
-            session_logger=session_logger, mutation_log=mutation_log,
+            task=task,
+            attempt=3,
+            error="error",
+            session_logger=session_logger,
+            mutation_log=mutation_log,
         )
 
-        resolve_escalation(esc["escalation_id"], mutation_log, resolution="Fixed manually")
+        resolve_escalation(
+            esc["escalation_id"], mutation_log, resolution="Fixed manually"
+        )
 
         work_state.refresh()
         resolved = work_state.get_escalation(esc["escalation_id"])
@@ -333,12 +387,18 @@ class TestEscalation:
         work_state.refresh()
 
         esc1 = create_escalation(
-            task=work_state.get_task("t1"), attempt=3, error="err1",
-            session_logger=session_logger, mutation_log=mutation_log,
+            task=work_state.get_task("t1"),
+            attempt=3,
+            error="err1",
+            session_logger=session_logger,
+            mutation_log=mutation_log,
         )
         create_escalation(
-            task=work_state.get_task("t2"), attempt=3, error="err2",
-            session_logger=session_logger, mutation_log=mutation_log,
+            task=work_state.get_task("t2"),
+            attempt=3,
+            error="err2",
+            session_logger=session_logger,
+            mutation_log=mutation_log,
         )
 
         # Resolve one
@@ -359,25 +419,38 @@ class TestEscalation:
         task = work_state.get_task("t1")
 
         esc = create_escalation(
-            task=task, attempt=3, error="TIMEOUT: agent exceeded 1800s limit",
-            session_logger=session_logger, mutation_log=mutation_log,
+            task=task,
+            attempt=3,
+            error="TIMEOUT: agent exceeded 1800s limit",
+            session_logger=session_logger,
+            mutation_log=mutation_log,
         )
 
-        assert any("timeout" in a.lower() or "scope" in a.lower() for a in esc["suggested_actions"])
+        assert any(
+            "timeout" in a.lower() or "scope" in a.lower()
+            for a in esc["suggested_actions"]
+        )
 
-    def test_suggested_actions_validation(self, mutation_log, work_state, session_logger):
+    def test_suggested_actions_validation(
+        self, mutation_log, work_state, session_logger
+    ):
         """Suggested actions include validation-specific advice."""
         _create_task(mutation_log, "t1", "Task 1")
         work_state.refresh()
         task = work_state.get_task("t1")
 
         esc = create_escalation(
-            task=task, attempt=3, error="Validation failed: file_exists check",
-            session_logger=session_logger, mutation_log=mutation_log,
+            task=task,
+            attempt=3,
+            error="Validation failed: file_exists check",
+            session_logger=session_logger,
+            mutation_log=mutation_log,
         )
 
-        assert any("done_when" in a.lower() or "validation" in a.lower()
-                    for a in esc["suggested_actions"])
+        assert any(
+            "done_when" in a.lower() or "validation" in a.lower()
+            for a in esc["suggested_actions"]
+        )
 
 
 # ===========================================================================
@@ -403,8 +476,9 @@ class TestAttemptTracking:
 
         assert task["max_retries"] == 5
 
-    def test_attempt_count_incremented_on_failure(self, mutation_log, work_state,
-                                                    audit_log, session_logger, tmp_project):
+    def test_attempt_count_incremented_on_failure(
+        self, mutation_log, work_state, audit_log, session_logger, tmp_project
+    ):
         """Processor increments attempt_count when task fails."""
         _create_task(mutation_log, "t1", "Task 1")
         mutation_log.append("task_started", {"attempt": 1}, reason="test", task_id="t1")
@@ -413,9 +487,13 @@ class TestAttemptTracking:
 
         result = AgentResult(output="Error!", exit_code=1, duration_s=1.0)
         process_completed(
-            task=task, result=result, attempt=1,
-            mutation_log=mutation_log, state=work_state,
-            audit_log=audit_log, session_logger=session_logger,
+            task=task,
+            result=result,
+            attempt=1,
+            mutation_log=mutation_log,
+            state=work_state,
+            audit_log=audit_log,
+            session_logger=session_logger,
             project_root=tmp_project,
         )
 
@@ -423,43 +501,57 @@ class TestAttemptTracking:
         assert task["attempt_count"] == 1
         assert task["status"] == "failed"
 
-    def test_attempt_count_incremented_each_failure(self, mutation_log, work_state,
-                                                      audit_log, session_logger, tmp_project):
+    def test_attempt_count_incremented_each_failure(
+        self, mutation_log, work_state, audit_log, session_logger, tmp_project
+    ):
         """attempt_count increases with each failure."""
         _create_task(mutation_log, "t1", "Task 1")
 
         for attempt_num in range(1, 4):
-            mutation_log.append("task_started", {"attempt": attempt_num}, reason="test", task_id="t1")
+            mutation_log.append(
+                "task_started", {"attempt": attempt_num}, reason="test", task_id="t1"
+            )
             work_state.refresh()
             task = work_state.get_task("t1")
 
             result = AgentResult(output="Error!", exit_code=1, duration_s=1.0)
             process_completed(
-                task=task, result=result, attempt=attempt_num,
-                mutation_log=mutation_log, state=work_state,
-                audit_log=audit_log, session_logger=session_logger,
+                task=task,
+                result=result,
+                attempt=attempt_num,
+                mutation_log=mutation_log,
+                state=work_state,
+                audit_log=audit_log,
+                session_logger=session_logger,
                 project_root=tmp_project,
             )
 
             task = work_state.get_task("t1")
             assert task["attempt_count"] == attempt_num
 
-    def test_escalated_after_max_retries(self, mutation_log, work_state,
-                                           audit_log, session_logger, tmp_project):
+    def test_escalated_after_max_retries(
+        self, mutation_log, work_state, audit_log, session_logger, tmp_project
+    ):
         """Task status becomes 'escalated' after exceeding max_retries."""
         _create_task(mutation_log, "t1", "Task 1", max_retries=2)
 
         # Attempts 1 and 2 should result in 'failed' (retriable)
         for attempt_num in range(1, 3):
-            mutation_log.append("task_started", {"attempt": attempt_num}, reason="test", task_id="t1")
+            mutation_log.append(
+                "task_started", {"attempt": attempt_num}, reason="test", task_id="t1"
+            )
             work_state.refresh()
             task = work_state.get_task("t1")
 
             result = AgentResult(output="Error!", exit_code=1, duration_s=1.0)
             process_completed(
-                task=task, result=result, attempt=attempt_num,
-                mutation_log=mutation_log, state=work_state,
-                audit_log=audit_log, session_logger=session_logger,
+                task=task,
+                result=result,
+                attempt=attempt_num,
+                mutation_log=mutation_log,
+                state=work_state,
+                audit_log=audit_log,
+                session_logger=session_logger,
                 project_root=tmp_project,
             )
 
@@ -473,9 +565,13 @@ class TestAttemptTracking:
 
         result = AgentResult(output="Error!", exit_code=1, duration_s=1.0)
         process_completed(
-            task=task, result=result, attempt=3,
-            mutation_log=mutation_log, state=work_state,
-            audit_log=audit_log, session_logger=session_logger,
+            task=task,
+            result=result,
+            attempt=3,
+            mutation_log=mutation_log,
+            state=work_state,
+            audit_log=audit_log,
+            session_logger=session_logger,
             project_root=tmp_project,
         )
 
@@ -487,8 +583,12 @@ class TestAttemptTracking:
         """Failed tasks with retries remaining appear in get_ready_tasks."""
         _create_task(mutation_log, "t1", "Task 1", max_retries=3)
         mutation_log.append("task_started", {"attempt": 1}, reason="test", task_id="t1")
-        mutation_log.append("task_failed", {"attempt": 1, "attempt_count": 1},
-                            reason="test failure", task_id="t1")
+        mutation_log.append(
+            "task_failed",
+            {"attempt": 1, "attempt_count": 1},
+            reason="test failure",
+            task_id="t1",
+        )
         work_state.refresh()
 
         ready = work_state.get_ready_tasks()
@@ -499,15 +599,20 @@ class TestAttemptTracking:
         """Escalated tasks are not returned by get_ready_tasks."""
         _create_task(mutation_log, "t1", "Task 1", max_retries=1)
         mutation_log.append("task_started", {"attempt": 1}, reason="test", task_id="t1")
-        mutation_log.append("task_escalated", {"attempt": 2, "attempt_count": 2},
-                            reason="max retries exhausted", task_id="t1")
+        mutation_log.append(
+            "task_escalated",
+            {"attempt": 2, "attempt_count": 2},
+            reason="max retries exhausted",
+            task_id="t1",
+        )
         work_state.refresh()
 
         ready = work_state.get_ready_tasks()
         assert len(ready) == 0
 
-    def test_max_retries_zero_escalates_immediately(self, mutation_log, work_state,
-                                                      audit_log, session_logger, tmp_project):
+    def test_max_retries_zero_escalates_immediately(
+        self, mutation_log, work_state, audit_log, session_logger, tmp_project
+    ):
         """With max_retries=0, first failure escalates immediately."""
         _create_task(mutation_log, "t1", "Task 1", max_retries=0)
         mutation_log.append("task_started", {"attempt": 1}, reason="test", task_id="t1")
@@ -516,9 +621,13 @@ class TestAttemptTracking:
 
         result = AgentResult(output="Error!", exit_code=1, duration_s=1.0)
         process_completed(
-            task=task, result=result, attempt=1,
-            mutation_log=mutation_log, state=work_state,
-            audit_log=audit_log, session_logger=session_logger,
+            task=task,
+            result=result,
+            attempt=1,
+            mutation_log=mutation_log,
+            state=work_state,
+            audit_log=audit_log,
+            session_logger=session_logger,
             project_root=tmp_project,
         )
 
@@ -533,8 +642,12 @@ class TestAttemptTracking:
         """attempt_count is preserved through state rebuild."""
         _create_task(mutation_log, "t1", "Task 1", max_retries=3)
         mutation_log.append("task_started", {"attempt": 1}, reason="test", task_id="t1")
-        mutation_log.append("task_failed", {"attempt": 1, "attempt_count": 1},
-                            reason="test failure", task_id="t1")
+        mutation_log.append(
+            "task_failed",
+            {"attempt": 1, "attempt_count": 1},
+            reason="test failure",
+            task_id="t1",
+        )
 
         work_state.rebuild()
         task = work_state.get_task("t1")
@@ -543,17 +656,144 @@ class TestAttemptTracking:
 
 
 # ===========================================================================
+# Infrastructure failure tagging tests
+# ===========================================================================
+
+
+class TestInfrastructureFailureTagging:
+    def test_sigterm_failure_has_infrastructure_flag(
+        self, mutation_log, work_state, audit_log, session_logger, tmp_project
+    ):
+        """SIGTERM (exit_code 143) is tagged as infrastructure failure."""
+        _create_task(mutation_log, "t1", "Task 1")
+        mutation_log.append("task_started", {"attempt": 1}, reason="test", task_id="t1")
+        work_state.refresh()
+        task = work_state.get_task("t1")
+
+        result = AgentResult(output="Terminated", exit_code=143, duration_s=1.0)
+        process_completed(
+            task=task,
+            result=result,
+            attempt=1,
+            mutation_log=mutation_log,
+            state=work_state,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            project_root=tmp_project,
+        )
+
+        # Check mutation log has infrastructure: True
+        entries = mutation_log.read_all()
+        fail_entries = [e for e in entries if e["type"] == "task_failed"]
+        assert len(fail_entries) == 1
+        assert fail_entries[0]["data"]["infrastructure"] is True
+        assert fail_entries[0]["data"]["exit_code"] == 143
+
+    def test_sigterm_failure_does_not_increment_attempt_count(
+        self, mutation_log, work_state, audit_log, session_logger, tmp_project
+    ):
+        """SIGTERM failure does not increment attempt_count in state."""
+        _create_task(mutation_log, "t1", "Task 1")
+        mutation_log.append("task_started", {"attempt": 1}, reason="test", task_id="t1")
+        work_state.refresh()
+        task = work_state.get_task("t1")
+        assert task["attempt_count"] == 0
+
+        result = AgentResult(output="Terminated", exit_code=143, duration_s=1.0)
+        process_completed(
+            task=task,
+            result=result,
+            attempt=1,
+            mutation_log=mutation_log,
+            state=work_state,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            project_root=tmp_project,
+        )
+
+        task = work_state.get_task("t1")
+        assert task["status"] == "failed"
+        assert task["attempt_count"] == 0  # Not incremented for infrastructure failure
+
+    def test_normal_failure_still_increments_attempt_count(
+        self, mutation_log, work_state, audit_log, session_logger, tmp_project
+    ):
+        """Normal task failure (exit_code 1) still increments attempt_count."""
+        _create_task(mutation_log, "t1", "Task 1")
+        mutation_log.append("task_started", {"attempt": 1}, reason="test", task_id="t1")
+        work_state.refresh()
+        task = work_state.get_task("t1")
+        assert task["attempt_count"] == 0
+
+        result = AgentResult(output="Error!", exit_code=1, duration_s=1.0)
+        process_completed(
+            task=task,
+            result=result,
+            attempt=1,
+            mutation_log=mutation_log,
+            state=work_state,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            project_root=tmp_project,
+        )
+
+        # Check mutation log does NOT have infrastructure flag
+        entries = mutation_log.read_all()
+        fail_entries = [e for e in entries if e["type"] == "task_failed"]
+        assert len(fail_entries) == 1
+        assert "infrastructure" not in fail_entries[0]["data"]
+
+        task = work_state.get_task("t1")
+        assert task["status"] == "failed"
+        assert task["attempt_count"] == 1  # Incremented for normal failure
+
+    def test_infrastructure_failure_does_not_burn_retry_budget(
+        self, mutation_log, work_state, audit_log, session_logger, tmp_project
+    ):
+        """Multiple infrastructure failures don't exhaust retry budget."""
+        _create_task(mutation_log, "t1", "Task 1", max_retries=3)
+
+        # Simulate 3 infrastructure failures (SIGTERM)
+        for attempt_num in range(1, 4):
+            mutation_log.append(
+                "task_started", {"attempt": attempt_num}, reason="test", task_id="t1"
+            )
+            work_state.refresh()
+            task = work_state.get_task("t1")
+
+            result = AgentResult(output="Terminated", exit_code=143, duration_s=1.0)
+            process_completed(
+                task=task,
+                result=result,
+                attempt=attempt_num,
+                mutation_log=mutation_log,
+                state=work_state,
+                audit_log=audit_log,
+                session_logger=session_logger,
+                project_root=tmp_project,
+            )
+
+        # After 3 infrastructure failures, attempt_count should still be 0
+        task = work_state.get_task("t1")
+        assert task["attempt_count"] == 0
+        assert task["status"] == "failed"  # Still retriable, not escalated
+
+
+# ===========================================================================
 # Daemon retry integration tests
 # ===========================================================================
 
 
 class TestDaemonRetry:
-    def test_retry_on_failure_then_succeed(self, mutation_log, work_state, audit_log,
-                                            session_logger, tmp_project):
+    def test_retry_on_failure_then_succeed(
+        self, mutation_log, work_state, audit_log, session_logger, tmp_project
+    ):
         """Task fails once, retries, and succeeds on second attempt."""
         dispatcher = FailNTimesDispatcher(fail_count=1)
 
-        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=3)
+        _create_task(
+            mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=3
+        )
         work_state.refresh()
 
         daemon = Daemon(
@@ -584,12 +824,17 @@ class TestDaemonRetry:
         escs = work_state.list_escalations()
         assert len(escs) == 0
 
-    def test_retry_enriched_context_injected(self, mutation_log, work_state, audit_log,
-                                              session_logger, tmp_project):
+    def test_retry_enriched_context_injected(
+        self, mutation_log, work_state, audit_log, session_logger, tmp_project
+    ):
         """Retry attempt includes previous session log in the prompt."""
-        dispatcher = FailNTimesDispatcher(fail_count=1, fail_output="Error: missing file.txt")
+        dispatcher = FailNTimesDispatcher(
+            fail_count=1, fail_output="Error: missing file.txt"
+        )
 
-        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=3)
+        _create_task(
+            mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=3
+        )
         work_state.refresh()
 
         daemon = Daemon(
@@ -615,12 +860,15 @@ class TestDaemonRetry:
         assert "PREVIOUS ATTEMPT" in retry_prompt
         assert "missing file.txt" in retry_prompt
 
-    def test_escalation_after_retries_exhausted(self, mutation_log, work_state, audit_log,
-                                                 session_logger, tmp_project):
+    def test_escalation_after_retries_exhausted(
+        self, mutation_log, work_state, audit_log, session_logger, tmp_project
+    ):
         """Escalation is created when all retries are exhausted, status is 'escalated'."""
         dispatcher = AlwaysFailDispatcher(fail_output="Error: persistent failure")
 
-        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=2)
+        _create_task(
+            mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=2
+        )
         work_state.refresh()
 
         daemon = Daemon(
@@ -656,12 +904,15 @@ class TestDaemonRetry:
         assert "persistent failure" in escs[0]["error"]
         assert escs[0]["attempts"] == 3
 
-    def test_no_retry_when_max_retries_zero(self, mutation_log, work_state, audit_log,
-                                              session_logger, tmp_project):
+    def test_no_retry_when_max_retries_zero(
+        self, mutation_log, work_state, audit_log, session_logger, tmp_project
+    ):
         """With max_retries=0, task escalates immediately and escalation is created."""
         dispatcher = AlwaysFailDispatcher()
 
-        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=0)
+        _create_task(
+            mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=0
+        )
         work_state.refresh()
 
         daemon = Daemon(
@@ -692,12 +943,15 @@ class TestDaemonRetry:
         escs = work_state.list_escalations()
         assert len(escs) == 1
 
-    def test_retry_fails_twice_then_succeeds(self, mutation_log, work_state, audit_log,
-                                               session_logger, tmp_project):
+    def test_retry_fails_twice_then_succeeds(
+        self, mutation_log, work_state, audit_log, session_logger, tmp_project
+    ):
         """Task fails twice, succeeds on third attempt (exactly at the retry limit)."""
         dispatcher = FailNTimesDispatcher(fail_count=2)
 
-        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=2)
+        _create_task(
+            mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=2
+        )
         work_state.refresh()
 
         daemon = Daemon(
@@ -726,12 +980,15 @@ class TestDaemonRetry:
         escs = work_state.list_escalations()
         assert len(escs) == 0
 
-    def test_retry_with_custom_max_retries(self, mutation_log, work_state, audit_log,
-                                            session_logger, tmp_project):
+    def test_retry_with_custom_max_retries(
+        self, mutation_log, work_state, audit_log, session_logger, tmp_project
+    ):
         """Custom max_retries=1 allows only one retry."""
         dispatcher = AlwaysFailDispatcher()
 
-        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=1)
+        _create_task(
+            mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=1
+        )
         work_state.refresh()
 
         daemon = Daemon(
@@ -761,12 +1018,15 @@ class TestDaemonRetry:
         assert len(escs) == 1
         assert escs[0]["attempts"] == 2
 
-    def test_escalation_includes_session_log_path(self, mutation_log, work_state, audit_log,
-                                                    session_logger, tmp_project):
+    def test_escalation_includes_session_log_path(
+        self, mutation_log, work_state, audit_log, session_logger, tmp_project
+    ):
         """Escalation record includes the path to the session log."""
         dispatcher = AlwaysFailDispatcher()
 
-        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=0)
+        _create_task(
+            mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=0
+        )
         work_state.refresh()
 
         daemon = Daemon(
@@ -790,12 +1050,15 @@ class TestDaemonRetry:
         assert len(escs) == 1
         assert "t1-attempt-1" in escs[0]["session_log_path"]
 
-    def test_escalation_suggested_actions_present(self, mutation_log, work_state, audit_log,
-                                                    session_logger, tmp_project):
+    def test_escalation_suggested_actions_present(
+        self, mutation_log, work_state, audit_log, session_logger, tmp_project
+    ):
         """Escalation record has suggested actions."""
         dispatcher = AlwaysFailDispatcher()
 
-        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=0)
+        _create_task(
+            mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=0
+        )
         work_state.refresh()
 
         daemon = Daemon(
@@ -820,13 +1083,15 @@ class TestDaemonRetry:
         assert isinstance(escs[0]["suggested_actions"], list)
         assert len(escs[0]["suggested_actions"]) > 0
 
-    def test_timeout_failure_retried_same_as_other_failures(self, mutation_log, work_state,
-                                                              audit_log, session_logger,
-                                                              tmp_project):
+    def test_timeout_failure_retried_same_as_other_failures(
+        self, mutation_log, work_state, audit_log, session_logger, tmp_project
+    ):
         """Timeout failures (exit_code=-1) are retried like any other failure."""
         dispatcher = TimeoutDispatcher()
 
-        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=2)
+        _create_task(
+            mutation_log, "t1", "Task 1", done_when="do the thing", max_retries=2
+        )
         work_state.refresh()
 
         daemon = Daemon(
@@ -859,8 +1124,9 @@ class TestDaemonRetry:
         assert len(escs) == 1
         assert "TIMEOUT" in escs[0]["error"]
 
-    def test_default_max_retries_is_three(self, mutation_log, work_state, audit_log,
-                                            session_logger, tmp_project):
+    def test_default_max_retries_is_three(
+        self, mutation_log, work_state, audit_log, session_logger, tmp_project
+    ):
         """Default max_retries=3 allows 4 total attempts before escalation."""
         dispatcher = AlwaysFailDispatcher()
 
@@ -899,7 +1165,9 @@ class TestDaemonRetry:
 
 
 class TestEscalationCLI:
-    def test_escalations_list_command(self, mutation_log, work_state, session_logger, tmp_project):
+    def test_escalations_list_command(
+        self, mutation_log, work_state, session_logger, tmp_project
+    ):
         """corc escalations lists pending escalations."""
         from click.testing import CliRunner
         from corc.cli import cli
@@ -909,25 +1177,33 @@ class TestEscalationCLI:
         task = work_state.get_task("t1")
 
         create_escalation(
-            task=task, attempt=3, error="test error",
-            session_logger=session_logger, mutation_log=mutation_log,
+            task=task,
+            attempt=3,
+            error="test error",
+            session_logger=session_logger,
+            mutation_log=mutation_log,
         )
 
         runner = CliRunner()
         # Override get_paths for the CLI
         import corc.cli as cli_module
+
         original_get_all = cli_module._get_all
 
         def mock_get_all():
             return (
-                {"root": tmp_project, "mutations": tmp_project / "data" / "mutations.jsonl",
-                 "state_db": tmp_project / "data" / "state.db",
-                 "events_dir": tmp_project / "data" / "events",
-                 "sessions_dir": tmp_project / "data" / "sessions",
-                 "knowledge_dir": tmp_project / "knowledge",
-                 "knowledge_db": tmp_project / "data" / "knowledge.db",
-                 "corc_dir": tmp_project / ".corc"},
-                mutation_log, work_state,
+                {
+                    "root": tmp_project,
+                    "mutations": tmp_project / "data" / "mutations.jsonl",
+                    "state_db": tmp_project / "data" / "state.db",
+                    "events_dir": tmp_project / "data" / "events",
+                    "sessions_dir": tmp_project / "data" / "sessions",
+                    "knowledge_dir": tmp_project / "knowledge",
+                    "knowledge_db": tmp_project / "data" / "knowledge.db",
+                    "corc_dir": tmp_project / ".corc",
+                },
+                mutation_log,
+                work_state,
                 AuditLog(tmp_project / "data" / "events"),
                 session_logger,
                 None,  # knowledge store not needed
@@ -942,7 +1218,9 @@ class TestEscalationCLI:
         finally:
             cli_module._get_all = original_get_all
 
-    def test_escalation_show_command(self, mutation_log, work_state, session_logger, tmp_project):
+    def test_escalation_show_command(
+        self, mutation_log, work_state, session_logger, tmp_project
+    ):
         """corc escalation show ESC_ID shows full detail."""
         from click.testing import CliRunner
         from corc.cli import cli
@@ -952,23 +1230,31 @@ class TestEscalationCLI:
         task = work_state.get_task("t1")
 
         esc = create_escalation(
-            task=task, attempt=3, error="test error details",
-            session_logger=session_logger, mutation_log=mutation_log,
+            task=task,
+            attempt=3,
+            error="test error details",
+            session_logger=session_logger,
+            mutation_log=mutation_log,
         )
 
         import corc.cli as cli_module
+
         original_get_all = cli_module._get_all
 
         def mock_get_all():
             return (
-                {"root": tmp_project, "mutations": tmp_project / "data" / "mutations.jsonl",
-                 "state_db": tmp_project / "data" / "state.db",
-                 "events_dir": tmp_project / "data" / "events",
-                 "sessions_dir": tmp_project / "data" / "sessions",
-                 "knowledge_dir": tmp_project / "knowledge",
-                 "knowledge_db": tmp_project / "data" / "knowledge.db",
-                 "corc_dir": tmp_project / ".corc"},
-                mutation_log, work_state,
+                {
+                    "root": tmp_project,
+                    "mutations": tmp_project / "data" / "mutations.jsonl",
+                    "state_db": tmp_project / "data" / "state.db",
+                    "events_dir": tmp_project / "data" / "events",
+                    "sessions_dir": tmp_project / "data" / "sessions",
+                    "knowledge_dir": tmp_project / "knowledge",
+                    "knowledge_db": tmp_project / "data" / "knowledge.db",
+                    "corc_dir": tmp_project / ".corc",
+                },
+                mutation_log,
+                work_state,
                 AuditLog(tmp_project / "data" / "events"),
                 session_logger,
                 None,
@@ -987,7 +1273,9 @@ class TestEscalationCLI:
         finally:
             cli_module._get_all = original_get_all
 
-    def test_escalation_resolve_command(self, mutation_log, work_state, session_logger, tmp_project):
+    def test_escalation_resolve_command(
+        self, mutation_log, work_state, session_logger, tmp_project
+    ):
         """corc escalation resolve ESC_ID marks it resolved."""
         from click.testing import CliRunner
         from corc.cli import cli
@@ -997,23 +1285,31 @@ class TestEscalationCLI:
         task = work_state.get_task("t1")
 
         esc = create_escalation(
-            task=task, attempt=3, error="test error",
-            session_logger=session_logger, mutation_log=mutation_log,
+            task=task,
+            attempt=3,
+            error="test error",
+            session_logger=session_logger,
+            mutation_log=mutation_log,
         )
 
         import corc.cli as cli_module
+
         original_get_all = cli_module._get_all
 
         def mock_get_all():
             return (
-                {"root": tmp_project, "mutations": tmp_project / "data" / "mutations.jsonl",
-                 "state_db": tmp_project / "data" / "state.db",
-                 "events_dir": tmp_project / "data" / "events",
-                 "sessions_dir": tmp_project / "data" / "sessions",
-                 "knowledge_dir": tmp_project / "knowledge",
-                 "knowledge_db": tmp_project / "data" / "knowledge.db",
-                 "corc_dir": tmp_project / ".corc"},
-                mutation_log, work_state,
+                {
+                    "root": tmp_project,
+                    "mutations": tmp_project / "data" / "mutations.jsonl",
+                    "state_db": tmp_project / "data" / "state.db",
+                    "events_dir": tmp_project / "data" / "events",
+                    "sessions_dir": tmp_project / "data" / "sessions",
+                    "knowledge_dir": tmp_project / "knowledge",
+                    "knowledge_db": tmp_project / "data" / "knowledge.db",
+                    "corc_dir": tmp_project / ".corc",
+                },
+                mutation_log,
+                work_state,
                 AuditLog(tmp_project / "data" / "events"),
                 session_logger,
                 None,
@@ -1023,10 +1319,16 @@ class TestEscalationCLI:
         try:
             work_state.refresh()
             runner = CliRunner()
-            result = runner.invoke(cli, [
-                "escalation", "resolve", esc["escalation_id"],
-                "--resolution", "Fixed manually",
-            ])
+            result = runner.invoke(
+                cli,
+                [
+                    "escalation",
+                    "resolve",
+                    esc["escalation_id"],
+                    "--resolution",
+                    "Fixed manually",
+                ],
+            )
             assert result.exit_code == 0
             assert "resolved" in result.output
 
@@ -1037,7 +1339,9 @@ class TestEscalationCLI:
         finally:
             cli_module._get_all = original_get_all
 
-    def test_escalation_resolve_with_unblock(self, mutation_log, work_state, session_logger, tmp_project):
+    def test_escalation_resolve_with_unblock(
+        self, mutation_log, work_state, session_logger, tmp_project
+    ):
         """corc escalation resolve --unblock resets the task to pending."""
         from click.testing import CliRunner
         from corc.cli import cli
@@ -1045,30 +1349,42 @@ class TestEscalationCLI:
         _create_task(mutation_log, "t1", "Task 1")
         # Mark task as escalated
         mutation_log.append("task_started", {"attempt": 1}, reason="test", task_id="t1")
-        mutation_log.append("task_escalated", {"attempt": 1, "attempt_count": 1},
-                            reason="test escalation", task_id="t1")
+        mutation_log.append(
+            "task_escalated",
+            {"attempt": 1, "attempt_count": 1},
+            reason="test escalation",
+            task_id="t1",
+        )
         work_state.refresh()
         task = work_state.get_task("t1")
         assert task["status"] == "escalated"
 
         esc = create_escalation(
-            task=task, attempt=3, error="test error",
-            session_logger=session_logger, mutation_log=mutation_log,
+            task=task,
+            attempt=3,
+            error="test error",
+            session_logger=session_logger,
+            mutation_log=mutation_log,
         )
 
         import corc.cli as cli_module
+
         original_get_all = cli_module._get_all
 
         def mock_get_all():
             return (
-                {"root": tmp_project, "mutations": tmp_project / "data" / "mutations.jsonl",
-                 "state_db": tmp_project / "data" / "state.db",
-                 "events_dir": tmp_project / "data" / "events",
-                 "sessions_dir": tmp_project / "data" / "sessions",
-                 "knowledge_dir": tmp_project / "knowledge",
-                 "knowledge_db": tmp_project / "data" / "knowledge.db",
-                 "corc_dir": tmp_project / ".corc"},
-                mutation_log, work_state,
+                {
+                    "root": tmp_project,
+                    "mutations": tmp_project / "data" / "mutations.jsonl",
+                    "state_db": tmp_project / "data" / "state.db",
+                    "events_dir": tmp_project / "data" / "events",
+                    "sessions_dir": tmp_project / "data" / "sessions",
+                    "knowledge_dir": tmp_project / "knowledge",
+                    "knowledge_db": tmp_project / "data" / "knowledge.db",
+                    "corc_dir": tmp_project / ".corc",
+                },
+                mutation_log,
+                work_state,
                 AuditLog(tmp_project / "data" / "events"),
                 session_logger,
                 None,
@@ -1078,10 +1394,17 @@ class TestEscalationCLI:
         try:
             work_state.refresh()
             runner = CliRunner()
-            result = runner.invoke(cli, [
-                "escalation", "resolve", esc["escalation_id"],
-                "--resolution", "Fixed", "--unblock",
-            ])
+            result = runner.invoke(
+                cli,
+                [
+                    "escalation",
+                    "resolve",
+                    esc["escalation_id"],
+                    "--resolution",
+                    "Fixed",
+                    "--unblock",
+                ],
+            )
             assert result.exit_code == 0
             assert "pending" in result.output
 
@@ -1091,24 +1414,31 @@ class TestEscalationCLI:
         finally:
             cli_module._get_all = original_get_all
 
-    def test_escalation_show_not_found(self, mutation_log, work_state, session_logger, tmp_project):
+    def test_escalation_show_not_found(
+        self, mutation_log, work_state, session_logger, tmp_project
+    ):
         """corc escalation show with bad ID returns error."""
         from click.testing import CliRunner
         from corc.cli import cli
 
         import corc.cli as cli_module
+
         original_get_all = cli_module._get_all
 
         def mock_get_all():
             return (
-                {"root": tmp_project, "mutations": tmp_project / "data" / "mutations.jsonl",
-                 "state_db": tmp_project / "data" / "state.db",
-                 "events_dir": tmp_project / "data" / "events",
-                 "sessions_dir": tmp_project / "data" / "sessions",
-                 "knowledge_dir": tmp_project / "knowledge",
-                 "knowledge_db": tmp_project / "data" / "knowledge.db",
-                 "corc_dir": tmp_project / ".corc"},
-                mutation_log, work_state,
+                {
+                    "root": tmp_project,
+                    "mutations": tmp_project / "data" / "mutations.jsonl",
+                    "state_db": tmp_project / "data" / "state.db",
+                    "events_dir": tmp_project / "data" / "events",
+                    "sessions_dir": tmp_project / "data" / "sessions",
+                    "knowledge_dir": tmp_project / "knowledge",
+                    "knowledge_db": tmp_project / "data" / "knowledge.db",
+                    "corc_dir": tmp_project / ".corc",
+                },
+                mutation_log,
+                work_state,
                 AuditLog(tmp_project / "data" / "events"),
                 session_logger,
                 None,
@@ -1130,15 +1460,20 @@ class TestEscalationCLI:
 
 
 class TestStateRebuild:
-    def test_escalations_survive_rebuild(self, mutation_log, work_state, session_logger):
+    def test_escalations_survive_rebuild(
+        self, mutation_log, work_state, session_logger
+    ):
         """Escalations are correctly rebuilt from mutation log."""
         _create_task(mutation_log, "t1", "Task 1")
         work_state.refresh()
         task = work_state.get_task("t1")
 
         esc = create_escalation(
-            task=task, attempt=3, error="test error",
-            session_logger=session_logger, mutation_log=mutation_log,
+            task=task,
+            attempt=3,
+            error="test error",
+            session_logger=session_logger,
+            mutation_log=mutation_log,
         )
 
         # Resolve it
@@ -1152,34 +1487,54 @@ class TestStateRebuild:
         assert escs[0]["status"] == "resolved"
         assert escs[0]["resolution"] == "fixed"
 
-    def test_multiple_escalations_rebuild(self, mutation_log, work_state, session_logger):
+    def test_multiple_escalations_rebuild(
+        self, mutation_log, work_state, session_logger
+    ):
         """Multiple escalations survive state rebuild."""
         _create_task(mutation_log, "t1", "Task 1")
         _create_task(mutation_log, "t2", "Task 2")
         work_state.refresh()
 
         create_escalation(
-            task=work_state.get_task("t1"), attempt=3, error="err1",
-            session_logger=session_logger, mutation_log=mutation_log,
+            task=work_state.get_task("t1"),
+            attempt=3,
+            error="err1",
+            session_logger=session_logger,
+            mutation_log=mutation_log,
         )
         create_escalation(
-            task=work_state.get_task("t2"), attempt=2, error="err2",
-            session_logger=session_logger, mutation_log=mutation_log,
+            task=work_state.get_task("t2"),
+            attempt=2,
+            error="err2",
+            session_logger=session_logger,
+            mutation_log=mutation_log,
         )
 
         work_state.rebuild()
         escs = work_state.list_escalations()
         assert len(escs) == 2
 
-    def test_escalated_status_survives_rebuild(self, mutation_log, work_state, session_logger):
+    def test_escalated_status_survives_rebuild(
+        self, mutation_log, work_state, session_logger
+    ):
         """Task with 'escalated' status survives state rebuild."""
         _create_task(mutation_log, "t1", "Task 1", max_retries=1)
         mutation_log.append("task_started", {"attempt": 1}, reason="test", task_id="t1")
-        mutation_log.append("task_failed", {"attempt": 1, "attempt_count": 1},
-                            reason="test failure", task_id="t1")
-        mutation_log.append("task_started", {"attempt": 2}, reason="retry", task_id="t1")
-        mutation_log.append("task_escalated", {"attempt": 2, "attempt_count": 2},
-                            reason="max retries exhausted", task_id="t1")
+        mutation_log.append(
+            "task_failed",
+            {"attempt": 1, "attempt_count": 1},
+            reason="test failure",
+            task_id="t1",
+        )
+        mutation_log.append(
+            "task_started", {"attempt": 2}, reason="retry", task_id="t1"
+        )
+        mutation_log.append(
+            "task_escalated",
+            {"attempt": 2, "attempt_count": 2},
+            reason="max retries exhausted",
+            task_id="t1",
+        )
 
         work_state.rebuild()
         task = work_state.get_task("t1")

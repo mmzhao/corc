@@ -108,13 +108,18 @@ def process_completed(
             )
         else:
             # Mark as failed (retriable — scheduler will pick it up)
+            fail_data = {
+                "attempt": attempt,
+                "exit_code": result.exit_code,
+                "attempt_count": attempt,
+            }
+            # SIGTERM (exit code 143) is an infrastructure failure —
+            # the task itself did not fail, so don't burn retry budget.
+            if result.exit_code == 143:
+                fail_data["infrastructure"] = True
             mutation_log.append(
                 "task_failed",
-                {
-                    "attempt": attempt,
-                    "exit_code": result.exit_code,
-                    "attempt_count": attempt,
-                },
+                fail_data,
                 reason=error_msg,
                 task_id=task_id,
             )

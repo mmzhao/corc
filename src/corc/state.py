@@ -194,15 +194,27 @@ class WorkState:
                 ),
             )
         elif t == "task_failed":
-            self.conn.execute(
-                "UPDATE tasks SET status='failed', updated=?, findings=?, attempt_count=? WHERE id=?",
-                (
-                    entry["ts"],
-                    json.dumps(data.get("findings", [])),
-                    data.get("attempt_count", data.get("attempt", 0)),
-                    task_id,
-                ),
-            )
+            if data.get("infrastructure"):
+                # Infrastructure failure (daemon crash, SIGTERM) — do not
+                # increment attempt_count so it doesn't burn retry budget.
+                self.conn.execute(
+                    "UPDATE tasks SET status='failed', updated=?, findings=? WHERE id=?",
+                    (
+                        entry["ts"],
+                        json.dumps(data.get("findings", [])),
+                        task_id,
+                    ),
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE tasks SET status='failed', updated=?, findings=?, attempt_count=? WHERE id=?",
+                    (
+                        entry["ts"],
+                        json.dumps(data.get("findings", [])),
+                        data.get("attempt_count", data.get("attempt", 0)),
+                        task_id,
+                    ),
+                )
         elif t == "task_escalated":
             self.conn.execute(
                 "UPDATE tasks SET status='escalated', updated=?, attempt_count=? WHERE id=?",
