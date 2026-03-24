@@ -155,6 +155,11 @@ def task():
     is_flag=True,
     help="Create task in draft status (not scheduled until approved)",
 )
+@click.option(
+    "--target-repo",
+    default=None,
+    help="Target repository for cross-repo dispatch (e.g. 'fdp')",
+)
 def task_create(
     name,
     done_when,
@@ -167,6 +172,7 @@ def task_create(
     priority,
     task_type,
     draft,
+    target_repo,
 ):
     """Create a new task."""
     # Lint done_when criteria (with type-specific rules)
@@ -221,6 +227,8 @@ def task_create(
     }
     if draft:
         task_data["status"] = "draft"
+    if target_repo:
+        task_data["target_repo"] = target_repo
 
     ml.append(
         "task_created",
@@ -231,8 +239,9 @@ def task_create(
     al.log("task_created", task_id=task_id, name=name)
     type_str = f" [{task_type}]" if task_type != "implementation" else ""
     status_str = " [draft]" if draft else ""
+    repo_str = f" [repo: {target_repo}]" if target_repo else ""
     click.echo(
-        f"Created task {task_id}: {name}{type_str}{status_str} (priority {priority})"
+        f"Created task {task_id}: {name}{type_str}{status_str}{repo_str} (priority {priority})"
     )
 
 
@@ -392,6 +401,37 @@ def task_reprioritize(task_id, priority):
     click.echo(
         f"Task {task_id} reprioritized to {priority}. Daemon will dispatch when ready."
     )
+
+
+@task.command("set-repo")
+@click.argument("task_id")
+@click.argument("repo")
+def task_set_repo(task_id, repo):
+    """Set the target repository for a task (for cross-repo dispatch).
+
+    REPO is the repository name (e.g. 'fdp'). The daemon will dispatch
+    agents into this repo instead of the default CORC repo.
+    """
+    _, ml, ws, al, _, _ = _get_all()
+    t = ws.get_task(task_id)
+    if not t:
+        click.echo(f"Task {task_id} not found.")
+        sys.exit(1)
+
+    old_repo = t.get("target_repo")
+    if old_repo == repo:
+        click.echo(f"Task {task_id} already targets repo '{repo}'.")
+        return
+
+    ml.append(
+        "task_updated",
+        {"target_repo": repo},
+        reason=f"Target repo set to '{repo}' via CLI"
+        + (f" (was '{old_repo}')" if old_repo else ""),
+        task_id=task_id,
+    )
+    al.log("task_set_repo", task_id=task_id, target_repo=repo, old_repo=old_repo)
+    click.echo(f"Task {task_id} target repo set to '{repo}'.")
 
 
 @task.command("approve")
