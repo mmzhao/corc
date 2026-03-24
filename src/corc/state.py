@@ -358,11 +358,18 @@ class WorkState:
         Returns pending tasks with satisfied dependencies, plus failed tasks
         that haven't exceeded their max_retries limit.
         Sorted by priority ascending (lower number = higher priority).
+
+        Tasks with priority -1 (deprioritized/shelved) are excluded — they
+        must be explicitly reprioritized before they can be dispatched.
         """
         all_tasks = self.list_tasks()
         completed_ids = {t["id"] for t in all_tasks if t["status"] == "completed"}
         ready = []
         for task in all_tasks:
+            # Skip deprioritized (shelved) tasks — priority -1 means "do not dispatch"
+            if task.get("priority", 100) == -1:
+                continue
+
             if task["status"] == "pending":
                 deps = (
                     json.loads(task["depends_on"])
