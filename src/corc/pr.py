@@ -13,11 +13,41 @@ Key operations:
 """
 
 import logging
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+
 logger = logging.getLogger(__name__)
+
+
+def _get_repo_token(project_root: Path) -> str | None:
+    """Load a per-repo GH_TOKEN from .corc/secrets.yaml.
+
+    Returns the token string if found for this repo, None otherwise.
+    """
+    secrets_path = project_root / ".corc" / "secrets.yaml"
+    if not secrets_path.exists():
+        return None
+    try:
+        with open(secrets_path) as f:
+            data = yaml.safe_load(f) or {}
+        tokens = data.get("repo_tokens", {})
+        repo_name = project_root.name
+        return tokens.get(repo_name)
+    except (yaml.YAMLError, OSError):
+        return None
+
+
+def _gh_env(project_root: Path) -> dict[str, str]:
+    """Build environment for gh commands, injecting per-repo token if available."""
+    env = os.environ.copy()
+    token = _get_repo_token(project_root)
+    if token:
+        env["GH_TOKEN"] = token
+    return env
 
 
 class PRError(Exception):
@@ -170,6 +200,7 @@ def create_pr(
             text=True,
             cwd=str(project_root),
             timeout=timeout,
+            env=_gh_env(project_root),
         )
         if result.returncode != 0:
             error_msg = result.stderr.strip()
@@ -232,6 +263,7 @@ def post_review_comment(
             text=True,
             cwd=str(project_root),
             timeout=timeout,
+            env=_gh_env(project_root),
         )
         if result.returncode == 0:
             logger.info("Posted review comment on PR #%s", pr_number)
@@ -272,6 +304,7 @@ def merge_pr(project_root: Path, pr_number: int, timeout: int = 60) -> bool:
             text=True,
             cwd=str(project_root),
             timeout=timeout,
+            env=_gh_env(project_root),
         )
         if result.returncode == 0:
             logger.info("Merged PR #%s", pr_number)

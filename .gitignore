@@ -27,3 +27,4 @@ data/knowledge.db
 .corc/worktrees/
 data/state.db-shm
 data/state.db-wal
+.corc/secrets.yaml
