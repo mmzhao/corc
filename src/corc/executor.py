@@ -395,17 +395,18 @@ class Executor:
             return None
 
         # Push the branch to remote
-        pushed = push_branch(self.project_root, branch_name)
+        pushed, push_error = push_branch(self.project_root, branch_name)
         if not pushed:
             self.audit_log.log(
                 "pr_push_failed",
                 task_id=task_id,
                 branch=branch_name,
+                error=push_error,
             )
             return None
 
         # Create the PR
-        pr_info = create_pr(self.project_root, branch_name, task)
+        pr_info, pr_error = create_pr(self.project_root, branch_name, task)
         if pr_info:
             self.audit_log.log(
                 "pr_created",
@@ -419,6 +420,7 @@ class Executor:
                 "pr_creation_failed",
                 task_id=task_id,
                 branch=branch_name,
+                error=pr_error,
             )
 
         return pr_info

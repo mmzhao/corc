@@ -217,27 +217,30 @@ class TestPushBranch:
 
     @patch("corc.pr.subprocess.run")
     def test_push_branch_success(self, mock_run):
-        """push_branch returns True on success."""
+        """push_branch returns (True, '') on success."""
         mock_run.return_value = MagicMock(returncode=0)
-        result = push_branch(Path("/tmp/fake"), "corc/task-1-1")
-        assert result is True
+        success, error = push_branch(Path("/tmp/fake"), "corc/task-1-1")
+        assert success is True
+        assert error == ""
         # Verify the correct command was called
         cmd = mock_run.call_args[0][0]
         assert cmd == ["git", "push", "-u", "origin", "corc/task-1-1"]
 
     @patch("corc.pr.subprocess.run")
     def test_push_branch_failure(self, mock_run):
-        """push_branch returns False on failure."""
-        mock_run.return_value = MagicMock(returncode=1, stderr="error")
-        result = push_branch(Path("/tmp/fake"), "corc/task-1-1")
-        assert result is False
+        """push_branch returns (False, error_message) on failure."""
+        mock_run.return_value = MagicMock(returncode=1, stderr="remote rejected")
+        success, error = push_branch(Path("/tmp/fake"), "corc/task-1-1")
+        assert success is False
+        assert error == "remote rejected"
 
     @patch("corc.pr.subprocess.run")
     def test_push_branch_exception(self, mock_run):
-        """push_branch returns False on exception."""
+        """push_branch returns (False, error_message) on exception."""
         mock_run.side_effect = subprocess.SubprocessError("failed")
-        result = push_branch(Path("/tmp/fake"), "corc/task-1-1")
-        assert result is False
+        success, error = push_branch(Path("/tmp/fake"), "corc/task-1-1")
+        assert success is False
+        assert "failed" in error
 
 
 class TestCreatePR:
@@ -245,15 +248,16 @@ class TestCreatePR:
 
     @patch("corc.pr.subprocess.run")
     def test_create_pr_success(self, mock_run):
-        """create_pr returns PRInfo on success."""
+        """create_pr returns (PRInfo, '') on success."""
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout="https://github.com/org/repo/pull/42\n",
         )
         task = {"id": "t1", "name": "Test Task", "done_when": "tests pass"}
-        pr_info = create_pr(Path("/tmp/fake"), "corc/t1-1", task)
+        pr_info, error = create_pr(Path("/tmp/fake"), "corc/t1-1", task)
 
         assert pr_info is not None
+        assert error == ""
         assert pr_info.url == "https://github.com/org/repo/pull/42"
         assert pr_info.number == 42
         assert pr_info.branch == "corc/t1-1"
@@ -261,11 +265,12 @@ class TestCreatePR:
 
     @patch("corc.pr.subprocess.run")
     def test_create_pr_failure(self, mock_run):
-        """create_pr returns None on failure."""
+        """create_pr returns (None, error_message) on failure."""
         mock_run.return_value = MagicMock(returncode=1, stderr="no remote configured")
         task = {"id": "t1", "name": "Test Task", "done_when": "tests pass"}
-        pr_info = create_pr(Path("/tmp/fake"), "corc/t1-1", task)
+        pr_info, error = create_pr(Path("/tmp/fake"), "corc/t1-1", task)
         assert pr_info is None
+        assert error == "no remote configured"
 
     @patch("corc.pr.subprocess.run")
     def test_create_pr_uses_gh_cli(self, mock_run):
@@ -610,8 +615,8 @@ class TestExecutorCreatesPR:
 
         with (
             patch("corc.executor.pull_main", return_value=False),
-            patch("corc.executor.push_branch", return_value=True),
-            patch("corc.executor.create_pr", return_value=mock_pr_info),
+            patch("corc.executor.push_branch", return_value=(True, "")),
+            patch("corc.executor.create_pr", return_value=(mock_pr_info, "")),
             patch("corc.executor.get_worktree_branch", return_value="corc/t1-1"),
         ):
             executor.dispatch(task)
@@ -687,8 +692,8 @@ class TestExecutorCreatesPR:
 
         with (
             patch("corc.executor.pull_main", return_value=False),
-            patch("corc.executor.push_branch", return_value=True),
-            patch("corc.executor.create_pr", return_value=mock_pr_info),
+            patch("corc.executor.push_branch", return_value=(True, "")),
+            patch("corc.executor.create_pr", return_value=(mock_pr_info, "")),
             patch("corc.executor.get_worktree_branch", return_value="corc/t1-1"),
         ):
             executor.dispatch(task)
@@ -724,7 +729,10 @@ class TestExecutorCreatesPR:
 
         with (
             patch("corc.executor.pull_main", return_value=False),
-            patch("corc.executor.push_branch", return_value=False),
+            patch(
+                "corc.executor.push_branch",
+                return_value=(False, "remote: permission denied"),
+            ),
             patch("corc.executor.get_worktree_branch", return_value="corc/t1-1"),
         ):
             executor.dispatch(task)
@@ -737,6 +745,87 @@ class TestExecutorCreatesPR:
         events = audit_log.read_for_task("t1")
         event_types = [e["event_type"] for e in events]
         assert "pr_push_failed" in event_types
+        executor.shutdown()
+
+    def test_push_failure_audit_includes_error_message(
+        self, git_repo, mutation_log, work_state, audit_log, session_logger
+    ):
+        """pr_push_failed audit event includes the error message from push_branch."""
+        dispatcher = MockDispatcher()
+        _create_task(mutation_log, "t1", "Task 1")
+        work_state.refresh()
+        task = work_state.get_task("t1")
+
+        executor = Executor(
+            dispatcher=dispatcher,
+            mutation_log=mutation_log,
+            state=work_state,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            project_root=git_repo,
+        )
+
+        with (
+            patch("corc.executor.pull_main", return_value=False),
+            patch(
+                "corc.executor.push_branch",
+                return_value=(False, "remote: Repository not found"),
+            ),
+            patch("corc.executor.get_worktree_branch", return_value="corc/t1-1"),
+        ):
+            executor.dispatch(task)
+            time.sleep(0.5)
+            completed = executor.poll_completed()
+
+        assert len(completed) == 1
+        assert completed[0].pr_info is None
+
+        events = audit_log.read_for_task("t1")
+        push_failed_events = [e for e in events if e["event_type"] == "pr_push_failed"]
+        assert len(push_failed_events) == 1
+        assert push_failed_events[0]["error"] == "remote: Repository not found"
+        executor.shutdown()
+
+    def test_pr_creation_failure_audit_includes_error_message(
+        self, git_repo, mutation_log, work_state, audit_log, session_logger
+    ):
+        """pr_creation_failed audit event includes the error message from create_pr."""
+        dispatcher = MockDispatcher()
+        _create_task(mutation_log, "t1", "Task 1")
+        work_state.refresh()
+        task = work_state.get_task("t1")
+
+        executor = Executor(
+            dispatcher=dispatcher,
+            mutation_log=mutation_log,
+            state=work_state,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            project_root=git_repo,
+        )
+
+        with (
+            patch("corc.executor.pull_main", return_value=False),
+            patch("corc.executor.push_branch", return_value=(True, "")),
+            patch(
+                "corc.executor.create_pr",
+                return_value=(None, "pull request already exists for branch"),
+            ),
+            patch("corc.executor.get_worktree_branch", return_value="corc/t1-1"),
+        ):
+            executor.dispatch(task)
+            time.sleep(0.5)
+            completed = executor.poll_completed()
+
+        assert len(completed) == 1
+        assert completed[0].pr_info is None
+
+        events = audit_log.read_for_task("t1")
+        pr_failed_events = [
+            e for e in events if e["event_type"] == "pr_creation_failed"
+        ]
+        assert len(pr_failed_events) == 1
+        assert pr_failed_events[0]["error"] == "pull request already exists for branch"
         executor.shutdown()
 
 
@@ -1296,14 +1385,17 @@ class TestNoPushToMain:
 
         with (
             patch("corc.executor.pull_main", return_value=False),
-            patch("corc.executor.push_branch", return_value=True) as mock_push,
+            patch("corc.executor.push_branch", return_value=(True, "")) as mock_push,
             patch(
                 "corc.executor.create_pr",
-                return_value=PRInfo(
-                    url="https://github.com/org/repo/pull/1",
-                    number=1,
-                    branch="corc/t1-1",
-                    title="test",
+                return_value=(
+                    PRInfo(
+                        url="https://github.com/org/repo/pull/1",
+                        number=1,
+                        branch="corc/t1-1",
+                        title="test",
+                    ),
+                    "",
                 ),
             ),
             patch("corc.executor.get_worktree_branch", return_value="corc/t1-1"),
@@ -1445,8 +1537,8 @@ class TestEndToEndPRWorkflow:
         # Step 2: Agent completes, executor creates PR
         with (
             patch("corc.executor.pull_main", return_value=True) as mock_pull,
-            patch("corc.executor.push_branch", return_value=True),
-            patch("corc.executor.create_pr", return_value=mock_pr_info),
+            patch("corc.executor.push_branch", return_value=(True, "")),
+            patch("corc.executor.create_pr", return_value=(mock_pr_info, "")),
             patch("corc.executor.get_worktree_branch", return_value="corc/t1-1"),
         ):
             executor.dispatch(task)
@@ -1519,8 +1611,8 @@ class TestEndToEndPRWorkflow:
         # Step 1-2: Executor dispatches and creates PR
         with (
             patch("corc.executor.pull_main", return_value=True),
-            patch("corc.executor.push_branch", return_value=True),
-            patch("corc.executor.create_pr", return_value=mock_pr_info),
+            patch("corc.executor.push_branch", return_value=(True, "")),
+            patch("corc.executor.create_pr", return_value=(mock_pr_info, "")),
             patch("corc.executor.get_worktree_branch", return_value="corc/t1-1"),
         ):
             executor.dispatch(task)
