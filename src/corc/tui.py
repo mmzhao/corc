@@ -77,6 +77,144 @@ def _check_for_source_changes(
     return changed
 
 
+# ── Daemon status helpers ─────────────────────────────────────────────────
+
+
+def get_daemon_status(corc_dir: Path, parallel: int = 1, work_state=None) -> dict:
+    """Determine the current daemon status by checking PID file and pause lock.
+
+    Returns a dict with:
+      - ``status``: one of ``"running"``, ``"paused"``, ``"stopped"``
+      - ``pid``: daemon PID (int) if running/paused, else ``None``
+      - ``uptime``: human-readable uptime string if running/paused
+      - ``reason``: pause reason string if paused, else ``None``
+      - ``slots_used``: number of running+assigned tasks (int)
+      - ``slots_total``: parallel limit (int)
+
+    Args:
+        corc_dir: Path to the ``.corc`` directory.
+        parallel: Configured parallel slot limit.
+        work_state: Optional WorkState to query for slot usage.
+    """
+    from corc.pause import read_pause_lock
+
+    corc_dir = Path(corc_dir)
+    pid_file = corc_dir / "daemon.pid"
+
+    result = {
+        "status": "stopped",
+        "pid": None,
+        "uptime": None,
+        "reason": None,
+        "slots_used": 0,
+        "slots_total": parallel,
+    }
+
+    # Check if daemon PID file exists and process is alive
+    if not pid_file.exists():
+        return result
+
+    try:
+        pid = int(pid_file.read_text().strip())
+    except (ValueError, OSError):
+        return result
+
+    # Check process liveness with os.kill(pid, 0)
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError, OSError):
+        # PID file is stale — daemon is stopped
+        return result
+
+    # Daemon process is alive
+    result["pid"] = pid
+
+    # Calculate uptime from PID file modification time
+    try:
+        pid_mtime = pid_file.stat().st_mtime
+        uptime_seconds = int(time.time() - pid_mtime)
+        if uptime_seconds < 60:
+            result["uptime"] = f"{uptime_seconds}s"
+        elif uptime_seconds < 3600:
+            minutes = uptime_seconds // 60
+            seconds = uptime_seconds % 60
+            result["uptime"] = f"{minutes}m {seconds}s"
+        else:
+            hours = uptime_seconds // 3600
+            minutes = (uptime_seconds % 3600) // 60
+            result["uptime"] = f"{hours}h {minutes}m"
+    except OSError:
+        pass
+
+    # Check slot usage from work state
+    if work_state is not None:
+        try:
+            running = work_state.list_tasks(status="running")
+            assigned = work_state.list_tasks(status="assigned")
+            result["slots_used"] = len(running) + len(assigned)
+        except (AttributeError, TypeError):
+            pass
+
+    # Check pause state
+    pause_lock = read_pause_lock(corc_dir)
+    if pause_lock:
+        result["status"] = "paused"
+        result["reason"] = pause_lock.get("reason", "unknown")
+    else:
+        result["status"] = "running"
+
+    return result
+
+
+def build_daemon_status_header(daemon_status: dict) -> Text:
+    """Build a Rich Text object showing daemon status for the TUI header.
+
+    Renders a single line with:
+      - Green ``● RUNNING`` with uptime and slot usage when running
+      - Yellow ``● PAUSED`` with reason when paused
+      - Red ``● STOPPED`` when daemon is not running
+
+    Args:
+        daemon_status: Dict from :func:`get_daemon_status`.
+
+    Returns:
+        A Rich Text object suitable for inclusion in a Panel or Layout.
+    """
+    status = daemon_status.get("status", "stopped")
+    text = Text()
+
+    if status == "running":
+        text.append("  ● ", style="bold green")
+        text.append("RUNNING", style="bold green")
+
+        uptime = daemon_status.get("uptime")
+        if uptime:
+            text.append(f"  ⏱ {uptime}", style="green")
+
+        slots_used = daemon_status.get("slots_used", 0)
+        slots_total = daemon_status.get("slots_total", 1)
+        text.append(f"  {slots_used}/{slots_total} agents active", style="green")
+
+    elif status == "paused":
+        text.append("  ● ", style="bold yellow")
+        text.append("PAUSED", style="bold yellow")
+
+        reason = daemon_status.get("reason")
+        if reason:
+            text.append(f"  — {reason}", style="yellow")
+
+        uptime = daemon_status.get("uptime")
+        if uptime:
+            text.append(f"  ⏱ {uptime}", style="dim yellow")
+
+    else:  # stopped
+        text.append("  ● ", style="bold red")
+        text.append("STOPPED", style="bold red")
+        text.append("  — daemon is not running", style="red")
+
+    return text
+
+
 # ── Event type -> Rich style mapping ─────────────────────────────────────
 
 EVENT_STYLES = {
@@ -795,10 +933,12 @@ def build_active_dashboard(
     max_events: int = 20,
     stream_events_by_task: dict[str, list[dict]] | None = None,
     scroll_offset: int = 0,
+    daemon_status: dict | None = None,
 ) -> Layout:
     """Build the active-plan-focused dashboard layout.
 
-    Returns a Rich Layout with a left/right split:
+    Returns a Rich Layout with an optional daemon status header, then
+    a left/right split:
       - Left two-thirds: split vertically 50/50 into
         - top: DAG status / Active Plan panel
         - bottom: Streaming detail panel (agent activity)
@@ -806,20 +946,25 @@ def build_active_dashboard(
 
     When *stream_events_by_task* is ``None``, the left side shows only
     the active plan panel (no streaming detail).
+
+    When *daemon_status* is provided, a compact status header is shown
+    at the top of the layout indicating whether the daemon is running
+    (green), paused (yellow), or stopped (red).
     """
-    layout = Layout()
+    # Build the main content area
+    main = Layout(name="main")
 
     if stream_events_by_task is not None:
         # Three-panel layout: left (DAG + streaming) | right (events)
-        layout.split_row(
+        main.split_row(
             Layout(name="left", ratio=2),
             Layout(name="events", ratio=1),
         )
-        layout["left"].split_column(
+        main["left"].split_column(
             Layout(name="active_plan", ratio=1),
             Layout(name="streaming", ratio=1),
         )
-        layout["streaming"].update(
+        main["streaming"].update(
             build_streaming_detail_panel(
                 running_tasks,
                 stream_events_by_task,
@@ -828,15 +973,15 @@ def build_active_dashboard(
         )
     else:
         # Two-panel layout: left (active plan) | right (events)
-        layout.split_row(
+        main.split_row(
             Layout(name="left", ratio=2),
             Layout(name="events", ratio=1),
         )
-        layout["left"].split_column(
+        main["left"].split_column(
             Layout(name="active_plan", ratio=1),
         )
 
-    layout["active_plan"].update(
+    main["active_plan"].update(
         build_active_plan_panel(
             running_tasks,
             ready_tasks,
@@ -845,8 +990,31 @@ def build_active_dashboard(
             other_active,
         )
     )
-    layout["events"].update(build_event_panel(events, max_events))
-    return layout
+    main["events"].update(build_event_panel(events, max_events))
+
+    # Wrap with daemon status header if provided
+    if daemon_status is not None:
+        header_content = build_daemon_status_header(daemon_status)
+        header_panel = Panel(
+            header_content,
+            title="[bold] Daemon [/bold]",
+            border_style={
+                "running": "green",
+                "paused": "yellow",
+                "stopped": "red",
+            }.get(daemon_status.get("status", "stopped"), "red"),
+            height=3,
+        )
+        layout = Layout()
+        layout.split_column(
+            Layout(name="daemon_header", size=3),
+            Layout(name="main", ratio=1),
+        )
+        layout["daemon_header"].update(header_panel)
+        layout["main"].update(main)
+        return layout
+
+    return main
 
 
 # ── Live dashboard runner ────────────────────────────────────────────────
@@ -986,6 +1154,8 @@ def run_active_dashboard(
     refresh_per_second: float = 2.0,
     console: Console | None = None,
     auto_reload: bool = False,
+    corc_dir: Path | None = None,
+    parallel: int = 1,
 ) -> None:
     """Run the active-plan-focused dashboard until 'q' or Ctrl+C.
 
@@ -996,6 +1166,7 @@ def run_active_dashboard(
       - Recently completed (last hour)
       - Streaming detail from session log stream events
       - Recent events
+      - Daemon status (running/paused/stopped) with slot usage
 
     The streaming detail panel auto-updates each refresh cycle by
     calling ``query_api.get_task_stream_events()`` for every running
@@ -1012,6 +1183,8 @@ def run_active_dashboard(
         refresh_per_second: How often to redraw.
         console: Optional Rich Console (for testing).
         auto_reload: Watch source files and raise ReloadRequested on change.
+        corc_dir: Path to the ``.corc`` directory for daemon status checks.
+        parallel: Configured parallel slot limit for display.
 
     Raises:
         ReloadRequested: When auto_reload is True and a watched source file
@@ -1085,6 +1258,15 @@ def run_active_dashboard(
                 all_active = query_api.get_active_plan_tasks()
                 other = [t for t in all_active if t["id"] not in categorized_ids]
 
+                # Fetch daemon status (live on each cycle)
+                daemon_status = None
+                if corc_dir is not None:
+                    daemon_status = get_daemon_status(
+                        corc_dir,
+                        parallel=parallel,
+                        work_state=query_api.work_state,
+                    )
+
                 dashboard = build_active_dashboard(
                     running,
                     ready,
@@ -1095,6 +1277,7 @@ def run_active_dashboard(
                     max_events,
                     stream_events_by_task=stream_events_by_task,
                     scroll_offset=scroll_state.get("offset", 0),
+                    daemon_status=daemon_status,
                 )
                 live.update(dashboard)
                 stop_event.wait(interval)

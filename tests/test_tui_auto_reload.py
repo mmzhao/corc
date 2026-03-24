@@ -369,7 +369,7 @@ class TestWatchDashboardReloadLoop:
 
         with patch("corc.cli._get_all") as mock_get_all:
             mock_get_all.return_value = (
-                {},  # paths
+                {"corc_dir": "/tmp/fake-corc"},  # paths
                 MagicMock(),  # ml
                 MagicMock(),  # ws
                 MagicMock(),  # al
@@ -377,14 +377,16 @@ class TestWatchDashboardReloadLoop:
                 MagicMock(),  # _
             )
 
-            with patch(
-                "corc.tui.run_active_dashboard",
-                side_effect=fake_run_active_dashboard,
-            ):
-                with patch("importlib.reload", side_effect=fake_reload):
-                    from corc.cli import _watch_dashboard
+            with patch("corc.cli.load_config") as mock_cfg:
+                mock_cfg.return_value = MagicMock(get=lambda k, d=None: d)
+                with patch(
+                    "corc.tui.run_active_dashboard",
+                    side_effect=fake_run_active_dashboard,
+                ):
+                    with patch("importlib.reload", side_effect=fake_reload):
+                        from corc.cli import _watch_dashboard
 
-                    _watch_dashboard(20)
+                        _watch_dashboard(20)
 
         # Should have been called twice (once raised, once normal exit)
         assert call_count["n"] == 2
