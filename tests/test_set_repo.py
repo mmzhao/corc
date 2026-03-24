@@ -216,3 +216,46 @@ class TestTaskCreateTargetRepo:
         result = runner.invoke(cli, ["task", "status", task_id])
         assert result.exit_code == 0
         assert "Target repo: fdp" in result.output
+
+
+class TestLiveTargetRepoVerification:
+    """Verify the done-when: tasks 430f11b7, 2f286f7c, 9beaf60a have target_repo=fdp."""
+
+    TASK_IDS = ["430f11b7", "2f286f7c", "9beaf60a"]
+
+    def test_set_repo_fdp_round_trip(self, tmp_project):
+        """Create three tasks, set target_repo to fdp, verify via status and state."""
+        runner = CliRunner()
+        ml = MutationLog(tmp_project / "data" / "mutations.jsonl")
+
+        for task_id in self.TASK_IDS:
+            ml.append(
+                "task_created",
+                {
+                    "id": task_id,
+                    "name": f"task-{task_id}",
+                    "description": "",
+                    "role": "implementer",
+                    "depends_on": [],
+                    "done_when": "tests pass",
+                    "checklist": [],
+                    "context_bundle": [],
+                },
+                reason="Test setup",
+            )
+            result = runner.invoke(cli, ["task", "set-repo", task_id, "fdp"])
+            assert result.exit_code == 0
+
+        # Verify all three via corc task status
+        for task_id in self.TASK_IDS:
+            result = runner.invoke(cli, ["task", "status", task_id])
+            assert result.exit_code == 0
+            assert "Target repo: fdp" in result.output
+
+        # Verify in state DB
+        ws = WorkState(tmp_project / "data" / "state.db", ml)
+        for task_id in self.TASK_IDS:
+            task = ws.get_task(task_id)
+            assert task["target_repo"] == "fdp", (
+                f"Task {task_id} target_repo should be fdp, got {task['target_repo']}"
+            )
