@@ -743,3 +743,78 @@ def test_task_updated_after_completed_still_works(state):
     task = ws.get_task("t1")
     assert task["status"] == "pending", "task_updated should override completed status"
     assert task["pr_url"] is None
+
+
+# --- Retry boundary regression tests (off-by-one fix) ---
+
+
+def test_failed_task_at_max_retries_not_ready(state):
+    """Regression: task with attempt_count == max_retries must NOT be returned by get_ready_tasks.
+
+    With max_retries=3 and attempt_count=3, the retry budget is exhausted.
+    The boundary is attempt_count < max_retries (strict less-than).
+    """
+    ml, ws = state
+    ml.append(
+        "task_created",
+        {
+            "id": "t1",
+            "name": "exhausted task",
+            "done_when": "done",
+            "max_retries": 3,
+        },
+        reason="test",
+    )
+    # Simulate 3 failed attempts
+    ml.append(
+        "task_failed",
+        {"attempt_count": 3, "findings": ["error"]},
+        reason="third failure",
+        task_id="t1",
+    )
+    ws.refresh()
+
+    task = ws.get_task("t1")
+    assert task["attempt_count"] == 3
+    assert task["max_retries"] == 3
+    assert task["status"] == "failed"
+
+    ready = ws.get_ready_tasks()
+    assert not any(t["id"] == "t1" for t in ready), (
+        "task with attempt_count == max_retries must NOT appear in get_ready_tasks"
+    )
+
+
+def test_failed_task_below_max_retries_is_ready(state):
+    """Regression: task with attempt_count < max_retries must be returned by get_ready_tasks.
+
+    With max_retries=3 and attempt_count=2, the task still has retry budget.
+    """
+    ml, ws = state
+    ml.append(
+        "task_created",
+        {
+            "id": "t1",
+            "name": "retriable task",
+            "done_when": "done",
+            "max_retries": 3,
+        },
+        reason="test",
+    )
+    ml.append(
+        "task_failed",
+        {"attempt_count": 2, "findings": ["error"]},
+        reason="second failure",
+        task_id="t1",
+    )
+    ws.refresh()
+
+    task = ws.get_task("t1")
+    assert task["attempt_count"] == 2
+    assert task["max_retries"] == 3
+    assert task["status"] == "failed"
+
+    ready = ws.get_ready_tasks()
+    assert any(t["id"] == "t1" for t in ready), (
+        "task with attempt_count < max_retries must appear in get_ready_tasks"
+    )

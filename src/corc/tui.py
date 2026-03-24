@@ -347,7 +347,8 @@ def _format_attempt_count(task: dict) -> str | None:
     Uses ``attempt_count`` and ``max_retries`` from the task dict.
     ``attempt_count`` represents completed attempts (0 = first try).
     Display shows ``attempt_count + 1`` as the current attempt number
-    and ``max_retries + 1`` as the total allowed attempts.
+    and ``max_retries`` as the total allowed attempts (since the state
+    boundary is ``attempt_count < max_retries``).
     """
     attempt_count = task.get("attempt_count", 0)
     if not isinstance(attempt_count, int) or attempt_count < 1:
@@ -356,9 +357,13 @@ def _format_attempt_count(task: dict) -> str | None:
     if not isinstance(max_retries, int):
         max_retries = 3
     # Current attempt = attempt_count + 1 (attempt_count is completed attempts)
-    # Total attempts = max_retries + 1 (max_retries is number of retries after first)
+    # Total attempts = max_retries (max_retries is the retry budget; state uses
+    # attempt_count < max_retries so max_retries is also the total dispatch count)
     current = attempt_count + 1
-    total = max_retries + 1
+    total = max_retries
+    # Clamp so display never shows N/M where N > M+1 (e.g. from legacy data)
+    if current > total + 1:
+        current = total + 1
     return f"attempt {current}/{total}"
 
 

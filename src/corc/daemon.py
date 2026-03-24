@@ -187,7 +187,7 @@ class Daemon:
         """One iteration of the daemon loop: schedule → execute → process.
 
         The processor handles retry vs escalation decisions. Failed tasks
-        with attempt_count <= max_retries are automatically picked up by
+        with attempt_count < max_retries are automatically picked up by
         the scheduler on the next tick.
         """
         # Hot-reload changed source modules before dispatching
@@ -661,7 +661,7 @@ class Daemon:
             if task["status"] == "failed":
                 attempt_count = task.get("attempt_count", 0)
                 max_retries = task.get("max_retries", 3)
-                if attempt_count > max_retries:
+                if attempt_count >= max_retries:
                     return []
             return [task]
         return []
