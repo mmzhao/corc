@@ -3,9 +3,8 @@
 Loads per-repo merge policies from .corc/repos.yaml. Policies control
 whether agents can auto-merge PRs or whether merges require human action.
 
-Three merge policies:
-- direct: Skip PRs entirely. Merge worktree directly to main. For repos where PRs aren't needed.
-- auto: Create PR, auto-merge via gh pr merge after validation.
+Two merge policies:
+- auto: Create PR, auto-merge via gh pr merge after validation. Fails if PR cannot be created.
 - human-only: Agent creates PR, but only humans can merge.
 
 Additional per-repo settings:
@@ -27,26 +26,22 @@ class RepoPolicy:
     """Merge policy configuration for a single repository."""
 
     name: str
-    merge_policy: str = "auto"  # "direct", "auto", or "human-only"
+    merge_policy: str = "auto"  # "auto" or "human-only"
     protected_branches: list[str] = field(default_factory=lambda: ["main"])
     require_reviewer_approval: bool = True
     block_auto_merge: bool = False
     block_direct_push: bool = False
 
     def __post_init__(self):
-        if self.merge_policy not in ("direct", "auto", "human-only"):
+        if self.merge_policy not in ("auto", "human-only"):
             raise ValueError(
                 f"Invalid merge_policy '{self.merge_policy}': "
-                f"must be 'direct', 'auto', or 'human-only'"
+                f"must be 'auto' or 'human-only'"
             )
         # human-only implies blocking auto-merge and direct push
         if self.merge_policy == "human-only":
             self.block_auto_merge = True
             self.block_direct_push = True
-
-    @property
-    def is_direct(self) -> bool:
-        return self.merge_policy == "direct"
 
     @property
     def is_auto(self) -> bool:

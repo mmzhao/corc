@@ -470,12 +470,32 @@ class Executor:
             )
 
             # Create PR from worktree branch (PR-based workflow)
-            # Skip PR for repos with "direct" merge policy
+            # PR creation is mandatory — if it fails, the task fails
             pr_info = None
             if worktree_path and result.exit_code == 0:
-                policy = get_repo_policy(self.project_root)
-                if not policy.is_direct:
-                    pr_info = self._create_pr_from_worktree(task, worktree_path)
+                pr_info = self._create_pr_from_worktree(task, worktree_path)
+                if pr_info is None:
+                    self.audit_log.log(
+                        "task_failed_pr_required",
+                        task_id=task["id"],
+                        reason="PR creation failed — all repos require PRs",
+                    )
+                    # Return as failed so retry/escalation kicks in
+                    completed.append(
+                        CompletedTask(
+                            task=task,
+                            result=AgentResult(
+                                output=result.output
+                                + "\n\n[CORC] PR creation failed. Task cannot complete without a PR.",
+                                exit_code=1,
+                                duration_s=result.duration_s,
+                            ),
+                            worktree_path=worktree_path,
+                            pr_info=None,
+                            attempt=attempt,
+                        )
+                    )
+                    continue
 
             if not self.defer_merge and worktree_path:
                 # Legacy behavior: merge and clean up immediately

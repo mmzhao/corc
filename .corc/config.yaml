@@ -1,7 +1,7 @@
 repos:
   corc:
     path: /Users/michaelzhao/corc
-    merge_policy: direct
+    merge_policy: auto
     protected_branches:
     - main
     enforcement_level: relaxed

@@ -270,8 +270,7 @@ class Daemon:
           the worktree (keeping the branch for the PR).  Task stays in
           ``pending_merge`` status.
 
-        When no PR exists (fallback — e.g. no remote configured):
-        - Direct git merge (optimistic merge strategy) as before.
+        When no PR exists: task already failed in executor (PR is mandatory).
 
         If validation failed: clean up worktree (processor already set
         the appropriate failed/escalated status).
@@ -289,8 +288,14 @@ class Daemon:
             self._handle_pr_based_merge(item, proc_result)
             return
 
-        # No PR (fallback): try direct git merge (optimistic merge)
-        self._handle_direct_merge(item)
+        # No PR means PR creation failed — task should already be marked failed
+        # by the executor. Clean up worktree.
+        self.audit_log.log(
+            "worktree_merge_skipped_no_pr",
+            task_id=task_id,
+            reason="No PR exists — task should have been failed by executor",
+        )
+        self.executor.cleanup_worktree(task_id, worktree_path)
 
     def _handle_pr_based_merge(self, item, proc_result):
         """Handle merge via PR workflow (``gh pr merge``) instead of direct git merge.
