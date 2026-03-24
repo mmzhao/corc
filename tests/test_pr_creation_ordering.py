@@ -662,13 +662,15 @@ class TestDaemonPRBasedMerge:
 
         daemon._handle_worktree_merge(item, proc_result)
 
-        # Feature should be merged into main (direct git merge)
-        assert (git_repo / "feature.py").exists()
+        # No PR means no merge — PR-only workflow
+        # Feature should NOT be merged (no direct merge fallback)
+        assert not (git_repo / "feature.py").exists()
 
-        # Merge status should be recorded
-        entries = mutation_log.read_all()
-        updated = [e for e in entries if e.get("type") == "task_updated"]
-        assert any(e["data"].get("merge_status") == "merged" for e in updated)
+        # Audit should log that no PR exists
+        events = audit_log.read_today()
+        assert any(
+            e.get("event_type") == "worktree_merge_skipped_no_pr" for e in events
+        )
 
         daemon.executor.shutdown()
 
@@ -717,11 +719,24 @@ class TestPRCreatedBeforeMerge:
             call_order.append("create_pr")
             return (mock_pr_info, "")
 
+        # Mock subprocess.run for the git log commits-ahead check
+        orig_run = subprocess.run
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "git" in cmd and "log" in cmd:
+                # Simulate commits ahead of main
+                result = MagicMock()
+                result.returncode = 0
+                result.stdout = "abc1234 Agent commit\n"
+                return result
+            return orig_run(cmd, **kwargs)
+
         with (
             patch("corc.executor.pull_main", return_value=False),
             patch("corc.executor.push_branch", side_effect=track_push),
             patch("corc.executor.create_pr", side_effect=track_create_pr),
             patch("corc.executor.get_worktree_branch", return_value="corc/t1-1"),
+            patch("corc.executor.subprocess.run", side_effect=mock_subprocess_run),
         ):
             executor.dispatch(task)
             time.sleep(0.5)
@@ -862,11 +877,23 @@ class TestDaemonTickPRWorkflow:
             title="[corc] Task 1 (t1)",
         )
 
+        # Mock subprocess.run for the git log commits-ahead check
+        orig_run = subprocess.run
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "git" in cmd and "log" in cmd:
+                result = MagicMock()
+                result.returncode = 0
+                result.stdout = "abc1234 Agent commit\n"
+                return result
+            return orig_run(cmd, **kwargs)
+
         with (
             patch("corc.executor.pull_main", return_value=False),
             patch("corc.executor.push_branch", return_value=(True, "")),
             patch("corc.executor.create_pr", return_value=(mock_pr_info, "")),
             patch("corc.executor.get_worktree_branch", return_value="corc/t1-1"),
+            patch("corc.executor.subprocess.run", side_effect=mock_subprocess_run),
             patch("corc.processor.post_review_comment", return_value=True),
             patch("corc.processor.merge_pr", return_value=True) as mock_proc_merge,
             patch("corc.daemon.pull_main", return_value=True) as mock_daemon_pull,
@@ -919,11 +946,23 @@ class TestDaemonTickPRWorkflow:
             title="[corc] Task 1 (t1)",
         )
 
+        # Mock subprocess.run for the git log commits-ahead check
+        orig_run = subprocess.run
+
+        def mock_subprocess_run(cmd, **kwargs):
+            if isinstance(cmd, list) and "git" in cmd and "log" in cmd:
+                result = MagicMock()
+                result.returncode = 0
+                result.stdout = "abc1234 Agent commit\n"
+                return result
+            return orig_run(cmd, **kwargs)
+
         with (
             patch("corc.executor.pull_main", return_value=False),
             patch("corc.executor.push_branch", return_value=(True, "")),
             patch("corc.executor.create_pr", return_value=(mock_pr_info, "")),
             patch("corc.executor.get_worktree_branch", return_value="corc/t1-1"),
+            patch("corc.executor.subprocess.run", side_effect=mock_subprocess_run),
             patch("corc.processor.post_review_comment", return_value=True),
             patch("corc.processor.merge_pr") as mock_proc_merge,
             patch("corc.processor.get_repo_policy") as mock_proc_policy,
@@ -957,10 +996,10 @@ class TestDaemonTickPRWorkflow:
 
         daemon.executor.shutdown()
 
-    def test_no_pr_fallback_to_direct_merge(
+    def test_no_pr_no_merge_when_pr_creation_fails(
         self, git_repo, mutation_log, work_state, audit_log, session_logger
     ):
-        """Daemon tick without remote: falls back to direct git merge."""
+        """Daemon tick without remote: no merge happens (PR-only workflow)."""
         dispatcher = CommittingDispatcher(
             filename="feature.py", content="def feature(): pass\n"
         )
@@ -980,16 +1019,11 @@ class TestDaemonTickPRWorkflow:
         # Tick 1: dispatch
         daemon._tick()
         time.sleep(0.5)
-        # Tick 2: poll → process → direct merge (fallback)
+        # Tick 2: poll → process → no merge (PR-only, no fallback)
         daemon._tick()
 
-        # File should be in main (merged directly)
-        assert (git_repo / "feature.py").exists()
-
-        work_state.refresh()
-        task = work_state.get_task("t1")
-        assert task["status"] == "completed"
-        assert task.get("merge_status") == "merged"
+        # File should NOT be in main (no direct merge fallback)
+        assert not (git_repo / "feature.py").exists()
 
         daemon.executor.shutdown()
 

@@ -779,13 +779,18 @@ repos:
             patch("corc.executor.get_repo_policy") as mock_policy,
             patch("corc.executor.create_pr") as mock_create_pr,
             patch("corc.executor.push_branch", return_value=(True, "")),
+            patch("corc.executor.check_for_merged_pr", return_value=None),
+            patch("corc.executor.pull_main", return_value=False),
         ):
             mock_policy.return_value = RepoPolicy(name="repo", merge_policy="auto")
-            mock_create_pr.return_value = PRInfo(
-                url="https://github.com/test/repo/pull/1",
-                number=1,
-                branch="corc/t1-1",
-                title="test",
+            mock_create_pr.return_value = (
+                PRInfo(
+                    url="https://github.com/test/repo/pull/1",
+                    number=1,
+                    branch="corc/t1-1",
+                    title="test",
+                ),
+                "",
             )
             executor.dispatch(task)
             time.sleep(0.5)
@@ -842,15 +847,20 @@ repos:
             patch("corc.executor.get_repo_policy") as mock_policy,
             patch("corc.executor.create_pr") as mock_create_pr,
             patch("corc.executor.push_branch", return_value=(True, "")),
+            patch("corc.executor.check_for_merged_pr", return_value=None),
+            patch("corc.executor.pull_main", return_value=False),
         ):
             mock_policy.return_value = RepoPolicy(
                 name="repo", merge_policy="human-only"
             )
-            mock_create_pr.return_value = PRInfo(
-                url="https://github.com/test/repo/pull/1",
-                number=1,
-                branch="corc/t1-1",
-                title="test",
+            mock_create_pr.return_value = (
+                PRInfo(
+                    url="https://github.com/test/repo/pull/1",
+                    number=1,
+                    branch="corc/t1-1",
+                    title="test",
+                ),
+                "",
             )
             executor.dispatch(task)
             time.sleep(0.5)
@@ -906,7 +916,24 @@ repos:
             project_root=git_repo,
         )
 
-        with patch("corc.executor.get_repo_policy") as mock_policy:
+        with (
+            patch("corc.executor.get_repo_policy") as mock_policy,
+            patch("corc.executor.push_branch", return_value=(True, "")),
+            patch("corc.executor.check_for_merged_pr", return_value=None),
+            patch("corc.executor.pull_main", return_value=False),
+            patch(
+                "corc.executor.create_pr",
+                return_value=(
+                    PRInfo(
+                        url="https://github.com/test/repo/pull/1",
+                        number=1,
+                        branch="corc/t1-1",
+                        title="test",
+                    ),
+                    "",
+                ),
+            ),
+        ):
             mock_policy.return_value = RepoPolicy(
                 name="repo", merge_policy="human-only"
             )
@@ -1133,11 +1160,14 @@ repos:
         ):
             exec_mock.return_value = RepoPolicy(name="repo", merge_policy="auto")
             proc_mock.return_value = RepoPolicy(name="repo", merge_policy="auto")
-            mock_create_pr.return_value = PRInfo(
-                url="https://github.com/test/repo/pull/1",
-                number=1,
-                branch="corc/t1-1",
-                title="test",
+            mock_create_pr.return_value = (
+                PRInfo(
+                    url="https://github.com/test/repo/pull/1",
+                    number=1,
+                    branch="corc/t1-1",
+                    title="test",
+                ),
+                "",
             )
 
             executor.dispatch(task)
@@ -1214,11 +1244,14 @@ repos:
             human_policy = RepoPolicy(name="repo", merge_policy="human-only")
             exec_mock.return_value = human_policy
             proc_mock.return_value = human_policy
-            mock_create_pr.return_value = PRInfo(
-                url="https://github.com/test/repo/pull/1",
-                number=1,
-                branch="corc/t1-1",
-                title="test",
+            mock_create_pr.return_value = (
+                PRInfo(
+                    url="https://github.com/test/repo/pull/1",
+                    number=1,
+                    branch="corc/t1-1",
+                    title="test",
+                ),
+                "",
             )
 
             executor.dispatch(task)
