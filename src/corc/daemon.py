@@ -232,8 +232,18 @@ class Daemon:
             )
 
             # 5. Optimistic merge: merge worktree → main after validation passes
+            #    Wrapped in try/except to guarantee worktree cleanup even if
+            #    merge handling raises an unexpected exception.
             if item.worktree_path:
-                self._handle_worktree_merge(item, proc_result)
+                try:
+                    self._handle_worktree_merge(item, proc_result)
+                except Exception as e:
+                    self.audit_log.log(
+                        "worktree_merge_handling_error",
+                        task_id=item.task["id"],
+                        error=str(e),
+                    )
+                    self.executor.cleanup_worktree(item.task["id"], item.worktree_path)
             elif proc_result.passed:
                 # No worktree (fallback mode) — just count completion
                 pass
@@ -248,6 +258,14 @@ class Daemon:
                 if self._chaos_monkey and task["status"] == "completed":
                     corc_dir = self.project_root / ".corc"
                     mark_event_recovered(corc_dir, item.task["id"])
+
+                # Clean up any conflict worktrees saved for retry that are
+                # now irrelevant (task reached terminal state).
+                conflict_wt = self.executor._conflict_worktrees.pop(
+                    item.task["id"], None
+                )
+                if conflict_wt and conflict_wt.exists():
+                    self.executor.cleanup_worktree(item.task["id"], conflict_wt)
 
         # 5. Reconcile externally-dispatched tasks (e.g. via 'corc dispatch')
         #    These are running tasks with no matching executor handle.
