@@ -146,6 +146,20 @@ class Daemon:
             pid_checker=self._pid_checker,
         )
 
+        # Re-attach monitoring for agents that are still alive.
+        # This ensures the daemon polls them for completion and captures
+        # their output when they finish — preventing duplicate dispatches
+        # (the task stays 'running' and is tracked in executor.in_flight_task_ids).
+        for agent_info in self._reconcile_summary.get("alive_agents", []):
+            wt = agent_info.get("worktree_path")
+            self.executor.reattach(
+                task=agent_info["task"],
+                pid=agent_info["pid"],
+                attempt=agent_info["attempt"],
+                worktree_path=Path(wt) if wt else None,
+                agent_id=agent_info.get("agent_id"),
+            )
+
         # No need to manually retry reconciled failures — the scheduler
         # automatically includes failed tasks that haven't exceeded
         # max_retries in its ready queue.
