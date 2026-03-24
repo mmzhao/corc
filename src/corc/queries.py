@@ -141,6 +141,32 @@ class QueryAPI:
         return recent
 
     # ------------------------------------------------------------------
+    # Failure history
+    # ------------------------------------------------------------------
+
+    def get_task_failure_history(self, task_id: str) -> list[dict]:
+        """Get failure reasons for each attempt of a task.
+
+        Reads task_failed mutations from the mutation log and returns
+        a list of dicts with ``attempt`` and ``reason`` for each failure.
+        Sorted by attempt number ascending.
+        """
+        mutations = self.work_state.mutation_log.read_all()
+        failures = []
+        for m in mutations:
+            if m.get("task_id") == task_id and m["type"] == "task_failed":
+                failures.append(
+                    {
+                        "attempt": m["data"].get("attempt", "?"),
+                        "reason": m.get("reason", "Unknown"),
+                        "merge_conflict": m["data"].get("merge_conflict", False),
+                        "exit_code": m["data"].get("exit_code"),
+                    }
+                )
+        failures.sort(key=lambda f: f.get("attempt", 0) or 0)
+        return failures
+
+    # ------------------------------------------------------------------
     # Event / stream queries
     # ------------------------------------------------------------------
 
