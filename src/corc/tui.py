@@ -12,7 +12,8 @@ Shows only what matters *right now*:
 Historical completed tasks from old phases are hidden.
 Data comes from queries.py (QueryAPI data layer).
 
-Press 'q' to quit, or Ctrl+C.  ↑/↓ to scroll streaming detail.
+Press 'q' to quit, or Ctrl+C.  ↑/↓ to scroll focused panel.
+Tab to cycle focus between panels.
 """
 
 import json
@@ -235,6 +236,22 @@ EVENT_STYLES = {
 }
 
 
+# ── Panel focus and scrolling ────────────────────────────────────────────
+
+# Panel names in Tab-cycling order
+PANEL_NAMES = ("active_plan", "streaming", "events")
+
+# Border style applied to the focused (active) panel
+FOCUSED_BORDER_STYLE = "bold bright_white"
+
+# Default border styles for each panel when not focused
+_DEFAULT_BORDER_STYLES = {
+    "active_plan": "blue",
+    "streaming": "magenta",
+    "events": "green",
+}
+
+
 # ── Elapsed time helper ──────────────────────────────────────────────────
 
 
@@ -446,25 +463,8 @@ def _format_checklist_progress(checklist) -> str | None:
     return f"{done}/{total} items done"
 
 
-def _format_attempt_count(task: dict) -> str | None:
-    """Format the retry attempt count for display.
-
-    Returns e.g. ``'attempt 2/4'`` when the task is on its second attempt
-    (out of 4 total possible = 1 initial + 3 retries).
-
-    Returns ``None`` for first-attempt tasks (attempt_count == 0) since
-    no retry indicator is needed.
-
-    Args:
-        task: Task dict with optional ``attempt_count`` and ``max_retries``.
-    """
-    attempt_count = task.get("attempt_count", 0)
-    if not attempt_count or attempt_count <= 0:
-        return None
-    max_retries = task.get("max_retries", 3)
-    current = attempt_count + 1  # attempt_count=1 means 2nd attempt
-    total = max_retries + 1  # max_retries=3 means 4 total possible attempts
-    return f"attempt {current}/{total}"
+# NOTE: _format_attempt_count is defined earlier in this file (with
+# proper isinstance guard).  A duplicate definition was removed here.
 
 
 def _format_cost_line(event: dict) -> str:
@@ -506,6 +506,7 @@ def build_streaming_detail_panel(
     stream_events_by_task: dict[str, list[dict]],
     scroll_offset: int = 0,
     max_lines: int = 30,
+    focused_panel: str | None = None,
 ) -> Panel:
     """Build the streaming detail panel showing live agent activity.
 
@@ -517,6 +518,7 @@ def build_streaming_detail_panel(
       - Result summaries (✅)
 
     Supports scrolling via *scroll_offset* (lines from the bottom).
+    Scroll works regardless of whether content exceeds *max_lines*.
 
     Args:
         running_tasks: Currently running task dicts (may include checklist).
@@ -524,7 +526,9 @@ def build_streaming_detail_panel(
             from ``QueryAPI.get_task_stream_events()``.
         scroll_offset: Lines to scroll up from the bottom (0 = newest).
         max_lines: Maximum number of lines to display.
+        focused_panel: Name of the currently focused panel (for highlight).
     """
+    border = FOCUSED_BORDER_STYLE if focused_panel == "streaming" else "magenta"
     lines: list[Text] = []
 
     if not running_tasks:
@@ -533,7 +537,7 @@ def build_streaming_detail_panel(
             content,
             title="[bold] Streaming Detail [/bold]",
             subtitle="↑/↓ scroll",
-            border_style="magenta",
+            border_style=border,
         )
 
     def _name(t: dict) -> str:
@@ -613,13 +617,20 @@ def build_streaming_detail_panel(
         lines.append(Text(""))  # Spacer between tasks
 
     # ── Apply scroll offset ────────────────────────────────────────
+    # NOTE: scroll_offset is applied even when total_lines <= max_lines.
+    # Previously, the guard `total_lines > max_lines` prevented scrolling
+    # when content fit in the panel (the events-capped-to-20 bug).
     total_lines = len(lines)
-    if scroll_offset > 0 and total_lines > max_lines:
-        end = max(0, total_lines - scroll_offset)
+    start = 0
+    end = total_lines
+
+    if scroll_offset > 0:
+        end = max(1, total_lines - scroll_offset)
         start = max(0, end - max_lines)
         lines = lines[start:end]
     elif total_lines > max_lines:
         # Default: show the most recent lines (bottom)
+        start = total_lines - max_lines
         lines = lines[-max_lines:]
 
     if lines:
@@ -627,16 +638,24 @@ def build_streaming_detail_panel(
     else:
         content = Text("No stream data yet.", style="dim")
 
-    # Scroll indicator in subtitle
-    subtitle = "↑/↓ scroll"
+    # Scroll indicators in subtitle
+    can_scroll_up = start > 0
+    can_scroll_down = end < total_lines
+
+    subtitle_parts = ["↑/↓ scroll"]
+    if can_scroll_up:
+        subtitle_parts.append("▲ more above")
+    if can_scroll_down:
+        subtitle_parts.append("▼ more below")
     if scroll_offset > 0:
-        subtitle += f" | offset: {scroll_offset}"
+        subtitle_parts.append(f"offset: {scroll_offset}")
+    subtitle = " | ".join(subtitle_parts)
 
     return Panel(
         content,
         title="[bold] Streaming Detail [/bold]",
         subtitle=subtitle,
-        border_style="magenta",
+        border_style=border,
     )
 
 
@@ -816,42 +835,80 @@ def build_active_plan_panel(
         lines.append(Text(""))
 
     # ── Empty state ────────────────────────────────────────────────
+    border = FOCUSED_BORDER_STYLE if focused_panel == "active_plan" else "blue"
+
     if not lines:
         content = Text(
             "No active tasks. Create tasks with: corc task create", style="dim"
         )
-    else:
-        # Summary line at top
-        total = (
-            len(running_tasks)
-            + len(ready_tasks)
-            + len(blocked_tasks)
-            + len(other_active or [])
+        return Panel(
+            content,
+            title="[bold] Active Plan [/bold]",
+            border_style=border,
         )
-        summary = Text()
-        summary.append(f"  {total} active", style="bold")
-        if running_tasks:
-            summary.append(f"  {len(running_tasks)} running", style="yellow")
-        if ready_tasks:
-            summary.append(f"  {len(ready_tasks)} ready", style="cyan")
-        if blocked_tasks:
-            summary.append(f"  {len(blocked_tasks)} blocked", style="bright_black")
-        if recently_completed:
-            summary.append(
-                f"  {len(recently_completed)} done recently", style="dim green"
-            )
-        lines.insert(0, summary)
-        lines.insert(1, Text(""))
-        content = Text("\n").join(lines)
+
+    # Summary line at top
+    total = (
+        len(running_tasks)
+        + len(ready_tasks)
+        + len(blocked_tasks)
+        + len(other_active or [])
+    )
+    summary = Text()
+    summary.append(f"  {total} active", style="bold")
+    if running_tasks:
+        summary.append(f"  {len(running_tasks)} running", style="yellow")
+    if ready_tasks:
+        summary.append(f"  {len(ready_tasks)} ready", style="cyan")
+    if blocked_tasks:
+        summary.append(f"  {len(blocked_tasks)} blocked", style="bright_black")
+    if recently_completed:
+        summary.append(f"  {len(recently_completed)} done recently", style="dim green")
+    lines.insert(0, summary)
+    lines.insert(1, Text(""))
+
+    # ── Apply scroll offset ────────────────────────────────────
+    total_lines = len(lines)
+    start = 0
+    end = total_lines
+
+    if scroll_offset > 0:
+        end = max(1, total_lines - scroll_offset)
+        start = max(0, end - max_lines)
+        visible = lines[start:end]
+    elif total_lines > max_lines:
+        start = total_lines - max_lines
+        visible = lines[-max_lines:]
+    else:
+        visible = lines
+
+    can_scroll_up = start > 0
+    can_scroll_down = end < total_lines
+
+    subtitle_parts: list[str] = []
+    if can_scroll_up:
+        subtitle_parts.append("▲ more above")
+    if can_scroll_down:
+        subtitle_parts.append("▼ more below")
+    subtitle = " | ".join(subtitle_parts) if subtitle_parts else None
+
+    content = Text("\n").join(visible)
 
     return Panel(
         content,
         title="[bold] Active Plan [/bold]",
-        border_style="blue",
+        subtitle=subtitle,
+        border_style=border,
     )
 
 
-def build_event_panel(events: list[dict], max_events: int = 20) -> Panel:
+def build_event_panel(
+    events: list[dict],
+    max_events: int = 20,
+    scroll_offset: int = 0,
+    max_lines: int = 40,
+    focused_panel: str | None = None,
+) -> Panel:
     """Build the color-coded event stream panel.
 
     Each event line shows: timestamp  event_type  task_id  extras
@@ -860,76 +917,110 @@ def build_event_panel(events: list[dict], max_events: int = 20) -> Panel:
     task_cost events get a special compact format showing cost, tokens,
     and duration.  A running session cost total is shown at the bottom
     when any task_cost events are present in the full event list.
+
+    Supports scrolling via *scroll_offset* and focus highlight via
+    *focused_panel*.
     """
+    border = FOCUSED_BORDER_STYLE if focused_panel == "events" else "green"
     display_events = events[-max_events:] if len(events) > max_events else events
 
     if not display_events:
         content = Text("No events yet. Waiting...", style="dim")
-    else:
-        lines: list[Text] = []
-        for e in display_events:
-            ts = e.get("timestamp", "")[:19].replace("T", " ")
-            etype = e.get("event_type", "unknown")
-            tid = e.get("task_id", "")[:8] if e.get("task_id") else ""
-            style = EVENT_STYLES.get(etype, "white")
+        return Panel(
+            content,
+            title="[bold] Events [/bold]",
+            subtitle="q to quit | Ctrl+C",
+            border_style=border,
+        )
 
-            # task_cost events get a special compact format
-            if etype == "task_cost":
-                cost_summary = _format_cost_line(e)
-                line = Text()
-                line.append(f"{ts}  ", style="dim")
-                line.append(f"{'task_cost':<25}", style=style)
-                line.append(f"  {tid}", style="bold")
-                line.append(f"  {cost_summary}", style=style)
-                lines.append(line)
-                continue
+    lines: list[Text] = []
+    for e in display_events:
+        ts = e.get("timestamp", "")[:19].replace("T", " ")
+        etype = e.get("event_type", "unknown")
+        tid = e.get("task_id", "")[:8] if e.get("task_id") else ""
+        style = EVENT_STYLES.get(etype, "white")
 
-            extra_parts: list[str] = []
-            if e.get("duration_s"):
-                extra_parts.append(f"({e['duration_s']:.1f}s)")
-            if e.get("exit_code") is not None and e["exit_code"] != 0:
-                extra_parts.append(f"exit={e['exit_code']}")
-            if e.get("name"):
-                extra_parts.append(e["name"])
-            # Streaming event extras: tool name and assistant content
-            if e.get("tool_name"):
-                extra_parts.append(f"-> {e['tool_name']}")
-            if e.get("tool_input"):
-                extra_parts.append(e["tool_input"])
-            extra = " ".join(extra_parts)
-
+        # task_cost events get a special compact format
+        if etype == "task_cost":
+            cost_summary = _format_cost_line(e)
             line = Text()
             line.append(f"{ts}  ", style="dim")
-            line.append(f"{etype:<25}", style=style)
+            line.append(f"{'task_cost':<25}", style=style)
             line.append(f"  {tid}", style="bold")
-            if extra:
-                line.append(f"  {extra}", style="dim")
+            line.append(f"  {cost_summary}", style=style)
             lines.append(line)
+            continue
 
-            # Show full assistant message content on subsequent lines
-            # (verbose output -- no truncation)
-            if e.get("content") and etype == "assistant_message":
-                for content_line in e["content"].split("\n"):
-                    detail = Text()
-                    detail.append("                           ", style="dim")
-                    detail.append(content_line, style="blue dim")
-                    lines.append(detail)
+        extra_parts: list[str] = []
+        if e.get("duration_s"):
+            extra_parts.append(f"({e['duration_s']:.1f}s)")
+        if e.get("exit_code") is not None and e["exit_code"] != 0:
+            extra_parts.append(f"exit={e['exit_code']}")
+        if e.get("name"):
+            extra_parts.append(e["name"])
+        # Streaming event extras: tool name and assistant content
+        if e.get("tool_name"):
+            extra_parts.append(f"-> {e['tool_name']}")
+        if e.get("tool_input"):
+            extra_parts.append(e["tool_input"])
+        extra = " ".join(extra_parts)
 
-        # Session cost total (computed from ALL events, not just displayed ones)
-        session_total = _format_session_cost_total(events)
-        if session_total:
-            lines.append(Text(""))  # Spacer
-            total_line = Text()
-            total_line.append(f"  {session_total}", style="bold green")
-            lines.append(total_line)
+        line = Text()
+        line.append(f"{ts}  ", style="dim")
+        line.append(f"{etype:<25}", style=style)
+        line.append(f"  {tid}", style="bold")
+        if extra:
+            line.append(f"  {extra}", style="dim")
+        lines.append(line)
 
-        content = Text("\n").join(lines)
+        # Show full assistant message content on subsequent lines
+        # (verbose output -- no truncation)
+        if e.get("content") and etype == "assistant_message":
+            for content_line in e["content"].split("\n"):
+                detail = Text()
+                detail.append("                           ", style="dim")
+                detail.append(content_line, style="blue dim")
+                lines.append(detail)
+
+    # Session cost total (computed from ALL events, not just displayed ones)
+    session_total = _format_session_cost_total(events)
+    if session_total:
+        lines.append(Text(""))  # Spacer
+        total_line = Text()
+        total_line.append(f"  {session_total}", style="bold green")
+        lines.append(total_line)
+
+    # ── Apply scroll offset ────────────────────────────────────
+    total_lines = len(lines)
+    start = 0
+    end = total_lines
+
+    if scroll_offset > 0:
+        end = max(1, total_lines - scroll_offset)
+        start = max(0, end - max_lines)
+        lines = lines[start:end]
+    elif total_lines > max_lines:
+        start = total_lines - max_lines
+        lines = lines[-max_lines:]
+
+    can_scroll_up = start > 0
+    can_scroll_down = end < total_lines
+
+    content = Text("\n").join(lines)
+
+    # Build subtitle with scroll indicators
+    subtitle_parts = ["q to quit | Ctrl+C"]
+    if can_scroll_up:
+        subtitle_parts.append("▲ more above")
+    if can_scroll_down:
+        subtitle_parts.append("▼ more below")
+    subtitle = " | ".join(subtitle_parts)
 
     return Panel(
         content,
         title="[bold] Events [/bold]",
-        subtitle="q to quit | Ctrl+C",
-        border_style="green",
+        subtitle=subtitle,
+        border_style=border,
     )
 
 
@@ -993,6 +1084,8 @@ def build_active_dashboard(
     stream_events_by_task: dict[str, list[dict]] | None = None,
     scroll_offset: int = 0,
     daemon_status: dict | None = None,
+    focused_panel: str | None = None,
+    scroll_offsets: dict[str, int] | None = None,
 ) -> Layout:
     """Build the active-plan-focused dashboard layout.
 
@@ -1009,7 +1102,23 @@ def build_active_dashboard(
     When *daemon_status* is provided, a compact status header is shown
     at the top of the layout indicating whether the daemon is running
     (green), paused (yellow), or stopped (red).
+
+    *focused_panel* highlights one panel with a bright border. Tab
+    cycles focus in the live dashboard.
+
+    *scroll_offsets* provides per-panel scroll offsets (keys are panel
+    names from :data:`PANEL_NAMES`).  Falls back to *scroll_offset*
+    for the streaming panel for backward compatibility.
     """
+    # Resolve per-panel scroll offsets
+    streaming_scroll = scroll_offset  # backward compat
+    active_plan_scroll = 0
+    events_scroll = 0
+    if scroll_offsets:
+        streaming_scroll = scroll_offsets.get("streaming", scroll_offset)
+        active_plan_scroll = scroll_offsets.get("active_plan", 0)
+        events_scroll = scroll_offsets.get("events", 0)
+
     # Build the main content area
     main = Layout(name="main")
 
@@ -1027,7 +1136,8 @@ def build_active_dashboard(
             build_streaming_detail_panel(
                 running_tasks,
                 stream_events_by_task,
-                scroll_offset=scroll_offset,
+                scroll_offset=streaming_scroll,
+                focused_panel=focused_panel,
             )
         )
     else:
@@ -1047,9 +1157,18 @@ def build_active_dashboard(
             blocked_tasks,
             recently_completed,
             other_active,
+            scroll_offset=active_plan_scroll,
+            focused_panel=focused_panel,
         )
     )
-    main["events"].update(build_event_panel(events, max_events))
+    main["events"].update(
+        build_event_panel(
+            events,
+            max_events,
+            scroll_offset=events_scroll,
+            focused_panel=focused_panel,
+        )
+    )
 
     # Wrap with daemon status header if provided
     if daemon_status is not None:
@@ -1113,14 +1232,19 @@ def _listen_for_keys(
     stop_event: threading.Event,
     scroll_state: dict,
 ) -> None:
-    """Background thread: listen for 'q' and arrow keys.
+    """Background thread: listen for 'q', Tab, and arrow keys.
 
     Handles:
       - ``q``: quit (sets *stop_event*)
-      - ``↑`` (ESC [ A): scroll streaming panel up
-      - ``↓`` (ESC [ B): scroll streaming panel down (towards newest)
+      - ``Tab``: cycle focused panel (streaming → active_plan → events)
+      - ``↑`` (ESC [ A): scroll focused panel up (increase offset)
+      - ``↓`` (ESC [ B): scroll focused panel down (decrease offset)
 
-    *scroll_state* is a mutable dict with key ``offset`` (int).
+    *scroll_state* is a mutable dict with keys:
+      - ``focused_panel``: name of the focused panel (str)
+      - Panel name keys (``streaming``, ``active_plan``, ``events``):
+        per-panel scroll offsets (int)
+
     Uses cbreak mode on Unix; falls back to quit-only on non-terminals.
     """
     try:
@@ -1139,7 +1263,13 @@ def _listen_for_keys(
                     if ch.lower() == "q":
                         stop_event.set()
                         break
-                    if ch == "\x1b":
+                    if ch == "\t":
+                        # Tab: cycle focused panel
+                        panels = list(PANEL_NAMES)
+                        current = scroll_state.get("focused_panel", "streaming")
+                        idx = panels.index(current) if current in panels else 0
+                        scroll_state["focused_panel"] = panels[(idx + 1) % len(panels)]
+                    elif ch == "\x1b":
                         # Possible escape sequence (arrow key)
                         ready2, _, _ = select.select([sys.stdin], [], [], 0.05)
                         if ready2:
@@ -1148,14 +1278,17 @@ def _listen_for_keys(
                                 ready3, _, _ = select.select([sys.stdin], [], [], 0.05)
                                 if ready3:
                                     ch3 = sys.stdin.read(1)
+                                    panel = scroll_state.get(
+                                        "focused_panel", "streaming"
+                                    )
                                     if ch3 == "A":  # Up arrow
-                                        scroll_state["offset"] = (
-                                            scroll_state.get("offset", 0) + 3
+                                        scroll_state[panel] = (
+                                            scroll_state.get(panel, 0) + 3
                                         )
                                     elif ch3 == "B":  # Down arrow
-                                        scroll_state["offset"] = max(
+                                        scroll_state[panel] = max(
                                             0,
-                                            scroll_state.get("offset", 0) - 3,
+                                            scroll_state.get(panel, 0) - 3,
                                         )
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
@@ -1251,7 +1384,12 @@ def run_active_dashboard(
     """
     console = console or Console()
     stop_event = threading.Event()
-    scroll_state: dict = {"offset": 0}
+    scroll_state: dict = {
+        "focused_panel": "streaming",
+        "streaming": 0,
+        "active_plan": 0,
+        "events": 0,
+    }
 
     key_thread = threading.Thread(
         target=_listen_for_keys, args=(stop_event, scroll_state), daemon=True
@@ -1335,8 +1473,13 @@ def run_active_dashboard(
                     events,
                     max_events,
                     stream_events_by_task=stream_events_by_task,
-                    scroll_offset=scroll_state.get("offset", 0),
                     daemon_status=daemon_status,
+                    focused_panel=scroll_state.get("focused_panel", "streaming"),
+                    scroll_offsets={
+                        "streaming": scroll_state.get("streaming", 0),
+                        "active_plan": scroll_state.get("active_plan", 0),
+                        "events": scroll_state.get("events", 0),
+                    },
                 )
                 live.update(dashboard)
                 stop_event.wait(interval)
