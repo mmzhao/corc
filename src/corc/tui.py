@@ -1147,6 +1147,7 @@ def build_active_dashboard(
     failure_history: dict[str, list[dict]] | None = None,
     focused_panel: str | None = None,
     scroll_offsets: dict[str, int] | None = None,
+    today_total_cost: float | None = None,
 ) -> Layout:
     """Build the active-plan-focused dashboard layout.
 
@@ -1234,16 +1235,7 @@ def build_active_dashboard(
 
     # Wrap with daemon status header if provided
     if daemon_status is not None:
-        # Compute session cost from events
-        session_cost = (
-            sum(
-                float(e.get("cost_usd", 0))
-                for e in events
-                if e.get("event_type") == "task_cost"
-            )
-            or None
-        )
-        header_content = build_daemon_status_header(daemon_status, session_cost)
+        header_content = build_daemon_status_header(daemon_status, today_total_cost)
         header_panel = Panel(
             header_content,
             title="[bold] Daemon [/bold]",
@@ -1561,6 +1553,7 @@ def run_active_dashboard(
                         "active_plan": scroll_state.get("active_plan", 0),
                         "events": scroll_state.get("events", 0),
                     },
+                    today_total_cost=query_api.get_today_total_cost(),
                 )
                 live.update(dashboard)
                 stop_event.wait(interval)
