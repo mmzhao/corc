@@ -145,14 +145,18 @@ def remove_worktree(
 def merge_worktree(project_root: Path, worktree_path: Path) -> bool:
     """Merge changes from a worktree branch back into the main branch.
 
-    Uses a two-step merge to auto-resolve data file conflicts:
+    Uses a multi-step merge to auto-resolve conflicts:
     1. ``git merge --no-ff --no-commit`` stages the merge without committing.
     2. ``git checkout --ours`` for data files (mutations.jsonl, audit.jsonl,
        sessions/) keeps main's version — agents never write these files.
-    3. ``git commit`` finalises the merge.
+    3. If non-data conflicts remain, invoke a short ``claude -p`` agent to
+       resolve trivial conflicts (formatting, whitespace, ordering).
+    4. ``git commit`` finalises the merge.
 
     This eliminates the #1 source of merge conflicts: data/mutations.jsonl
     diverging because the daemon appends to it on main while agents run.
+    Non-data trivial conflicts are resolved by the agent; genuine semantic
+    conflicts still cause merge failure.
 
     Args:
         project_root: The main repository root directory.
@@ -222,16 +226,41 @@ def merge_worktree(project_root: Path, worktree_path: Path) -> bool:
         timeout=30,
     )
     if status_result.stdout.strip():
-        # Still have unresolved conflicts in non-data files — abort
-        subprocess.run(
-            ["git", "merge", "--abort"],
+        # Still have unresolved conflicts in non-data files
+        conflicted_files = [
+            f.strip() for f in status_result.stdout.strip().splitlines() if f.strip()
+        ]
+
+        # Step 3: Try agent-driven conflict resolution for trivial conflicts
+        if not _try_agent_conflict_resolution(project_root, conflicted_files):
+            # Agent couldn't resolve or wasn't available — abort
+            subprocess.run(
+                ["git", "merge", "--abort"],
+                capture_output=True,
+                cwd=str(project_root),
+                timeout=30,
+            )
+            return False
+
+        # Verify no unmerged files remain after agent resolution
+        verify_result = subprocess.run(
+            ["git", "diff", "--name-only", "--diff-filter=U"],
             capture_output=True,
+            text=True,
             cwd=str(project_root),
             timeout=30,
         )
-        return False
+        if verify_result.stdout.strip():
+            # Agent claimed success but conflicts remain — abort
+            subprocess.run(
+                ["git", "merge", "--abort"],
+                capture_output=True,
+                cwd=str(project_root),
+                timeout=30,
+            )
+            return False
 
-    # Step 3: Commit the merge
+    # Step 4: Commit the merge
     commit_result = subprocess.run(
         ["git", "commit", "--no-edit", "-m", f"Merge {branch_name}"],
         capture_output=True,
@@ -388,6 +417,115 @@ def _get_worktree_branch(project_root: Path, worktree_path: Path) -> str | None:
         return None
     except (subprocess.SubprocessError, FileNotFoundError, OSError):
         return None
+
+
+def _has_conflict_markers(filepath: Path) -> bool:
+    """Check if a file contains git conflict markers.
+
+    Looks for lines starting with ``<<<<<<<`` or ``>>>>>>>`` which are
+    the standard markers git inserts during a conflicted merge.
+
+    Args:
+        filepath: Absolute path to the file to check.
+
+    Returns:
+        True if conflict markers are found (or the file can't be read),
+        False if the file is clean.
+    """
+    try:
+        content = filepath.read_text()
+    except OSError:
+        return True  # Can't read — assume still conflicted
+    for line in content.splitlines():
+        if line.startswith("<<<<<<<") or line.startswith(">>>>>>>"):
+            return True
+    return False
+
+
+def _try_agent_conflict_resolution(
+    project_root: Path,
+    conflicted_files: list[str],
+) -> bool:
+    """Invoke a short ``claude -p`` agent to resolve merge conflicts in-place.
+
+    Builds a prompt containing the conflict markers from each file and
+    invokes ``claude -p`` with a small turn budget.  The agent edits files
+    to resolve trivial conflicts (formatting, whitespace, ordering, both
+    sides adding similar code).  For genuine semantic conflicts the agent
+    should exit non-zero without making changes.
+
+    After the agent exits successfully, this function verifies that conflict
+    markers have been removed from all files and stages them with
+    ``git add``.
+
+    Args:
+        project_root: Repository root where the merge is in progress.
+        conflicted_files: Relative paths of files with unresolved conflicts.
+
+    Returns:
+        True if all conflicts were resolved and staged, False otherwise.
+    """
+    # Read conflict content from each file
+    file_sections = []
+    for fpath in conflicted_files:
+        full_path = project_root / fpath
+        try:
+            content = full_path.read_text()
+        except OSError:
+            return False
+        file_sections.append(f"=== {fpath} ===\n{content}")
+
+    files_text = "\n\n".join(file_sections)
+
+    prompt = (
+        "You are resolving git merge conflicts. The following files contain "
+        "unresolved conflict markers (<<<<<<< ======= >>>>>>>).\n\n"
+        "INSTRUCTIONS:\n"
+        "1. For each file, edit it to resolve the conflict by removing ALL "
+        "<<<<<<< ======= >>>>>>> markers and keeping the correct content.\n"
+        "2. If a conflict is trivial (whitespace, formatting, import ordering, "
+        "both sides adding similar or identical code), resolve it.\n"
+        "3. If ANY conflict involves genuine semantic differences that need "
+        "human judgment, stop immediately without making changes.\n"
+        "4. Do NOT run git add or git commit.\n\n"
+        f"Files with conflicts:\n\n{files_text}"
+    )
+
+    try:
+        result = subprocess.run(
+            [
+                "claude",
+                "-p",
+                prompt,
+                "--dangerously-skip-permissions",
+                "--max-turns",
+                "5",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=str(project_root),
+            timeout=120,
+        )
+        if result.returncode != 0:
+            return False
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return False
+
+    # Verify conflict markers were removed from all files
+    for fpath in conflicted_files:
+        if _has_conflict_markers(project_root / fpath):
+            return False
+
+    # Stage the resolved files
+    for fpath in conflicted_files:
+        subprocess.run(
+            ["git", "add", "--", fpath],
+            capture_output=True,
+            cwd=str(project_root),
+            timeout=10,
+        )
+
+    return True
 
 
 def _neutralize_installable_files(worktree_path: Path):

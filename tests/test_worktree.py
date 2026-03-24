@@ -352,8 +352,9 @@ class TestMergeWorktree:
             ["git", "commit", "-m", "Worktree change"], cwd=str(wt), capture_output=True
         )
 
-        # Merge should fail
-        merged = merge_worktree(git_repo, wt)
+        # Merge should fail (agent can't resolve semantic conflict)
+        with patch("corc.worktree._try_agent_conflict_resolution", return_value=False):
+            merged = merge_worktree(git_repo, wt)
         assert merged is False
 
         # Main repo should still be clean
@@ -580,8 +581,9 @@ class TestMergeWorktreeDataFileAutoResolve:
             ["git", "commit", "-m", "Worktree README"], cwd=str(wt), capture_output=True
         )
 
-        # Merge should fail — README.md is not a data file
-        merged = merge_worktree(git_repo, wt)
+        # Merge should fail — README.md is not a data file, agent can't resolve
+        with patch("corc.worktree._try_agent_conflict_resolution", return_value=False):
+            merged = merge_worktree(git_repo, wt)
         assert merged is False
 
         # Main should be clean
@@ -601,6 +603,192 @@ class TestMergeWorktreeDataFileAutoResolve:
         merged = merge_worktree(git_repo, wt)
         assert merged is True
         assert (git_repo / "code.py").exists()
+
+
+class TestAgentConflictResolution:
+    """Test agent-driven merge conflict resolution.
+
+    When non-data file conflicts remain after auto-resolving data files,
+    merge_worktree() invokes a short claude -p agent to attempt resolution.
+    Trivial conflicts (whitespace, formatting) are resolved by the agent;
+    genuine semantic conflicts cause the agent to bail out and the merge fails.
+    """
+
+    def test_trivial_conflict_resolved_by_agent(self, git_repo):
+        """Trivial whitespace/formatting conflict is resolved by the agent."""
+        # Create a file and commit it
+        (git_repo / "module.py").write_text("def hello():\n    return 'world'\n")
+        subprocess.run(
+            ["git", "add", "module.py"], cwd=str(git_repo), capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Add module"],
+            cwd=str(git_repo),
+            capture_output=True,
+        )
+
+        # Create worktree
+        wt, branch = create_worktree(git_repo, "task-trivial", attempt=1)
+
+        # Main: formatting change to same line
+        (git_repo / "module.py").write_text("def  hello():\n    return 'world'\n")
+        subprocess.run(
+            ["git", "add", "module.py"], cwd=str(git_repo), capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Main formatting"],
+            cwd=str(git_repo),
+            capture_output=True,
+        )
+
+        # Worktree: different formatting change to same line
+        (wt / "module.py").write_text("def hello() :\n    return 'world'\n")
+        subprocess.run(["git", "add", "module.py"], cwd=str(wt), capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Worktree formatting"],
+            cwd=str(wt),
+            capture_output=True,
+        )
+
+        # Mock the agent: simulate resolving the conflict by writing clean content
+        # and staging the file (what _try_agent_conflict_resolution does internally)
+        def mock_agent_resolve(project_root, conflicted_files):
+            for fpath in conflicted_files:
+                full_path = Path(project_root) / fpath
+                # Write resolved content (conflict markers removed)
+                full_path.write_text("def hello():\n    return 'world'\n")
+                # Stage the resolved file
+                subprocess.run(
+                    ["git", "add", "--", fpath],
+                    cwd=str(project_root),
+                    capture_output=True,
+                )
+            return True
+
+        with patch(
+            "corc.worktree._try_agent_conflict_resolution",
+            side_effect=mock_agent_resolve,
+        ):
+            merged = merge_worktree(git_repo, wt)
+
+        assert merged is True
+        content = (git_repo / "module.py").read_text()
+        assert "<<<<<<<" not in content
+        assert "def hello():" in content
+
+    def test_genuine_semantic_conflict_still_fails(self, git_repo):
+        """Genuine semantic conflict: agent bails out, merge fails as before."""
+        (git_repo / "module.py").write_text("def hello():\n    return 'world'\n")
+        subprocess.run(
+            ["git", "add", "module.py"], cwd=str(git_repo), capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Add module"],
+            cwd=str(git_repo),
+            capture_output=True,
+        )
+
+        wt, branch = create_worktree(git_repo, "task-semantic", attempt=1)
+
+        # Main: completely different implementation
+        (git_repo / "module.py").write_text("def goodbye():\n    return 'mars'\n")
+        subprocess.run(
+            ["git", "add", "module.py"], cwd=str(git_repo), capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Rewrite module"],
+            cwd=str(git_repo),
+            capture_output=True,
+        )
+
+        # Worktree: completely different rewrite
+        (wt / "module.py").write_text("def greet(name):\n    return f'hi {name}'\n")
+        subprocess.run(["git", "add", "module.py"], cwd=str(wt), capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Worktree rewrite"],
+            cwd=str(wt),
+            capture_output=True,
+        )
+
+        # Agent fails on genuine semantic conflict (returns False)
+        with patch("corc.worktree._try_agent_conflict_resolution", return_value=False):
+            merged = merge_worktree(git_repo, wt)
+
+        assert merged is False
+        # Main should be clean (merge aborted)
+        content = (git_repo / "module.py").read_text()
+        assert "goodbye" in content
+        assert "<<<<<<<" not in content
+
+    def test_agent_receives_conflicted_file_paths(self, git_repo):
+        """The agent is called with the correct list of conflicted file paths."""
+        (git_repo / "module.py").write_text("x = 1\n")
+        subprocess.run(
+            ["git", "add", "module.py"], cwd=str(git_repo), capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Add module"],
+            cwd=str(git_repo),
+            capture_output=True,
+        )
+
+        wt, branch = create_worktree(git_repo, "task-paths", attempt=1)
+
+        # Create conflict
+        (git_repo / "module.py").write_text("x = 2\n")
+        subprocess.run(
+            ["git", "add", "module.py"], cwd=str(git_repo), capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Main change"],
+            cwd=str(git_repo),
+            capture_output=True,
+        )
+
+        (wt / "module.py").write_text("x = 3\n")
+        subprocess.run(["git", "add", "module.py"], cwd=str(wt), capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Worktree change"],
+            cwd=str(wt),
+            capture_output=True,
+        )
+
+        # Track what the agent was called with
+        captured_args = {}
+
+        def mock_capture(project_root, conflicted_files):
+            captured_args["project_root"] = project_root
+            captured_args["conflicted_files"] = conflicted_files
+            return False  # Don't actually resolve
+
+        with patch(
+            "corc.worktree._try_agent_conflict_resolution",
+            side_effect=mock_capture,
+        ):
+            merge_worktree(git_repo, wt)
+
+        assert "conflicted_files" in captured_args
+        assert "module.py" in captured_args["conflicted_files"]
+        assert captured_args["project_root"] == git_repo
+
+    def test_agent_not_invoked_when_no_conflicts(self, git_repo):
+        """Agent is NOT invoked when there are no conflicts to resolve."""
+        wt, branch = create_worktree(git_repo, "task-clean", attempt=1)
+
+        # Non-conflicting change in worktree
+        (wt / "new_file.py").write_text("# new file\n")
+        subprocess.run(["git", "add", "new_file.py"], cwd=str(wt), capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Add file"],
+            cwd=str(wt),
+            capture_output=True,
+        )
+
+        with patch("corc.worktree._try_agent_conflict_resolution") as mock_agent:
+            merged = merge_worktree(git_repo, wt)
+
+        assert merged is True
+        mock_agent.assert_not_called()
 
 
 class TestGetWorktreeBranch:
