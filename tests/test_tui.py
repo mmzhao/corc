@@ -9,7 +9,8 @@ Tests cover:
   - Recently completed: dimmed rendering
   - Streaming detail panel: tool calls, reasoning, checklist, scrolling
   - Event panel: unchanged from v1
-  - Dashboard layout: active_plan + streaming + events
+  - Dashboard layout: left 2/3 (DAG top + streaming bottom) | right 1/3 events
+  - Layout resize: panels resize proportionally with terminal width
   - Legacy compatibility: build_dag_panel, build_dashboard still work
   - QueryAPI integration: get_recently_completed_tasks
 """
@@ -408,25 +409,28 @@ class TestBuildActiveDashboard:
         layout = build_active_dashboard([], [], [], [], [], [])
         assert isinstance(layout, Layout)
 
-    def test_has_two_panels(self):
+    def test_left_right_split(self):
+        """Root layout splits into left (2/3) and events (1/3) columns."""
         layout = build_active_dashboard([], [], [], [], [], [])
-        child_names = [c.name for c in layout.children]
-        assert "active_plan" in child_names
-        assert "events" in child_names
+        root_names = [c.name for c in layout.children]
+        assert "left" in root_names
+        assert "events" in root_names
+        assert len(layout.children) == 2
 
-    def test_active_plan_is_first(self):
+    def test_left_two_thirds_events_one_third(self):
+        """Left side has ratio 2, events has ratio 1 (2/3 vs 1/3)."""
         layout = build_active_dashboard([], [], [], [], [], [])
-        assert layout.children[0].name == "active_plan"
-
-    def test_events_is_second(self):
-        layout = build_active_dashboard([], [], [], [], [], [])
-        assert layout.children[1].name == "events"
-
-    def test_active_plan_has_higher_ratio(self):
-        """Active plan panel should have higher ratio (more prominent)."""
-        layout = build_active_dashboard([], [], [], [], [], [])
+        assert layout.children[0].name == "left"
         assert layout.children[0].ratio == 2
+        assert layout.children[1].name == "events"
         assert layout.children[1].ratio == 1
+
+    def test_active_plan_nested_in_left(self):
+        """Active plan panel is inside the left container."""
+        layout = build_active_dashboard([], [], [], [], [], [])
+        left = layout["left"]
+        left_child_names = [c.name for c in left.children]
+        assert "active_plan" in left_child_names
 
     def test_renders_with_data(self):
         running = [_make_task("r1", "parser", status="running")]
@@ -1028,6 +1032,8 @@ class TestQueryAPIPanelIntegration:
 
 
 class TestActivePanelResize:
+    """Panels render without crashing at various terminal widths."""
+
     def test_narrow_terminal(self):
         running = [_make_task("r1", "task", status="running")]
         layout = build_active_dashboard(running, [], [], [], [], [])
@@ -1039,6 +1045,44 @@ class TestActivePanelResize:
         layout = build_active_dashboard(running, [], [], [], [], [])
         text = _render_to_plain(layout, width=200)
         assert "Active Plan" in text
+
+    def test_narrow_terminal_with_streaming(self):
+        """Three-panel layout renders at narrow width."""
+        running = [_make_task("r1", "task", status="running")]
+        layout = build_active_dashboard(
+            running, [], [], [], [], [], stream_events_by_task={}
+        )
+        text = _render_to_plain(layout, width=60)
+        assert "Active Plan" in text
+
+    def test_wide_terminal_with_streaming(self):
+        """Three-panel layout renders at wide width."""
+        running = [_make_task("r1", "task", status="running")]
+        layout = build_active_dashboard(
+            running, [], [], [], [], [], stream_events_by_task={}
+        )
+        text = _render_to_plain(layout, width=200)
+        assert "Active Plan" in text
+        assert "Streaming Detail" in text
+        assert "Events" in text
+
+    def test_medium_terminal_all_panels_visible(self):
+        """At medium width all three panel titles are present."""
+        running = [_make_task("r1", "task", status="running")]
+        events = [
+            {
+                "timestamp": "2026-03-23T10:00:00.000Z",
+                "event_type": "task_dispatched",
+                "task_id": "r1",
+            }
+        ]
+        layout = build_active_dashboard(
+            running, [], [], [], [], events, stream_events_by_task={}
+        )
+        text = _render_to_plain(layout, width=120)
+        assert "Active Plan" in text
+        assert "Streaming Detail" in text
+        assert "Events" in text
 
 
 # ── Stream event helpers ─────────────────────────────────────────────────
@@ -1645,39 +1689,58 @@ class TestBuildStreamingDetailPanel:
 
 
 class TestBuildActiveDashboardWithStreaming:
-    """Test the three-panel dashboard layout when streaming data is provided."""
+    """Test the three-panel dashboard layout when streaming data is provided.
+
+    New layout: left two-thirds split vertically (active_plan top,
+    streaming bottom) | right one-third event stream.
+    """
 
     def test_three_panel_layout_with_streaming(self):
-        """When stream_events_by_task is provided, layout has 3 panels."""
+        """When stream_events_by_task is provided, left side has 2 panels."""
         layout = build_active_dashboard(
             [], [], [], [], [], [], stream_events_by_task={}
         )
-        child_names = [c.name for c in layout.children]
-        assert "active_plan" in child_names
-        assert "streaming" in child_names
-        assert "events" in child_names
-        assert len(layout.children) == 3
+        # Root has left + events
+        root_names = [c.name for c in layout.children]
+        assert "left" in root_names
+        assert "events" in root_names
+        assert len(layout.children) == 2
+        # Left container has active_plan + streaming
+        left = layout["left"]
+        left_names = [c.name for c in left.children]
+        assert "active_plan" in left_names
+        assert "streaming" in left_names
+        assert len(left.children) == 2
 
     def test_two_panel_layout_without_streaming(self):
-        """When stream_events_by_task is None (default), layout has 2 panels."""
+        """When stream_events_by_task is None (default), left has only active_plan."""
         layout = build_active_dashboard([], [], [], [], [], [])
-        child_names = [c.name for c in layout.children]
-        assert "active_plan" in child_names
-        assert "events" in child_names
-        assert "streaming" not in child_names
+        root_names = [c.name for c in layout.children]
+        assert "left" in root_names
+        assert "events" in root_names
         assert len(layout.children) == 2
+        # Left only has active_plan, no streaming
+        left = layout["left"]
+        left_names = [c.name for c in left.children]
+        assert "active_plan" in left_names
+        assert "streaming" not in left_names
 
     def test_streaming_panel_ratios(self):
-        """Three-panel layout has correct ratios."""
+        """Left/right split: left ratio=2, events ratio=1; left splits 50/50."""
         layout = build_active_dashboard(
             [], [], [], [], [], [], stream_events_by_task={}
         )
-        assert layout.children[0].name == "active_plan"
+        # Root split: left 2/3, events 1/3
+        assert layout.children[0].name == "left"
         assert layout.children[0].ratio == 2
-        assert layout.children[1].name == "streaming"
-        assert layout.children[1].ratio == 2
-        assert layout.children[2].name == "events"
-        assert layout.children[2].ratio == 1
+        assert layout.children[1].name == "events"
+        assert layout.children[1].ratio == 1
+        # Left vertical split: 50/50
+        left = layout["left"]
+        assert left.children[0].name == "active_plan"
+        assert left.children[0].ratio == 1
+        assert left.children[1].name == "streaming"
+        assert left.children[1].ratio == 1
 
     def test_streaming_renders_with_data(self):
         """Full dashboard with streaming data renders correctly."""
@@ -1762,6 +1825,91 @@ class TestBuildActiveDashboardWithStreaming:
         assert "Events" in text
         # No streaming panel
         assert "Streaming Detail" not in text
+
+
+# ── Layout structure verification ────────────────────────────────────────
+
+
+class TestLayoutStructure:
+    """Verify the new left/right layout structure.
+
+    New layout:
+      root (split_row)
+      ├── left (ratio=2, split_column)
+      │   ├── active_plan (ratio=1) — DAG status (top-left)
+      │   └── streaming (ratio=1)   — agent detail (bottom-left)
+      └── events (ratio=1)          — event stream (right, full-height)
+    """
+
+    def test_root_is_horizontal_split(self):
+        """Root layout uses split_row (horizontal) not split_column."""
+        layout = build_active_dashboard(
+            [], [], [], [], [], [], stream_events_by_task={}
+        )
+        # Rich Layout stores the split direction; children of a row split
+        # are arranged horizontally. We verify by checking child count and names.
+        assert len(layout.children) == 2
+        assert layout.children[0].name == "left"
+        assert layout.children[1].name == "events"
+
+    def test_left_container_is_vertical_split(self):
+        """Left container splits vertically into active_plan and streaming."""
+        layout = build_active_dashboard(
+            [], [], [], [], [], [], stream_events_by_task={}
+        )
+        left = layout["left"]
+        assert len(left.children) == 2
+        assert left.children[0].name == "active_plan"
+        assert left.children[1].name == "streaming"
+
+    def test_left_takes_two_thirds_width(self):
+        """Left side has ratio=2, events has ratio=1 (2:1 = two-thirds)."""
+        layout = build_active_dashboard(
+            [], [], [], [], [], [], stream_events_by_task={}
+        )
+        assert layout.children[0].ratio == 2  # left
+        assert layout.children[1].ratio == 1  # events
+
+    def test_left_panels_split_50_50(self):
+        """Active plan and streaming each have ratio=1 (50/50 vertical)."""
+        layout = build_active_dashboard(
+            [], [], [], [], [], [], stream_events_by_task={}
+        )
+        left = layout["left"]
+        assert left.children[0].ratio == 1  # active_plan
+        assert left.children[1].ratio == 1  # streaming
+
+    def test_events_is_full_height_right_column(self):
+        """Events panel is a direct child of root (not nested in left)."""
+        layout = build_active_dashboard(
+            [], [], [], [], [], [], stream_events_by_task={}
+        )
+        # events is at root level, not inside left
+        root_names = [c.name for c in layout.children]
+        assert "events" in root_names
+        left_names = [c.name for c in layout["left"].children]
+        assert "events" not in left_names
+
+    def test_all_three_panels_accessible_by_name(self):
+        """All three panels can be accessed via layout['name']."""
+        layout = build_active_dashboard(
+            [], [], [], [], [], [], stream_events_by_task={}
+        )
+        # These should not raise KeyError
+        assert layout["active_plan"] is not None
+        assert layout["streaming"] is not None
+        assert layout["events"] is not None
+
+    def test_without_streaming_still_horizontal(self):
+        """Without streaming, layout is still left/right split."""
+        layout = build_active_dashboard([], [], [], [], [], [])
+        assert len(layout.children) == 2
+        assert layout.children[0].name == "left"
+        assert layout.children[1].name == "events"
+        # Left only has active_plan
+        left = layout["left"]
+        assert len(left.children) == 1
+        assert left.children[0].name == "active_plan"
 
 
 # ── QueryAPI + Streaming Panel integration ───────────────────────────────

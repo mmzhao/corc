@@ -1,12 +1,13 @@
 """TUI v2 — Active-plan-focused dashboard.
 
+Layout: left two-thirds split vertically into DAG status (top) and
+agent detail with streaming (bottom); right one-third is a tall
+event stream column.
+
 Shows only what matters *right now*:
-  - Running tasks (prominent, with elapsed time + agent info)
-  - Ready tasks (marked as dispatchable)
-  - Blocked tasks (with dependency info)
-  - Recently completed tasks (dimmed, last hour)
-  - Streaming detail (live tool calls, reasoning, checklist progress)
-  - Event stream (color-coded)
+  - DAG status / Active Plan (top-left): running, ready, blocked tasks
+  - Agent detail (bottom-left): live tool calls, reasoning, checklist
+  - Event stream (right): color-coded event log
 
 Historical completed tasks from old phases are hidden.
 Data comes from queries.py (QueryAPI data layer).
@@ -684,22 +685,26 @@ def build_active_dashboard(
 ) -> Layout:
     """Build the active-plan-focused dashboard layout.
 
-    Returns a Rich Layout with:
-      - top: Active plan panel (ratio 2 — more prominent)
-      - middle: Streaming detail panel (ratio 2) — when stream data provided
-      - bottom: event stream panel (ratio 1)
+    Returns a Rich Layout with a left/right split:
+      - Left two-thirds: split vertically 50/50 into
+        - top: DAG status / Active Plan panel
+        - bottom: Streaming detail panel (agent activity)
+      - Right one-third: full-height event stream column
 
-    When *stream_events_by_task* is ``None``, the layout falls back to
-    the original two-panel layout (backward compatible).
+    When *stream_events_by_task* is ``None``, the left side shows only
+    the active plan panel (no streaming detail).
     """
     layout = Layout()
 
     if stream_events_by_task is not None:
-        # Three-panel layout with streaming detail
-        layout.split_column(
-            Layout(name="active_plan", ratio=2),
-            Layout(name="streaming", ratio=2),
+        # Three-panel layout: left (DAG + streaming) | right (events)
+        layout.split_row(
+            Layout(name="left", ratio=2),
             Layout(name="events", ratio=1),
+        )
+        layout["left"].split_column(
+            Layout(name="active_plan", ratio=1),
+            Layout(name="streaming", ratio=1),
         )
         layout["streaming"].update(
             build_streaming_detail_panel(
@@ -709,10 +714,13 @@ def build_active_dashboard(
             )
         )
     else:
-        # Legacy two-panel layout
-        layout.split_column(
-            Layout(name="active_plan", ratio=2),
+        # Two-panel layout: left (active plan) | right (events)
+        layout.split_row(
+            Layout(name="left", ratio=2),
             Layout(name="events", ratio=1),
+        )
+        layout["left"].split_column(
+            Layout(name="active_plan", ratio=1),
         )
 
     layout["active_plan"].update(
