@@ -65,12 +65,18 @@ class QueryAPI:
 
         Each returned dict contains all task fields plus an ``agents``
         key holding a list of agent dicts for that task.
+
+        When a task has been dispatched multiple times (e.g. after a
+        daemon restart), only the most recent agent record is kept.
+        Active (non-idle) agents are preferred over idle ones.
         """
+        from corc.tui import _deduplicate_agents
+
         running = self.work_state.list_tasks(status="running")
         result = []
         for task in running:
             agents = self.work_state.get_agents_for_task(task["id"])
-            result.append({**task, "agents": agents})
+            result.append({**task, "agents": _deduplicate_agents(agents)})
         return result
 
     def get_ready_tasks(self) -> list[dict]:

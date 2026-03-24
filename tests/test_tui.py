@@ -40,6 +40,8 @@ from corc.tui import (
     _format_tool_call,
     _truncate_reasoning,
     _format_checklist_progress,
+    _deduplicate_agents,
+    _deduplicate_task_agents,
 )
 
 
@@ -1906,3 +1908,452 @@ class TestQueryAPIStreamingIntegration:
         text = _render_to_plain(panel)
         assert "2/4 items done" in text
         assert "/test.py" in text
+
+
+# ── Agent deduplication ──────────────────────────────────────────────────
+
+
+class TestDeduplicateAgents:
+    """Tests for _deduplicate_agents — filtering to latest agent per task."""
+
+    def test_empty_list(self):
+        assert _deduplicate_agents([]) == []
+
+    def test_single_agent_unchanged(self):
+        agents = [
+            {
+                "id": "agent-1",
+                "task_id": "t1",
+                "role": "implementer",
+                "status": "running",
+                "started": "2026-01-01T00:00:00Z",
+            }
+        ]
+        result = _deduplicate_agents(agents)
+        assert len(result) == 1
+        assert result[0]["id"] == "agent-1"
+
+    def test_multiple_agents_same_task_keeps_latest(self):
+        """When multiple idle agents exist for the same task, keep the most recent."""
+        agents = [
+            {
+                "id": "agent-old",
+                "task_id": "t1",
+                "role": "implementer",
+                "status": "idle",
+                "started": "2026-01-01T00:00:00Z",
+            },
+            {
+                "id": "agent-new",
+                "task_id": "t1",
+                "role": "implementer",
+                "status": "idle",
+                "started": "2026-01-02T00:00:00Z",
+            },
+        ]
+        result = _deduplicate_agents(agents)
+        assert len(result) == 1
+        assert result[0]["id"] == "agent-new"
+
+    def test_prefers_active_over_idle(self):
+        """An active (non-idle) agent is preferred over a newer idle one."""
+        agents = [
+            {
+                "id": "agent-idle",
+                "task_id": "t1",
+                "role": "implementer",
+                "status": "idle",
+                "started": "2026-01-02T00:00:00Z",
+            },
+            {
+                "id": "agent-running",
+                "task_id": "t1",
+                "role": "implementer",
+                "status": "running",
+                "started": "2026-01-01T00:00:00Z",
+            },
+        ]
+        result = _deduplicate_agents(agents)
+        assert len(result) == 1
+        assert result[0]["id"] == "agent-running"
+
+    def test_multiple_active_keeps_latest(self):
+        """Among multiple active agents for same task, keep the most recently started."""
+        agents = [
+            {
+                "id": "agent-old-run",
+                "task_id": "t1",
+                "role": "implementer",
+                "status": "running",
+                "started": "2026-01-01T00:00:00Z",
+            },
+            {
+                "id": "agent-new-run",
+                "task_id": "t1",
+                "role": "implementer",
+                "status": "running",
+                "started": "2026-01-02T00:00:00Z",
+            },
+        ]
+        result = _deduplicate_agents(agents)
+        assert len(result) == 1
+        assert result[0]["id"] == "agent-new-run"
+
+    def test_different_tasks_not_deduplicated(self):
+        """Agents for different tasks are all kept."""
+        agents = [
+            {
+                "id": "agent-1",
+                "task_id": "t1",
+                "role": "implementer",
+                "status": "idle",
+                "started": "2026-01-01T00:00:00Z",
+            },
+            {
+                "id": "agent-2",
+                "task_id": "t2",
+                "role": "implementer",
+                "status": "idle",
+                "started": "2026-01-01T00:00:00Z",
+            },
+        ]
+        result = _deduplicate_agents(agents)
+        assert len(result) == 2
+
+    def test_three_agents_same_task_one_active(self):
+        """Three agents for same task: 2 idle + 1 running → keep running."""
+        agents = [
+            {
+                "id": "agent-1",
+                "task_id": "t1",
+                "role": "implementer",
+                "status": "idle",
+                "started": "2026-01-01T00:00:00Z",
+            },
+            {
+                "id": "agent-2",
+                "task_id": "t1",
+                "role": "implementer",
+                "status": "running",
+                "started": "2026-01-02T00:00:00Z",
+            },
+            {
+                "id": "agent-3",
+                "task_id": "t1",
+                "role": "implementer",
+                "status": "idle",
+                "started": "2026-01-03T00:00:00Z",
+            },
+        ]
+        result = _deduplicate_agents(agents)
+        assert len(result) == 1
+        assert result[0]["id"] == "agent-2"
+
+    def test_agents_without_task_id_kept(self):
+        """Agents without a task_id are all kept (edge case)."""
+        agents = [
+            {"id": "agent-1", "role": "implementer", "status": "idle"},
+            {"id": "agent-2", "role": "reviewer", "status": "idle"},
+        ]
+        result = _deduplicate_agents(agents)
+        assert len(result) == 2
+
+    def test_agents_without_started_field(self):
+        """Agents without a started timestamp are handled gracefully."""
+        agents = [
+            {"id": "agent-1", "task_id": "t1", "role": "implementer", "status": "idle"},
+            {
+                "id": "agent-2",
+                "task_id": "t1",
+                "role": "implementer",
+                "status": "idle",
+                "started": "2026-01-01T00:00:00Z",
+            },
+        ]
+        result = _deduplicate_agents(agents)
+        assert len(result) == 1
+        # Agent with a timestamp should be preferred (sorts higher)
+        assert result[0]["id"] == "agent-2"
+
+    def test_does_not_mutate_input(self):
+        """Input list is not modified."""
+        agents = [
+            {
+                "id": "agent-1",
+                "task_id": "t1",
+                "role": "implementer",
+                "status": "idle",
+                "started": "2026-01-01T00:00:00Z",
+            },
+            {
+                "id": "agent-2",
+                "task_id": "t1",
+                "role": "implementer",
+                "status": "idle",
+                "started": "2026-01-02T00:00:00Z",
+            },
+        ]
+        original_len = len(agents)
+        _deduplicate_agents(agents)
+        assert len(agents) == original_len
+
+
+class TestDeduplicateTaskAgents:
+    """Tests for _deduplicate_task_agents — task-level wrapper."""
+
+    def test_task_without_agents_key(self):
+        task = {"id": "t1", "name": "test", "status": "running"}
+        result = _deduplicate_task_agents(task)
+        assert result == task
+
+    def test_task_with_single_agent(self):
+        task = {
+            "id": "t1",
+            "name": "test",
+            "status": "running",
+            "agents": [
+                {
+                    "id": "agent-1",
+                    "task_id": "t1",
+                    "role": "implementer",
+                    "status": "running",
+                }
+            ],
+        }
+        result = _deduplicate_task_agents(task)
+        assert len(result["agents"]) == 1
+
+    def test_task_with_duplicate_agents(self):
+        task = {
+            "id": "t1",
+            "name": "test",
+            "status": "running",
+            "agents": [
+                {
+                    "id": "agent-old",
+                    "task_id": "t1",
+                    "role": "implementer",
+                    "status": "idle",
+                    "started": "2026-01-01T00:00:00Z",
+                },
+                {
+                    "id": "agent-new",
+                    "task_id": "t1",
+                    "role": "implementer",
+                    "status": "running",
+                    "started": "2026-01-02T00:00:00Z",
+                },
+            ],
+        }
+        result = _deduplicate_task_agents(task)
+        assert len(result["agents"]) == 1
+        assert result["agents"][0]["id"] == "agent-new"
+        # Original task should not be modified
+        assert len(task["agents"]) == 2
+
+
+class TestActivePlanPanelDuplicateAgents:
+    """Test that the active plan panel only shows the latest agent per running task.
+
+    This is the key integration test verifying that duplicate [role idle] tags
+    no longer appear when a task has been dispatched multiple times.
+    """
+
+    def test_single_agent_tag_with_multiple_agent_records(self):
+        """When a task has multiple agent records, only one [role ...] tag is shown."""
+        running = [
+            _make_task(
+                "t1",
+                "my-task",
+                status="running",
+                agents=[
+                    {
+                        "id": "agent-old",
+                        "task_id": "t1",
+                        "role": "implementer",
+                        "status": "idle",
+                        "started": "2026-01-01T00:00:00Z",
+                    },
+                    {
+                        "id": "agent-new",
+                        "task_id": "t1",
+                        "role": "implementer",
+                        "status": "running",
+                        "pid": 9999,
+                        "started": "2026-01-02T00:00:00Z",
+                    },
+                ],
+            )
+        ]
+        panel = build_active_plan_panel(running, [], [], [])
+        text = _render_to_plain(panel)
+        # Should show agent info exactly once, not twice
+        assert text.count("[implementer") == 1
+        # Should show the active agent's info
+        assert "9999" in text
+        assert "running" in text
+
+    def test_no_duplicate_idle_tags(self):
+        """Duplicate [role idle] tags should not appear when all agents are idle."""
+        running = [
+            _make_task(
+                "t1",
+                "idle-task",
+                status="running",
+                agents=[
+                    {
+                        "id": "agent-1",
+                        "task_id": "t1",
+                        "role": "implementer",
+                        "status": "idle",
+                        "started": "2026-01-01T00:00:00Z",
+                    },
+                    {
+                        "id": "agent-2",
+                        "task_id": "t1",
+                        "role": "implementer",
+                        "status": "idle",
+                        "started": "2026-01-02T00:00:00Z",
+                    },
+                    {
+                        "id": "agent-3",
+                        "task_id": "t1",
+                        "role": "implementer",
+                        "status": "idle",
+                        "started": "2026-01-03T00:00:00Z",
+                    },
+                ],
+            )
+        ]
+        panel = build_active_plan_panel(running, [], [], [])
+        text = _render_to_plain(panel)
+        # Only one agent tag should appear
+        assert text.count("[implementer") == 1
+
+    def test_multiple_running_tasks_each_deduplicated(self):
+        """Each running task gets its own deduplication."""
+        running = [
+            _make_task(
+                "t1",
+                "task-one",
+                status="running",
+                agents=[
+                    {
+                        "id": "a1",
+                        "task_id": "t1",
+                        "role": "implementer",
+                        "status": "idle",
+                        "started": "2026-01-01T00:00:00Z",
+                    },
+                    {
+                        "id": "a2",
+                        "task_id": "t1",
+                        "role": "implementer",
+                        "status": "running",
+                        "pid": 111,
+                        "started": "2026-01-02T00:00:00Z",
+                    },
+                ],
+            ),
+            _make_task(
+                "t2",
+                "task-two",
+                status="running",
+                agents=[
+                    {
+                        "id": "a3",
+                        "task_id": "t2",
+                        "role": "reviewer",
+                        "status": "idle",
+                        "started": "2026-01-01T00:00:00Z",
+                    },
+                    {
+                        "id": "a4",
+                        "task_id": "t2",
+                        "role": "reviewer",
+                        "status": "idle",
+                        "started": "2026-01-03T00:00:00Z",
+                    },
+                ],
+            ),
+        ]
+        panel = build_active_plan_panel(running, [], [], [])
+        text = _render_to_plain(panel)
+        # Each task should have exactly one agent tag
+        assert text.count("[implementer") == 1
+        assert text.count("[reviewer") == 1
+
+
+class TestQueryAPIDuplicateAgents:
+    """Test that QueryAPI.get_running_tasks_with_agents deduplicates agents."""
+
+    def _make_query_api(self, all_tasks, agents_map=None):
+        """Create a QueryAPI with mocked dependencies."""
+        from corc.queries import QueryAPI
+
+        ws = MagicMock()
+        ws.list_tasks.side_effect = lambda status=None: (
+            [t for t in all_tasks if t["status"] == status] if status else all_tasks
+        )
+        ws.get_agents_for_task.side_effect = lambda tid: (agents_map or {}).get(tid, [])
+
+        al = MagicMock()
+        al.read_recent.return_value = []
+        sl = MagicMock()
+
+        return QueryAPI(ws, al, sl)
+
+    def test_deduplicates_agents_in_query(self):
+        """get_running_tasks_with_agents should return at most one agent per task."""
+        tasks = [
+            _make_task("t1", "my-task", status="running"),
+        ]
+        agents = {
+            "t1": [
+                {
+                    "id": "agent-old",
+                    "task_id": "t1",
+                    "role": "implementer",
+                    "status": "idle",
+                    "started": "2026-01-01T00:00:00Z",
+                },
+                {
+                    "id": "agent-new",
+                    "task_id": "t1",
+                    "role": "implementer",
+                    "status": "running",
+                    "pid": 5555,
+                    "started": "2026-01-02T00:00:00Z",
+                },
+            ]
+        }
+        api = self._make_query_api(tasks, agents)
+        running = api.get_running_tasks_with_agents()
+        assert len(running) == 1
+        assert len(running[0]["agents"]) == 1
+        assert running[0]["agents"][0]["id"] == "agent-new"
+
+    def test_no_agents_returns_empty_list(self):
+        """Tasks with no agents still work fine."""
+        tasks = [_make_task("t1", "no-agents", status="running")]
+        api = self._make_query_api(tasks)
+        running = api.get_running_tasks_with_agents()
+        assert len(running) == 1
+        assert running[0]["agents"] == []
+
+    def test_single_agent_unchanged(self):
+        """Tasks with a single agent are returned as-is."""
+        tasks = [_make_task("t1", "single-agent", status="running")]
+        agents = {
+            "t1": [
+                {
+                    "id": "agent-1",
+                    "task_id": "t1",
+                    "role": "implementer",
+                    "status": "running",
+                }
+            ]
+        }
+        api = self._make_query_api(tasks, agents)
+        running = api.get_running_tasks_with_agents()
+        assert len(running[0]["agents"]) == 1

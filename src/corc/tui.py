@@ -49,6 +49,67 @@ EVENT_STYLES = {
 # ── Elapsed time helper ──────────────────────────────────────────────────
 
 
+def _deduplicate_agents(agents: list[dict]) -> list[dict]:
+    """Filter a list of agent records to show at most one per task.
+
+    When a task has been dispatched multiple times (e.g. after a daemon
+    restart), there may be multiple agent records for the same task_id.
+    This function keeps only the best agent per task:
+
+      1. Prefer an active (non-idle) agent if one exists.
+      2. Otherwise, prefer the most recently started agent.
+
+    If agents don't have a ``task_id`` (shouldn't happen in practice),
+    they are all kept.
+
+    Returns a new list — input is not modified.
+    """
+    if len(agents) <= 1:
+        return list(agents)
+
+    # Group by task_id
+    by_task: dict[str, list[dict]] = {}
+    no_task: list[dict] = []
+    for ag in agents:
+        tid = ag.get("task_id")
+        if tid:
+            by_task.setdefault(tid, []).append(ag)
+        else:
+            no_task.append(ag)
+
+    result: list[dict] = list(no_task)
+    for _tid, group in by_task.items():
+        if len(group) == 1:
+            result.append(group[0])
+            continue
+
+        # Prefer active (non-idle) agent
+        active = [a for a in group if a.get("status") not in (None, "idle")]
+        if active:
+            # Among active agents, pick the most recently started
+            active.sort(key=lambda a: a.get("started") or "", reverse=True)
+            result.append(active[0])
+        else:
+            # All idle — pick the most recently started
+            group.sort(key=lambda a: a.get("started") or "", reverse=True)
+            result.append(group[0])
+
+    return result
+
+
+def _deduplicate_task_agents(task: dict) -> dict:
+    """Return a copy of *task* with its ``agents`` list deduplicated.
+
+    Convenience wrapper around :func:`_deduplicate_agents` that operates
+    on a task dict containing an ``agents`` key.  Returns the task
+    unchanged if there is no ``agents`` key.
+    """
+    agents = task.get("agents")
+    if not agents or len(agents) <= 1:
+        return task
+    return {**task, "agents": _deduplicate_agents(agents)}
+
+
 def _elapsed_since(iso_ts: str) -> str:
     """Human-readable elapsed time since an ISO timestamp.
 
@@ -354,8 +415,8 @@ def build_active_plan_panel(
             if elapsed:
                 line.append(f"  ⏱ {elapsed}", style="yellow")
 
-            # Agent info
-            agents = t.get("agents", [])
+            # Agent info — deduplicate to show only latest per task
+            agents = _deduplicate_agents(t.get("agents", []))
             if agents:
                 for ag in agents:
                     role = ag.get("role", "agent")
