@@ -26,7 +26,14 @@ from corc.retry import get_retry_context
 from corc.roles import RoleLoader, constraints_from_role, get_system_prompt_for_role
 from corc.sessions import SessionLogger
 from corc.state import WorkState
-from corc.pr import create_pr, pull_main, push_branch, get_worktree_branch, PRInfo
+from corc.pr import (
+    create_pr,
+    merge_pr,
+    pull_main,
+    push_branch,
+    get_worktree_branch,
+    PRInfo,
+)
 from corc.repo_policy import get_repo_policy
 from corc.worktree import (
     WorktreeError,
@@ -454,15 +461,28 @@ class Executor:
                 error=str(e),
             )
 
-    def try_merge_worktree(self, task_id: str, worktree_path: Path) -> str:
-        """Try to merge worktree branch into main (optimistic merge).
+    def try_merge_worktree(
+        self, task_id: str, worktree_path: Path, pr_info: PRInfo | None = None
+    ) -> str:
+        """Try to merge worktree branch into main.
+
+        When pr_info is provided, merges via ``gh pr merge`` instead of
+        direct git merge.  After a successful PR merge, pulls main to
+        sync the local repo.
+
+        When no pr_info is given, falls back to the direct git merge
+        (optimistic merge strategy).
 
         Returns merge status:
         - "merged": successfully merged to main
         - "no_changes": nothing to merge
-        - "conflict": merge conflict detected (main not modified)
+        - "conflict": merge conflict detected / PR merge failed
         - "error": unexpected error
         """
+        if pr_info and pr_info.number:
+            return self._try_pr_merge(task_id, worktree_path, pr_info)
+
+        # Direct git merge (no PR — fallback / backward compat)
         try:
             merged = merge_worktree(self.project_root, worktree_path)
             if merged:
@@ -483,6 +503,41 @@ class Executor:
             self.audit_log.log(
                 "worktree_merge_error",
                 task_id=task_id,
+                error=str(e),
+            )
+            return "error"
+
+    def _try_pr_merge(self, task_id: str, worktree_path: Path, pr_info: PRInfo) -> str:
+        """Merge via ``gh pr merge`` and sync local main.
+
+        Returns the same status strings as :meth:`try_merge_worktree`.
+        """
+        try:
+            merged = merge_pr(self.project_root, pr_info.number)
+            if merged:
+                # Sync local main with the remote after PR merge
+                pull_main(self.project_root)
+                self.audit_log.log(
+                    "worktree_merged_via_pr",
+                    task_id=task_id,
+                    pr_number=pr_info.number,
+                    pr_url=pr_info.url,
+                    worktree_path=str(worktree_path),
+                )
+                return "merged"
+            else:
+                self.audit_log.log(
+                    "pr_merge_failed",
+                    task_id=task_id,
+                    pr_number=pr_info.number,
+                    worktree_path=str(worktree_path),
+                )
+                return "conflict"
+        except Exception as e:
+            self.audit_log.log(
+                "pr_merge_error",
+                task_id=task_id,
+                pr_number=pr_info.number,
                 error=str(e),
             )
             return "error"
@@ -525,10 +580,21 @@ class Executor:
             self.cleanup_worktree(task_id, worktree_path)
             return False
 
-    def cleanup_worktree(self, task_id: str, worktree_path: Path):
-        """Remove a worktree and its branch."""
+    def cleanup_worktree(
+        self, task_id: str, worktree_path: Path, remove_branch: bool = True
+    ):
+        """Remove a worktree and optionally its branch.
+
+        Args:
+            task_id: Task identifier for audit logging.
+            worktree_path: Path to the worktree to remove.
+            remove_branch: If False, keep the branch (needed when PR
+                references it, e.g. human-only repos).
+        """
         try:
-            remove_worktree(self.project_root, worktree_path)
+            remove_worktree(
+                self.project_root, worktree_path, remove_branch=remove_branch
+            )
             self.audit_log.log(
                 "worktree_removed",
                 task_id=task_id,
