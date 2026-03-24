@@ -357,10 +357,9 @@ def _format_attempt_count(task: dict) -> str | None:
     if not isinstance(max_retries, int):
         max_retries = 3
     # Current attempt = attempt_count + 1 (attempt_count is completed attempts)
-    # Total attempts = max_retries (max_retries is the retry budget; state uses
-    # attempt_count < max_retries so max_retries is also the total dispatch count)
+    # Total attempts = max_retries + 1 (first attempt + max_retries retries)
     current = attempt_count + 1
-    total = max_retries
+    total = max_retries + 1
     # Clamp so display never shows N/M where N > M+1 (e.g. from legacy data)
     if current > total + 1:
         current = total + 1
