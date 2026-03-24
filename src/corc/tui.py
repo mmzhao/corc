@@ -12,7 +12,8 @@ Shows only what matters *right now*:
 Historical completed tasks from old phases are hidden.
 Data comes from queries.py (QueryAPI data layer).
 
-Press 'q' to quit, or Ctrl+C.  ↑/↓ to scroll streaming detail.
+Press 'q' to quit, or Ctrl+C.  Tab to cycle panel focus.
+↑/↓ to scroll the focused panel.
 """
 
 import json
@@ -93,6 +94,44 @@ EVENT_STYLES = {
     "tool_use": "magenta",
     "assistant_message": "blue",
 }
+
+
+# ── Panel focus management ────────────────────────────────────────────────
+
+# The three panels that can receive focus, in Tab-cycle order.
+PANEL_NAMES: list[str] = ["active_plan", "streaming", "events"]
+
+# Default border styles per panel (used when the panel is *not* focused).
+_DEFAULT_BORDER_STYLES: dict[str, str] = {
+    "active_plan": "blue",
+    "streaming": "magenta",
+    "events": "green",
+}
+
+# Border style applied to the currently focused panel.
+_FOCUSED_BORDER_STYLE = "bold bright_white"
+
+
+def _border_style_for(panel_name: str, focused_panel: str | None) -> str:
+    """Return the Rich border style for *panel_name*.
+
+    If *panel_name* matches *focused_panel*, returns the bright
+    highlight style; otherwise returns the panel's default colour.
+    """
+    if focused_panel is not None and panel_name == focused_panel:
+        return _FOCUSED_BORDER_STYLE
+    return _DEFAULT_BORDER_STYLES.get(panel_name, "white")
+
+
+def _next_focused_panel(current: str | None) -> str:
+    """Cycle to the next panel in PANEL_NAMES.
+
+    If *current* is ``None`` or not recognised, returns the first panel.
+    """
+    if current is None or current not in PANEL_NAMES:
+        return PANEL_NAMES[0]
+    idx = PANEL_NAMES.index(current)
+    return PANEL_NAMES[(idx + 1) % len(PANEL_NAMES)]
 
 
 # ── Elapsed time helper ──────────────────────────────────────────────────
@@ -286,6 +325,7 @@ def build_streaming_detail_panel(
     stream_events_by_task: dict[str, list[dict]],
     scroll_offset: int = 0,
     max_lines: int = 30,
+    focused_panel: str | None = None,
 ) -> Panel:
     """Build the streaming detail panel showing live agent activity.
 
@@ -304,6 +344,7 @@ def build_streaming_detail_panel(
             from ``QueryAPI.get_task_stream_events()``.
         scroll_offset: Lines to scroll up from the bottom (0 = newest).
         max_lines: Maximum number of lines to display.
+        focused_panel: Name of the currently focused panel (for highlight border).
     """
     lines: list[Text] = []
 
@@ -313,7 +354,7 @@ def build_streaming_detail_panel(
             content,
             title="[bold] Streaming Detail [/bold]",
             subtitle="↑/↓ scroll",
-            border_style="magenta",
+            border_style=_border_style_for("streaming", focused_panel),
         )
 
     def _name(t: dict) -> str:
@@ -405,15 +446,25 @@ def build_streaming_detail_panel(
         content = Text("No stream data yet.", style="dim")
 
     # Scroll indicator in subtitle
-    subtitle = "↑/↓ scroll"
+    subtitle_parts: list[str] = ["↑/↓ scroll"]
     if scroll_offset > 0:
-        subtitle += f" | offset: {scroll_offset}"
+        subtitle_parts.append(f"offset: {scroll_offset}")
+    if total_lines > max_lines:
+        # Show overflow indicator
+        if scroll_offset > 0:
+            subtitle_parts.append("▲ more above")
+        visible_end = total_lines - scroll_offset
+        if visible_end < total_lines:
+            pass  # already shown as "offset"
+        if scroll_offset < total_lines - max_lines:
+            subtitle_parts.append("▼ more below")
+    subtitle = " | ".join(subtitle_parts)
 
     return Panel(
         content,
         title="[bold] Streaming Detail [/bold]",
         subtitle=subtitle,
-        border_style="magenta",
+        border_style=_border_style_for("streaming", focused_panel),
     )
 
 
@@ -426,6 +477,9 @@ def build_active_plan_panel(
     blocked_tasks: list[dict],
     recently_completed: list[dict],
     other_active: list[dict] | None = None,
+    scroll_offset: int = 0,
+    max_lines: int = 40,
+    focused_panel: str | None = None,
 ) -> Panel:
     """Build the active plan panel showing only current/relevant tasks.
 
@@ -603,20 +657,60 @@ def build_active_plan_panel(
             )
         lines.insert(0, summary)
         lines.insert(1, Text(""))
+
+        # ── Apply scroll offset (scroll from top) ─────────────────
+        total_lines = len(lines)
+        if scroll_offset > 0 and total_lines > max_lines:
+            start = min(scroll_offset, max(0, total_lines - max_lines))
+            lines = lines[start : start + max_lines]
+        elif total_lines > max_lines:
+            lines = lines[:max_lines]
+
         content = Text("\n").join(lines)
+
+    # Scroll indicator in subtitle
+    subtitle_parts: list[str] = []
+    total_lines = len(lines) if lines else 0
+    if total_lines > max_lines or scroll_offset > 0:
+        if scroll_offset > 0:
+            subtitle_parts.append("▲ more above")
+        # Check if there's content below the visible area
+        original_total = (
+            len(running_tasks)
+            + len(ready_tasks)
+            + len(blocked_tasks)
+            + len(other_active or [])
+            + len(recently_completed)
+        )
+        if original_total > 0 and total_lines >= max_lines:
+            subtitle_parts.append("▼ more below")
+
+    subtitle = " | ".join(subtitle_parts) if subtitle_parts else None
 
     return Panel(
         content,
         title="[bold] Active Plan [/bold]",
-        border_style="blue",
+        subtitle=subtitle,
+        border_style=_border_style_for("active_plan", focused_panel),
     )
 
 
-def build_event_panel(events: list[dict], max_events: int = 20) -> Panel:
+def build_event_panel(
+    events: list[dict],
+    max_events: int = 20,
+    scroll_offset: int = 0,
+    focused_panel: str | None = None,
+) -> Panel:
     """Build the color-coded event stream panel.
 
     Each event line shows: timestamp  event_type  task_id  extras
     Colour is determined by event type.
+
+    Args:
+        events: List of event dicts from the audit log.
+        max_events: Maximum events to show.
+        scroll_offset: Lines to scroll up from the bottom (0 = newest).
+        focused_panel: Name of the currently focused panel (for highlight border).
     """
     display_events = events[-max_events:] if len(events) > max_events else events
 
@@ -661,13 +755,27 @@ def build_event_panel(events: list[dict], max_events: int = 20) -> Panel:
                     detail.append(content_line, style="blue dim")
                     lines.append(detail)
 
+        # Apply scroll offset for events panel
+        total_lines = len(lines)
+        if scroll_offset > 0 and total_lines > max_events:
+            end = max(0, total_lines - scroll_offset)
+            start = max(0, end - max_events)
+            lines = lines[start:end]
+        elif total_lines > max_events:
+            lines = lines[-max_events:]
+
         content = Text("\n").join(lines)
+
+    # Build subtitle with scroll indicators
+    subtitle_parts = ["q to quit", "Tab focus", "↑/↓ scroll"]
+    if scroll_offset > 0:
+        subtitle_parts.append(f"offset: {scroll_offset}")
 
     return Panel(
         content,
         title="[bold] Events [/bold]",
-        subtitle="q to quit | Ctrl+C",
-        border_style="green",
+        subtitle=" | ".join(subtitle_parts),
+        border_style=_border_style_for("events", focused_panel),
     )
 
 
@@ -730,6 +838,8 @@ def build_active_dashboard(
     max_events: int = 20,
     stream_events_by_task: dict[str, list[dict]] | None = None,
     scroll_offset: int = 0,
+    focused_panel: str | None = None,
+    scroll_offsets: dict[str, int] | None = None,
 ) -> Layout:
     """Build the active-plan-focused dashboard layout.
 
@@ -741,7 +851,20 @@ def build_active_dashboard(
 
     When *stream_events_by_task* is ``None``, the left side shows only
     the active plan panel (no streaming detail).
+
+    Args:
+        focused_panel: Name of the currently focused panel (for highlight).
+        scroll_offsets: Per-panel scroll offsets ``{panel_name: int}``.
+            Falls back to *scroll_offset* for the streaming panel
+            for backward compatibility.
     """
+    if scroll_offsets is None:
+        scroll_offsets = {}
+    # Backward compat: if only scroll_offset provided, use it for streaming
+    streaming_offset = scroll_offsets.get("streaming", scroll_offset)
+    active_plan_offset = scroll_offsets.get("active_plan", 0)
+    events_offset = scroll_offsets.get("events", 0)
+
     layout = Layout()
 
     if stream_events_by_task is not None:
@@ -758,7 +881,8 @@ def build_active_dashboard(
             build_streaming_detail_panel(
                 running_tasks,
                 stream_events_by_task,
-                scroll_offset=scroll_offset,
+                scroll_offset=streaming_offset,
+                focused_panel=focused_panel,
             )
         )
     else:
@@ -778,9 +902,18 @@ def build_active_dashboard(
             blocked_tasks,
             recently_completed,
             other_active,
+            scroll_offset=active_plan_offset,
+            focused_panel=focused_panel,
         )
     )
-    layout["events"].update(build_event_panel(events, max_events))
+    layout["events"].update(
+        build_event_panel(
+            events,
+            max_events,
+            scroll_offset=events_offset,
+            focused_panel=focused_panel,
+        )
+    )
     return layout
 
 
@@ -821,14 +954,18 @@ def _listen_for_keys(
     stop_event: threading.Event,
     scroll_state: dict,
 ) -> None:
-    """Background thread: listen for 'q' and arrow keys.
+    """Background thread: listen for 'q', Tab, and arrow keys.
 
     Handles:
       - ``q``: quit (sets *stop_event*)
-      - ``↑`` (ESC [ A): scroll streaming panel up
-      - ``↓`` (ESC [ B): scroll streaming panel down (towards newest)
+      - ``Tab``: cycle focus to next panel
+      - ``↑`` (ESC [ A): scroll focused panel up
+      - ``↓`` (ESC [ B): scroll focused panel down (towards newest)
 
-    *scroll_state* is a mutable dict with key ``offset`` (int).
+    *scroll_state* is a mutable dict with keys:
+      - ``focused_panel`` (str | None): currently focused panel name
+      - ``offsets`` (dict[str, int]): per-panel scroll offsets
+
     Uses cbreak mode on Unix; falls back to quit-only on non-terminals.
     """
     try:
@@ -847,7 +984,12 @@ def _listen_for_keys(
                     if ch.lower() == "q":
                         stop_event.set()
                         break
-                    if ch == "\x1b":
+                    if ch == "\t":
+                        # Tab: cycle focus
+                        scroll_state["focused_panel"] = _next_focused_panel(
+                            scroll_state.get("focused_panel")
+                        )
+                    elif ch == "\x1b":
                         # Possible escape sequence (arrow key)
                         ready2, _, _ = select.select([sys.stdin], [], [], 0.05)
                         if ready2:
@@ -856,15 +998,16 @@ def _listen_for_keys(
                                 ready3, _, _ = select.select([sys.stdin], [], [], 0.05)
                                 if ready3:
                                     ch3 = sys.stdin.read(1)
+                                    focused = scroll_state.get("focused_panel")
+                                    if focused is None:
+                                        # Default: scroll streaming for backward compat
+                                        focused = "streaming"
+                                    offsets = scroll_state.setdefault("offsets", {})
+                                    current = offsets.get(focused, 0)
                                     if ch3 == "A":  # Up arrow
-                                        scroll_state["offset"] = (
-                                            scroll_state.get("offset", 0) + 3
-                                        )
+                                        offsets[focused] = current + 3
                                     elif ch3 == "B":  # Down arrow
-                                        scroll_state["offset"] = max(
-                                            0,
-                                            scroll_state.get("offset", 0) - 3,
-                                        )
+                                        offsets[focused] = max(0, current - 3)
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
     except (ImportError, OSError, ValueError, AttributeError):
@@ -954,7 +1097,10 @@ def run_active_dashboard(
     """
     console = console or Console()
     stop_event = threading.Event()
-    scroll_state: dict = {"offset": 0}
+    scroll_state: dict = {
+        "focused_panel": "streaming",
+        "offsets": {},
+    }
 
     key_thread = threading.Thread(
         target=_listen_for_keys, args=(stop_event, scroll_state), daemon=True
@@ -1029,7 +1175,8 @@ def run_active_dashboard(
                     events,
                     max_events,
                     stream_events_by_task=stream_events_by_task,
-                    scroll_offset=scroll_state.get("offset", 0),
+                    focused_panel=scroll_state.get("focused_panel"),
+                    scroll_offsets=scroll_state.get("offsets", {}),
                 )
                 live.update(dashboard)
                 stop_event.wait(interval)

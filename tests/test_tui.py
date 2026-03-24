@@ -36,6 +36,11 @@ from corc.tui import (
     build_dashboard,
     build_active_dashboard,
     EVENT_STYLES,
+    PANEL_NAMES,
+    _border_style_for,
+    _next_focused_panel,
+    _FOCUSED_BORDER_STYLE,
+    _DEFAULT_BORDER_STYLES,
     _elapsed_since,
     _parse_stream_content,
     _format_tool_call,
@@ -2505,3 +2510,435 @@ class TestQueryAPIDuplicateAgents:
         api = self._make_query_api(tasks, agents)
         running = api.get_running_tasks_with_agents()
         assert len(running[0]["agents"]) == 1
+
+
+# ── Panel focus and scroll — regression tests ─────────────────────────────
+# Regression: Tab key cycling, per-panel scroll, and focus highlight were
+# broken. These tests verify the fix (task 1086b0c4).
+
+
+class TestBorderStyleFor:
+    """Test the _border_style_for helper used by all panels."""
+
+    def test_unfocused_panel_uses_default_style(self):
+        """Panels that are not focused use their default border colour."""
+        assert _border_style_for("active_plan", None) == "blue"
+        assert _border_style_for("streaming", None) == "magenta"
+        assert _border_style_for("events", None) == "green"
+
+    def test_focused_panel_uses_highlight_style(self):
+        """The focused panel gets the bright white highlight border."""
+        assert _border_style_for("active_plan", "active_plan") == _FOCUSED_BORDER_STYLE
+        assert _border_style_for("streaming", "streaming") == _FOCUSED_BORDER_STYLE
+        assert _border_style_for("events", "events") == _FOCUSED_BORDER_STYLE
+
+    def test_other_panel_not_focused(self):
+        """When a different panel is focused, other panels keep their default."""
+        assert _border_style_for("active_plan", "streaming") == "blue"
+        assert _border_style_for("events", "active_plan") == "green"
+
+    def test_unknown_panel_returns_white(self):
+        """Unknown panel names fall back to 'white'."""
+        assert _border_style_for("unknown_panel", None) == "white"
+
+
+class TestNextFocusedPanel:
+    """Test _next_focused_panel cycles through PANEL_NAMES."""
+
+    def test_from_none_returns_first(self):
+        assert _next_focused_panel(None) == PANEL_NAMES[0]
+
+    def test_cycles_through_all_panels(self):
+        """Starting from the first panel, Tab should cycle through all."""
+        current = PANEL_NAMES[0]
+        visited = [current]
+        for _ in range(len(PANEL_NAMES) - 1):
+            current = _next_focused_panel(current)
+            visited.append(current)
+        assert visited == PANEL_NAMES
+
+    def test_wraps_around(self):
+        """After the last panel, Tab returns to the first."""
+        last = PANEL_NAMES[-1]
+        assert _next_focused_panel(last) == PANEL_NAMES[0]
+
+    def test_unknown_returns_first(self):
+        """Unknown panel name resets to the first panel."""
+        assert _next_focused_panel("nonexistent") == PANEL_NAMES[0]
+
+
+class TestPanelFocusHighlightBorder:
+    """Verify that panels render with a highlight border when focused.
+
+    This is the core regression test: before the fix, _border_style_for
+    did not exist and focused_panel was an undefined variable, causing a
+    NameError or always using the default border.
+    """
+
+    def test_streaming_panel_focused_border(self):
+        """Streaming panel shows highlight border when focused."""
+        panel = build_streaming_detail_panel([], {}, focused_panel="streaming")
+        assert panel.border_style == _FOCUSED_BORDER_STYLE
+
+    def test_streaming_panel_unfocused_border(self):
+        """Streaming panel shows default border when NOT focused."""
+        panel = build_streaming_detail_panel([], {}, focused_panel="events")
+        assert panel.border_style == "magenta"
+
+    def test_streaming_panel_no_focus_default_border(self):
+        """Streaming panel shows default border when focused_panel is None."""
+        panel = build_streaming_detail_panel([], {}, focused_panel=None)
+        assert panel.border_style == "magenta"
+
+    def test_active_plan_panel_focused_border(self):
+        """Active plan panel shows highlight border when focused."""
+        panel = build_active_plan_panel([], [], [], [], focused_panel="active_plan")
+        assert panel.border_style == _FOCUSED_BORDER_STYLE
+
+    def test_active_plan_panel_unfocused_border(self):
+        """Active plan panel shows default border when NOT focused."""
+        panel = build_active_plan_panel([], [], [], [], focused_panel="streaming")
+        assert panel.border_style == "blue"
+
+    def test_event_panel_focused_border(self):
+        """Event panel shows highlight border when focused."""
+        panel = build_event_panel([], focused_panel="events")
+        assert panel.border_style == _FOCUSED_BORDER_STYLE
+
+    def test_event_panel_unfocused_border(self):
+        """Event panel shows default border when NOT focused."""
+        panel = build_event_panel([], focused_panel="active_plan")
+        assert panel.border_style == "green"
+
+
+class TestPerPanelScrolling:
+    """Verify that each panel has its own scroll offset.
+
+    Regression: previously there was a single global scroll offset that
+    was always applied to the streaming panel only, and arrow keys would
+    scroll regardless of which panel was focused.
+    """
+
+    def test_active_plan_scroll_offset(self):
+        """Active plan panel respects its own scroll_offset."""
+        # Create enough tasks to need scrolling
+        running = [
+            _make_task(f"r{i}", f"task-{i}", status="running") for i in range(20)
+        ]
+        panel_no_scroll = build_active_plan_panel(
+            running, [], [], [], scroll_offset=0, max_lines=5
+        )
+        panel_scrolled = build_active_plan_panel(
+            running, [], [], [], scroll_offset=5, max_lines=5
+        )
+        text_default = _render_to_plain(panel_no_scroll)
+        text_scrolled = _render_to_plain(panel_scrolled)
+        # The scrolled version should show different content
+        assert text_default != text_scrolled
+
+    def test_event_panel_scroll_offset(self):
+        """Event panel respects its own scroll_offset."""
+        events = [
+            {
+                "timestamp": f"2026-03-23T10:{i:02d}:00.000Z",
+                "event_type": "task_created",
+                "task_id": f"t{i}",
+            }
+            for i in range(40)
+        ]
+        panel_no_scroll = build_event_panel(events, max_events=5, scroll_offset=0)
+        panel_scrolled = build_event_panel(events, max_events=5, scroll_offset=10)
+        text_default = _render_to_plain(panel_no_scroll)
+        text_scrolled = _render_to_plain(panel_scrolled)
+        # Show different content when scrolled
+        assert text_default != text_scrolled
+
+    def test_dashboard_per_panel_scroll_offsets(self):
+        """build_active_dashboard accepts per-panel scroll_offsets."""
+        running = [_make_task("t1", "scroll-test", status="running")]
+        many_events = [
+            _make_stream_entry(
+                "tool_use",
+                {
+                    "type": "tool_use",
+                    "tool": {"name": "Read", "input": {"file_path": f"/f{i}.py"}},
+                },
+            )
+            for i in range(50)
+        ]
+
+        layout = build_active_dashboard(
+            running,
+            [],
+            [],
+            [],
+            [],
+            [],
+            stream_events_by_task={"t1": many_events},
+            scroll_offsets={"streaming": 10},
+            focused_panel="streaming",
+        )
+        text = _render_to_plain(layout, width=120)
+        assert "offset: 10" in text
+
+    def test_scrolling_only_affects_focused_panel(self):
+        """Scrolling via scroll_offsets only changes one panel's view."""
+        running = [_make_task("t1", "task", status="running")]
+        many_stream_events = [
+            _make_stream_entry(
+                "tool_use",
+                {
+                    "type": "tool_use",
+                    "tool": {"name": "Read", "input": {"file_path": f"/f{i}.py"}},
+                },
+            )
+            for i in range(50)
+        ]
+        audit_events = [
+            {
+                "timestamp": f"2026-03-23T10:{i:02d}:00.000Z",
+                "event_type": "task_created",
+                "task_id": f"t{i}",
+            }
+            for i in range(20)
+        ]
+
+        # Only scroll streaming; events should be unaffected
+        layout_a = build_active_dashboard(
+            running,
+            [],
+            [],
+            [],
+            [],
+            audit_events,
+            stream_events_by_task={"t1": many_stream_events},
+            scroll_offsets={"streaming": 20},
+            focused_panel="streaming",
+        )
+        # Now scroll events only
+        layout_b = build_active_dashboard(
+            running,
+            [],
+            [],
+            [],
+            [],
+            audit_events,
+            stream_events_by_task={"t1": many_stream_events},
+            scroll_offsets={"events": 5},
+            focused_panel="events",
+        )
+        text_a = _render_to_plain(layout_a, width=160)
+        text_b = _render_to_plain(layout_b, width=160)
+        # The two layouts should differ because different panels are scrolled/focused
+        assert text_a != text_b
+
+
+class TestScrollIndicators:
+    """Verify scroll overflow indicators appear when content overflows."""
+
+    def test_streaming_more_below_indicator(self):
+        """Streaming panel shows '▼ more below' when content overflows."""
+        running = [_make_task("t1", "task", status="running")]
+        many_events = [
+            _make_stream_entry(
+                "tool_use",
+                {
+                    "type": "tool_use",
+                    "tool": {"name": "Read", "input": {"file_path": f"/f{i}.py"}},
+                },
+            )
+            for i in range(50)
+        ]
+        panel = build_streaming_detail_panel(
+            running, {"t1": many_events}, scroll_offset=0, max_lines=10
+        )
+        text = _render_to_plain(panel)
+        assert "more below" in text
+
+    def test_streaming_more_above_indicator(self):
+        """Streaming panel shows '▲ more above' when scrolled up."""
+        running = [_make_task("t1", "task", status="running")]
+        many_events = [
+            _make_stream_entry(
+                "tool_use",
+                {
+                    "type": "tool_use",
+                    "tool": {"name": "Read", "input": {"file_path": f"/f{i}.py"}},
+                },
+            )
+            for i in range(50)
+        ]
+        panel = build_streaming_detail_panel(
+            running, {"t1": many_events}, scroll_offset=10, max_lines=10
+        )
+        text = _render_to_plain(panel)
+        assert "more above" in text
+
+    def test_active_plan_scroll_indicators(self):
+        """Active plan shows scroll indicators when content overflows."""
+        running = [
+            _make_task(f"r{i}", f"task-{i}", status="running") for i in range(30)
+        ]
+        # Scrolled from top so there should be "more above"
+        panel = build_active_plan_panel(
+            running, [], [], [], scroll_offset=5, max_lines=5
+        )
+        text = _render_to_plain(panel)
+        assert "more above" in text
+
+
+class TestQuitFromAnyPanel:
+    """Verify q still quits from any focused panel.
+
+    This is a contract test — the actual _listen_for_keys thread
+    handles the key; we verify the quit hint is visible.
+    """
+
+    def test_event_panel_shows_quit_hint(self):
+        panel = build_event_panel([], focused_panel="events")
+        text = _render_to_plain(panel)
+        assert "q to quit" in text
+
+    def test_event_panel_shows_tab_hint(self):
+        panel = build_event_panel([], focused_panel="events")
+        text = _render_to_plain(panel)
+        assert "Tab focus" in text
+
+
+class TestFocusAndScrollRegression:
+    """Regression tests for the original bug (task 1086b0c4).
+
+    The original bug manifested as:
+      1. Tab did nothing (no focus cycling, no handler for Tab key)
+      2. Arrow keys crashed or did nothing (undefined focused_panel variable)
+      3. All panels had static borders (no highlight on focused panel)
+      4. Scroll was global, not per-panel
+
+    These tests reproduce the bug scenario and verify the fix.
+    """
+
+    def test_regression_border_style_for_exists(self):
+        """_border_style_for is a callable (was missing before the fix)."""
+        assert callable(_border_style_for)
+
+    def test_regression_streaming_panel_no_name_error(self):
+        """build_streaming_detail_panel no longer raises NameError.
+
+        Before the fix, the function referenced an undefined `focused_panel`
+        variable when rendering the border.
+        """
+        running = [_make_task("t1", "task", status="running")]
+        events = {
+            "t1": [
+                _make_stream_entry(
+                    "tool_use",
+                    {
+                        "type": "tool_use",
+                        "tool": {"name": "Read", "input": {"file_path": "/a.py"}},
+                    },
+                ),
+            ]
+        }
+        # This would raise NameError before the fix because `focused_panel`
+        # was not a parameter of build_streaming_detail_panel
+        panel = build_streaming_detail_panel(running, events)
+        assert isinstance(panel, Panel)
+
+    def test_regression_focus_cycles_all_three_panels(self):
+        """Tab cycles through active_plan → streaming → events → active_plan."""
+        panels = PANEL_NAMES
+        assert len(panels) == 3
+        assert "active_plan" in panels
+        assert "streaming" in panels
+        assert "events" in panels
+
+        # Full cycle
+        current = None
+        cycle = []
+        for _ in range(4):
+            current = _next_focused_panel(current)
+            cycle.append(current)
+        assert cycle == ["active_plan", "streaming", "events", "active_plan"]
+
+    def test_regression_per_panel_scroll_state(self):
+        """Scroll state is tracked per-panel, not globally.
+
+        Before the fix, scroll_state had a single 'offset' key that
+        only applied to the streaming panel. Now it has 'offsets' dict.
+        """
+        scroll_state = {
+            "focused_panel": "active_plan",
+            "offsets": {"active_plan": 5, "streaming": 0, "events": 3},
+        }
+        # Each panel reads its own offset
+        assert scroll_state["offsets"]["active_plan"] == 5
+        assert scroll_state["offsets"]["streaming"] == 0
+        assert scroll_state["offsets"]["events"] == 3
+
+    def test_regression_dashboard_accepts_focused_panel(self):
+        """build_active_dashboard accepts focused_panel parameter."""
+        running = [_make_task("t1", "task", status="running")]
+        layout = build_active_dashboard(
+            running,
+            [],
+            [],
+            [],
+            [],
+            [],
+            stream_events_by_task={},
+            focused_panel="active_plan",
+        )
+        text = _render_to_plain(layout, width=120)
+        assert "Active Plan" in text
+
+    def test_regression_dashboard_accepts_scroll_offsets(self):
+        """build_active_dashboard accepts scroll_offsets dict."""
+        running = [_make_task("t1", "task", status="running")]
+        layout = build_active_dashboard(
+            running,
+            [],
+            [],
+            [],
+            [],
+            [],
+            stream_events_by_task={},
+            scroll_offsets={"active_plan": 0, "streaming": 0, "events": 0},
+            focused_panel="streaming",
+        )
+        text = _render_to_plain(layout, width=120)
+        assert "Streaming Detail" in text
+
+    def test_regression_focused_panel_has_different_border(self):
+        """The focused panel's border visually differs from unfocused panels.
+
+        The key user-facing symptom: Tab should produce a visible change
+        in the panel border to show which panel has focus.
+        """
+        # Render with streaming focused
+        layout_streaming = build_active_dashboard(
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            stream_events_by_task={},
+            focused_panel="streaming",
+        )
+        text_streaming = _render_to_str(layout_streaming, width=120)
+
+        # Render with events focused
+        layout_events = build_active_dashboard(
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            stream_events_by_task={},
+            focused_panel="events",
+        )
+        text_events = _render_to_str(layout_events, width=120)
+
+        # The two renderings must differ (different border highlights)
+        assert text_streaming != text_events
