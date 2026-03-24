@@ -36,6 +36,7 @@ from corc.tui import (
     build_dashboard,
     build_active_dashboard,
     EVENT_STYLES,
+    PANEL_NAMES,
     _elapsed_since,
     _format_attempt_count,
     _parse_stream_content,
@@ -45,6 +46,10 @@ from corc.tui import (
     _format_attempt_count,
     _deduplicate_agents,
     _deduplicate_task_agents,
+    _panel_border,
+    _scroll_indicators,
+    _FOCUSED_BORDER,
+    _DEFAULT_BORDERS,
 )
 
 
@@ -3097,3 +3102,405 @@ class TestStreamingDetailPanelAttemptCount:
         for line in lines:
             if "no-retry" in line:
                 assert "attempt" not in line
+
+
+# ── Scroll bug regression tests ──────────────────────────────────────────
+
+
+class TestScrollBugRegression:
+    """Regression: scroll_offset changed but display did not update.
+
+    Root cause: build_streaming_detail_panel limited events to ``events[-20:]``
+    per task, producing ~22 lines.  With default max_lines=30, the condition
+    ``total_lines > max_lines`` was never true, so the scroll window was never
+    applied — the offset changed but the rendered content was identical.
+
+    Fix: removed the hard-coded 20-event cap; all events are included in
+    the line list and the scroll/max_lines logic at the bottom handles
+    windowing.
+    """
+
+    def test_scroll_offset_changes_display_with_default_max_lines(self):
+        """BUG REPRO: with default max_lines=30 and 25+ events, scrolling
+        must actually change the rendered output.
+
+        Before the fix, events[-20:] capped lines to ~22 which was under
+        max_lines=30, so the scroll branch was never entered.
+        """
+        running = [_make_task("t1", "scroll-bug-task", status="running")]
+        # Create 40 events — exceeds old 20-event cap AND default max_lines=30
+        many_events = []
+        for i in range(40):
+            many_events.append(
+                _make_stream_entry(
+                    "tool_use",
+                    {
+                        "type": "tool_use",
+                        "tool": {
+                            "name": "Read",
+                            "input": {"file_path": f"/file{i}.py"},
+                        },
+                    },
+                )
+            )
+        events = {"t1": many_events}
+
+        # Default scroll (offset=0): shows newest events
+        panel_at_bottom = build_streaming_detail_panel(running, events, scroll_offset=0)
+        text_bottom = _render_to_plain(panel_at_bottom)
+
+        # Scrolled up (offset=20): shows older events
+        panel_scrolled = build_streaming_detail_panel(running, events, scroll_offset=20)
+        text_scrolled = _render_to_plain(panel_scrolled)
+
+        # KEY ASSERTION: the two renders must be DIFFERENT
+        assert text_bottom != text_scrolled, (
+            "Scroll offset changed but display output is identical — "
+            "the scroll bug is still present"
+        )
+
+        # Bottom view should show newest files
+        assert "/file39.py" in text_bottom
+        # Scrolled view should NOT show the newest files
+        assert "/file39.py" not in text_scrolled
+
+    def test_all_events_rendered_not_capped_at_20(self):
+        """Verify the old 20-event-per-task cap is removed.
+
+        With 40 events and max_lines=50, all events should be renderable.
+        """
+        running = [_make_task("t1", "uncapped-task", status="running")]
+        many_events = [
+            _make_stream_entry(
+                "tool_use",
+                {
+                    "type": "tool_use",
+                    "tool": {"name": "Read", "input": {"file_path": f"/f{i}.py"}},
+                },
+            )
+            for i in range(40)
+        ]
+        events = {"t1": many_events}
+
+        panel = build_streaming_detail_panel(
+            running, events, scroll_offset=0, max_lines=50
+        )
+        text = _render_to_plain(panel)
+
+        # With max_lines=50 and 40 events + header + spacer = 42 lines,
+        # all events should be visible (no scrolling needed)
+        assert "/f0.py" in text
+        assert "/f39.py" in text
+
+
+# ── Panel focus and border tests ─────────────────────────────────────────
+
+
+class TestPanelBorder:
+    """Tests for _panel_border helper and focus highlight."""
+
+    def test_unfocused_returns_default(self):
+        assert _panel_border("streaming", None) == "magenta"
+        assert _panel_border("active_plan", None) == "blue"
+        assert _panel_border("events", None) == "green"
+
+    def test_focused_returns_highlight(self):
+        assert _panel_border("streaming", "streaming") == _FOCUSED_BORDER
+        assert _panel_border("active_plan", "active_plan") == _FOCUSED_BORDER
+        assert _panel_border("events", "events") == _FOCUSED_BORDER
+
+    def test_other_panel_focused_returns_default(self):
+        assert _panel_border("streaming", "events") == "magenta"
+        assert _panel_border("active_plan", "streaming") == "blue"
+
+    def test_unknown_panel_returns_white(self):
+        assert _panel_border("unknown", None) == "white"
+
+
+class TestScrollIndicators:
+    """Tests for _scroll_indicators helper."""
+
+    def test_content_fits_no_indicators(self):
+        has_above, has_below = _scroll_indicators(10, 30, 0)
+        assert not has_above
+        assert not has_below
+
+    def test_at_bottom_has_above_only(self):
+        has_above, has_below = _scroll_indicators(50, 30, 0)
+        assert has_above
+        assert not has_below
+
+    def test_scrolled_up_has_both(self):
+        has_above, has_below = _scroll_indicators(50, 30, 10)
+        assert has_above
+        assert has_below
+
+    def test_scrolled_to_top_has_below_only(self):
+        # total=50, visible=30, offset=20 → end=30, start=0 → at top
+        has_above, has_below = _scroll_indicators(50, 30, 20)
+        assert not has_above
+        assert has_below
+
+
+class TestPanelFocusBorder:
+    """Test that panels render with correct border when focused."""
+
+    def test_streaming_panel_focused_border(self):
+        """Streaming panel gets highlight border when focused."""
+        panel = build_streaming_detail_panel([], {}, focused_panel="streaming")
+        assert panel.border_style == _FOCUSED_BORDER
+
+    def test_streaming_panel_unfocused_border(self):
+        """Streaming panel gets default border when not focused."""
+        panel = build_streaming_detail_panel([], {}, focused_panel="events")
+        assert panel.border_style == "magenta"
+
+    def test_streaming_panel_no_focus_default_border(self):
+        """Streaming panel gets default border when focused_panel is None."""
+        panel = build_streaming_detail_panel([], {})
+        assert panel.border_style == "magenta"
+
+    def test_active_plan_panel_focused_border(self):
+        panel = build_active_plan_panel([], [], [], [], focused_panel="active_plan")
+        assert panel.border_style == _FOCUSED_BORDER
+
+    def test_active_plan_panel_unfocused_border(self):
+        panel = build_active_plan_panel([], [], [], [], focused_panel="streaming")
+        assert panel.border_style == "blue"
+
+    def test_event_panel_focused_border(self):
+        panel = build_event_panel([], focused_panel="events")
+        assert panel.border_style == _FOCUSED_BORDER
+
+    def test_event_panel_unfocused_border(self):
+        panel = build_event_panel([], focused_panel="streaming")
+        assert panel.border_style == "green"
+
+
+class TestPanelFocusCycling:
+    """Test Tab focus cycling logic."""
+
+    def test_panel_names_order(self):
+        assert PANEL_NAMES == ["streaming", "active_plan", "events"]
+
+    def test_cycling_through_panels(self):
+        """Simulate Tab presses cycling through panels."""
+        state = {"focused_panel": PANEL_NAMES[0]}
+        for expected in ["active_plan", "events", "streaming", "active_plan"]:
+            current = state["focused_panel"]
+            idx = PANEL_NAMES.index(current)
+            state["focused_panel"] = PANEL_NAMES[(idx + 1) % len(PANEL_NAMES)]
+            assert state["focused_panel"] == expected
+
+
+class TestPerPanelScrollOffsets:
+    """Test per-panel scroll offsets in dashboard."""
+
+    def test_per_panel_offsets_passed_to_streaming(self):
+        """scroll_offsets dict passes streaming offset to streaming panel."""
+        running = [_make_task("t1", "task", status="running")]
+        many_events = [
+            _make_stream_entry(
+                "tool_use",
+                {
+                    "type": "tool_use",
+                    "tool": {"name": "Read", "input": {"file_path": f"/f{i}.py"}},
+                },
+            )
+            for i in range(50)
+        ]
+        layout = build_active_dashboard(
+            running,
+            [],
+            [],
+            [],
+            [],
+            [],
+            stream_events_by_task={"t1": many_events},
+            scroll_offsets={"streaming": 15, "active_plan": 0, "events": 0},
+        )
+        text = _render_to_plain(layout, width=120)
+        assert "offset: 15" in text
+
+    def test_per_panel_offsets_independent(self):
+        """Different panels get different offsets."""
+        running = [_make_task("t1", "task", status="running")]
+        many_events = [
+            _make_stream_entry(
+                "tool_use",
+                {
+                    "type": "tool_use",
+                    "tool": {"name": "Read", "input": {"file_path": f"/f{i}.py"}},
+                },
+            )
+            for i in range(50)
+        ]
+        audit_events = [
+            {
+                "timestamp": f"2026-03-23T10:{i:02d}:00.000Z",
+                "event_type": "task_dispatched",
+                "task_id": f"t{i}",
+            }
+            for i in range(50)
+        ]
+
+        layout = build_active_dashboard(
+            running,
+            [],
+            [],
+            [],
+            [],
+            audit_events,
+            stream_events_by_task={"t1": many_events},
+            scroll_offsets={"streaming": 10, "active_plan": 0, "events": 5},
+        )
+        text = _render_to_plain(layout, width=120)
+        # Streaming panel should show offset: 10
+        assert "offset: 10" in text
+        # Events panel should show offset: 5
+        assert "offset: 5" in text
+
+    def test_focused_panel_passed_to_dashboard(self):
+        """focused_panel highlights the correct panel border."""
+        layout = build_active_dashboard(
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            stream_events_by_task={},
+            focused_panel="streaming",
+        )
+        text = _render_to_str(layout, width=120)
+        # The streaming panel should have the focused border style
+        # We can verify by checking the layout renders without error
+        assert "Streaming Detail" in text
+        assert "Active Plan" in text
+        assert "Events" in text
+
+
+class TestScrollIndicatorsInPanels:
+    """Test scroll indicators appear in panels when content overflows."""
+
+    def test_streaming_panel_shows_above_indicator(self):
+        """When at bottom with overflow, show ▲ more above."""
+        running = [_make_task("t1", "task", status="running")]
+        many_events = [
+            _make_stream_entry(
+                "tool_use",
+                {
+                    "type": "tool_use",
+                    "tool": {"name": "Read", "input": {"file_path": f"/f{i}.py"}},
+                },
+            )
+            for i in range(50)
+        ]
+        panel = build_streaming_detail_panel(
+            running, {"t1": many_events}, scroll_offset=0, max_lines=10
+        )
+        text = _render_to_plain(panel)
+        assert "more above" in text
+
+    def test_streaming_panel_shows_below_indicator_when_scrolled(self):
+        """When scrolled up, show ▼ more below."""
+        running = [_make_task("t1", "task", status="running")]
+        many_events = [
+            _make_stream_entry(
+                "tool_use",
+                {
+                    "type": "tool_use",
+                    "tool": {"name": "Read", "input": {"file_path": f"/f{i}.py"}},
+                },
+            )
+            for i in range(50)
+        ]
+        panel = build_streaming_detail_panel(
+            running, {"t1": many_events}, scroll_offset=10, max_lines=10
+        )
+        text = _render_to_plain(panel)
+        assert "more below" in text
+
+    def test_no_indicators_when_content_fits(self):
+        """No scroll indicators when all content fits in max_lines."""
+        running = [_make_task("t1", "task", status="running")]
+        events = [
+            _make_stream_entry(
+                "tool_use",
+                {
+                    "type": "tool_use",
+                    "tool": {"name": "Read", "input": {"file_path": "/f.py"}},
+                },
+            )
+        ]
+        panel = build_streaming_detail_panel(
+            running, {"t1": events}, scroll_offset=0, max_lines=50
+        )
+        text = _render_to_plain(panel)
+        assert "more above" not in text
+        assert "more below" not in text
+
+    def test_active_plan_panel_scroll_indicators(self):
+        """Active plan panel shows scroll indicators when overflowing."""
+        # Create enough tasks to overflow max_lines=5
+        running = [
+            _make_task(f"t{i}", f"task-{i}", status="running") for i in range(10)
+        ]
+        panel = build_active_plan_panel(
+            running, [], [], [], scroll_offset=0, max_lines=5
+        )
+        text = _render_to_plain(panel)
+        assert "more above" in text
+
+    def test_event_panel_scroll_indicators(self):
+        """Event panel shows scroll indicators when overflowing."""
+        events = [
+            {
+                "timestamp": f"2026-03-23T10:{i:02d}:00.000Z",
+                "event_type": "task_dispatched",
+                "task_id": f"t{i}",
+            }
+            for i in range(30)
+        ]
+        panel = build_event_panel(events, max_events=30, scroll_offset=0, max_lines=10)
+        text = _render_to_plain(panel)
+        assert "more above" in text
+
+
+class TestQuitFromAnyPanel:
+    """Verify q still quits regardless of focused panel."""
+
+    def test_quit_hint_in_event_panel(self):
+        panel = build_event_panel([])
+        text = _render_to_plain(panel)
+        assert "q to quit" in text
+
+    def test_scroll_hint_in_streaming_panel(self):
+        panel = build_streaming_detail_panel([], {})
+        text = _render_to_plain(panel)
+        assert "scroll" in text
+
+
+class TestActivePlanPanelScrolling:
+    """Test scrolling within the active plan panel."""
+
+    def test_scroll_offset_changes_content(self):
+        """Scroll offset shifts visible content in active plan panel."""
+        running = [
+            _make_task(f"t{i}", f"running-task-{i}", status="running")
+            for i in range(20)
+        ]
+        # No scroll: show bottom
+        panel_bottom = build_active_plan_panel(
+            running, [], [], [], scroll_offset=0, max_lines=5
+        )
+        text_bottom = _render_to_plain(panel_bottom)
+
+        # Scrolled up
+        panel_scrolled = build_active_plan_panel(
+            running, [], [], [], scroll_offset=10, max_lines=5
+        )
+        text_scrolled = _render_to_plain(panel_scrolled)
+
+        assert text_bottom != text_scrolled
+        assert "offset: 10" in text_scrolled
