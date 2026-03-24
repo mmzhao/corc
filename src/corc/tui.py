@@ -81,7 +81,9 @@ def _check_for_source_changes(
 # ── Daemon status helpers ─────────────────────────────────────────────────
 
 
-def get_daemon_status(corc_dir: Path, parallel: int = 1, work_state=None) -> dict:
+def get_daemon_status(
+    corc_dir: Path, parallel: int | None = None, work_state=None
+) -> dict:
     """Determine the current daemon status by checking PID file and pause lock.
 
     Returns a dict with:
@@ -94,12 +96,24 @@ def get_daemon_status(corc_dir: Path, parallel: int = 1, work_state=None) -> dic
 
     Args:
         corc_dir: Path to the ``.corc`` directory.
-        parallel: Configured parallel slot limit.
+        parallel: Configured parallel slot limit.  When ``None`` (the
+            default), the value is read from the daemon config
+            (``daemon.parallel``) so the denominator always reflects
+            the actual configured limit.
         work_state: Optional WorkState to query for slot usage.
     """
     from corc.pause import read_pause_lock
 
     corc_dir = Path(corc_dir)
+
+    # Read parallel from config when not explicitly provided,
+    # so the denominator always reflects the actual setting.
+    if parallel is None:
+        from corc.config import load_config
+
+        cfg = load_config()
+        parallel = cfg.get("daemon.parallel", 1)
+
     pid_file = corc_dir / "daemon.pid"
 
     result = {
@@ -1376,7 +1390,7 @@ def run_active_dashboard(
     console: Console | None = None,
     auto_reload: bool = False,
     corc_dir: Path | None = None,
-    parallel: int = 1,
+    parallel: int | None = None,
 ) -> None:
     """Run the active-plan-focused dashboard until 'q' or Ctrl+C.
 
