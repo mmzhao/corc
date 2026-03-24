@@ -1,13 +1,12 @@
 """Agent role system — loads, validates, and composes role configs from YAML.
 
-Roles define system prompts, tool restrictions, cost limits, and access levels.
+Roles define system prompts, tool restrictions, and access levels.
 They are stored as YAML files in .corc/roles/ and the built-in defaults ship
 with the package in src/corc/_builtin_roles/.
 """
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 import yaml
 
@@ -21,7 +20,6 @@ REQUIRED_FIELDS = {
     "description",
     "system_prompt",
     "allowed_tools",
-    "cost_limits",
     "knowledge_write_access",
 }
 VALID_KNOWLEDGE_WRITE_ACCESS = {"none", "findings_only", "full"}
@@ -37,11 +35,6 @@ VALID_TOOL_NAMES = {
     "Agent",
 }
 
-COST_LIMITS_SCHEMA = {
-    "max_budget_per_invocation_usd": (int | float, True),
-    "max_turns_per_invocation": (int, True),
-}
-
 
 @dataclass
 class RoleConfig:
@@ -53,16 +46,7 @@ class RoleConfig:
     system_prompt: str
     knowledge_write_access: str
     allowed_tools: list[str]
-    cost_limits: dict[str, Any]
     source_path: Path | None = None
-
-    @property
-    def max_budget_usd(self) -> float:
-        return float(self.cost_limits.get("max_budget_per_invocation_usd", 3.0))
-
-    @property
-    def max_turns(self) -> int:
-        return int(self.cost_limits.get("max_turns_per_invocation", 50))
 
 
 @dataclass
@@ -138,24 +122,6 @@ def validate_role_data(data: dict) -> ValidationResult:
                 # Allow tool restrictions like "Bash(git*, gh pr*)"
                 warnings.append(f"Unknown tool name: '{tool}'")
 
-    # Validate cost_limits
-    cl = data.get("cost_limits", {})
-    if not isinstance(cl, dict):
-        errors.append("'cost_limits' must be a mapping")
-    else:
-        for key, (expected_type, required) in COST_LIMITS_SCHEMA.items():
-            if key not in cl:
-                if required:
-                    errors.append(f"Missing required cost_limits field: {key}")
-            else:
-                val = cl[key]
-                if not isinstance(val, (int, float)):
-                    errors.append(
-                        f"cost_limits.{key} must be a number, got {type(val).__name__}"
-                    )
-                elif val <= 0:
-                    errors.append(f"cost_limits.{key} must be positive, got {val}")
-
     return ValidationResult(valid=len(errors) == 0, errors=errors, warnings=warnings)
 
 
@@ -168,7 +134,6 @@ def _data_to_role_config(data: dict, source_path: Path | None = None) -> RoleCon
         system_prompt=data["system_prompt"],
         knowledge_write_access=data["knowledge_write_access"],
         allowed_tools=data["allowed_tools"],
-        cost_limits=data["cost_limits"],
         source_path=source_path,
     )
 
@@ -193,7 +158,6 @@ def compose_roles(child_data: dict, parent: RoleConfig) -> dict:
             "knowledge_write_access", parent.knowledge_write_access
         ),
         "allowed_tools": child_data.get("allowed_tools", list(parent.allowed_tools)),
-        "cost_limits": {**parent.cost_limits, **child_data.get("cost_limits", {})},
     }
 
     # System prompt: append if starts with '+', else replace
@@ -352,8 +316,6 @@ def constraints_from_role(role: RoleConfig) -> "Constraints":
 
     return Constraints(
         allowed_tools=list(role.allowed_tools),
-        max_budget_usd=role.max_budget_usd,
-        max_turns=role.max_turns,
     )
 
 

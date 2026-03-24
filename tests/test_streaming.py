@@ -555,7 +555,6 @@ class TestStreamingDispatch:
 
         constraints = Constraints(
             allowed_tools=["Read", "Write"],
-            max_turns=10,
         )
         dispatcher = ClaudeCodeDispatcher()
         dispatcher.dispatch("prompt", "system", constraints)
@@ -564,9 +563,7 @@ class TestStreamingDispatch:
         assert "--allowedTools" in cmd
         idx = cmd.index("--allowedTools")
         assert cmd[idx + 1] == "Read,Write"
-        assert "--max-turns" in cmd
-        idx = cmd.index("--max-turns")
-        assert cmd[idx + 1] == "10"
+        assert "--max-turns" not in cmd
 
     def test_real_format_events_parsed(self, monkeypatch):
         """Events matching the real claude CLI stream-json format are parsed correctly.

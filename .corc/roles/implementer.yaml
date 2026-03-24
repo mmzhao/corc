@@ -31,7 +31,3 @@ allowed_tools:
   - Bash
   - Grep
   - Glob
-
-cost_limits:
-  max_budget_per_invocation_usd: 3.00
-  max_turns_per_invocation: 50

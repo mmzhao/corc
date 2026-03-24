@@ -31,8 +31,6 @@ class Constraints:
     allowed_tools: list[str] = field(
         default_factory=lambda: list(_DISPATCH_DEFAULTS["default_allowed_tools"])
     )
-    max_budget_usd: float = _DISPATCH_DEFAULTS["max_budget_usd"]
-    max_turns: int = _DISPATCH_DEFAULTS["max_turns"]
     output_format: str | None = None
     json_schema: str | None = None
 
@@ -100,9 +98,6 @@ class ClaudeCodeDispatcher(AgentDispatcher):
 
         if constraints.allowed_tools:
             cmd.extend(["--allowedTools", ",".join(constraints.allowed_tools)])
-
-        if constraints.max_turns:
-            cmd.extend(["--max-turns", str(constraints.max_turns)])
 
         start = time.time()
         timed_out = False

@@ -25,6 +25,12 @@ from corc.dispatch import Constraints
 
 
 # ---------------------------------------------------------------------------
+# Note: cost_limits, max_budget_usd, max_turns have been removed from
+# Constraints, RoleConfig, and role YAML files. Tests updated accordingly.
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
@@ -44,10 +50,6 @@ def _minimal_role(name: str = "test-role", **overrides) -> dict:
         "system_prompt": "You are a test agent.",
         "knowledge_write_access": "findings_only",
         "allowed_tools": ["Read", "Grep", "Glob"],
-        "cost_limits": {
-            "max_budget_per_invocation_usd": 2.0,
-            "max_turns_per_invocation": 30,
-        },
     }
     role.update(overrides)
     return role
@@ -133,27 +135,6 @@ class TestValidateRoleData:
             result = validate_role_data(data)
             assert result.valid, f"Failed for {kwa}: {result.errors}"
 
-    def test_invalid_cost_limits_missing(self):
-        data = _minimal_role()
-        data["cost_limits"] = {}
-        result = validate_role_data(data)
-        assert not result.valid
-        assert any("max_budget_per_invocation_usd" in e for e in result.errors)
-
-    def test_invalid_cost_limits_negative(self):
-        data = _minimal_role()
-        data["cost_limits"]["max_budget_per_invocation_usd"] = -1.0
-        result = validate_role_data(data)
-        assert not result.valid
-        assert any("positive" in e for e in result.errors)
-
-    def test_invalid_cost_limits_type(self):
-        data = _minimal_role()
-        data["cost_limits"]["max_budget_per_invocation_usd"] = "three"
-        result = validate_role_data(data)
-        assert not result.valid
-        assert any("number" in e for e in result.errors)
-
     def test_allowed_tools_not_list(self):
         data = _minimal_role(allowed_tools="Read,Grep")
         result = validate_role_data(data)
@@ -194,10 +175,6 @@ class TestRoleComposition:
             system_prompt="Parent prompt.",
             knowledge_write_access="findings_only",
             allowed_tools=["Read", "Grep"],
-            cost_limits={
-                "max_budget_per_invocation_usd": 2.0,
-                "max_turns_per_invocation": 30,
-            },
         )
         child_data = {
             "name": "child",
@@ -205,14 +182,11 @@ class TestRoleComposition:
             "extends": "parent",
             "allowed_tools": ["Read", "Grep", "Edit", "Write"],
             "system_prompt": "Child prompt.",
-            "cost_limits": {"max_budget_per_invocation_usd": 5.0},
         }
         composed = compose_roles(child_data, parent)
         assert composed["name"] == "child"
         assert composed["allowed_tools"] == ["Read", "Grep", "Edit", "Write"]
         assert composed["system_prompt"] == "Child prompt."
-        assert composed["cost_limits"]["max_budget_per_invocation_usd"] == 5.0
-        assert composed["cost_limits"]["max_turns_per_invocation"] == 30  # inherited
 
     def test_child_inherits_missing_fields(self):
         parent = RoleConfig(
@@ -222,10 +196,6 @@ class TestRoleComposition:
             system_prompt="Parent prompt.",
             knowledge_write_access="findings_only",
             allowed_tools=["Read", "Grep"],
-            cost_limits={
-                "max_budget_per_invocation_usd": 2.0,
-                "max_turns_per_invocation": 30,
-            },
         )
         child_data = {
             "name": "child",
@@ -244,10 +214,6 @@ class TestRoleComposition:
             system_prompt="Base instructions.",
             knowledge_write_access="findings_only",
             allowed_tools=["Read"],
-            cost_limits={
-                "max_budget_per_invocation_usd": 2.0,
-                "max_turns_per_invocation": 30,
-            },
         )
         child_data = {
             "name": "child",
@@ -288,8 +254,6 @@ class TestRoleLoader:
             assert role.name == name
             assert len(role.system_prompt) > 0
             assert len(role.allowed_tools) > 0
-            assert role.max_budget_usd > 0
-            assert role.max_turns > 0
 
     def test_project_overrides_builtin(self, loader, roles_dir):
         """Project-local role should override built-in with same name."""
@@ -312,10 +276,6 @@ class TestRoleLoader:
             "system_prompt": "+Additional instructions.",
             "allowed_tools": ["Read", "Grep", "Edit", "Write"],
             "knowledge_write_access": "findings_only",
-            "cost_limits": {
-                "max_budget_per_invocation_usd": 5.0,
-                "max_turns_per_invocation": 50,
-            },
         }
         _write_role(roles_dir / "base.yaml", parent)
         _write_role(roles_dir / "extended.yaml", child)
@@ -324,7 +284,6 @@ class TestRoleLoader:
         assert role.name == "extended"
         assert "Additional instructions." in role.system_prompt
         assert "You are a test agent." in role.system_prompt  # inherited
-        assert role.max_budget_usd == 5.0
         assert "Edit" in role.allowed_tools
 
     def test_circular_extends_detected(self, loader, roles_dir):
@@ -398,10 +357,6 @@ class TestRoleLoader:
             "system_prompt": "+More.",
             "allowed_tools": ["Read"],
             "knowledge_write_access": "findings_only",
-            "cost_limits": {
-                "max_budget_per_invocation_usd": 1.0,
-                "max_turns_per_invocation": 10,
-            },
         }
         _write_role(roles_dir / "base-valid.yaml", parent)
         _write_role(roles_dir / "child-valid.yaml", child)
@@ -433,16 +388,10 @@ class TestConstraintsFromRole:
             system_prompt="Test.",
             knowledge_write_access="findings_only",
             allowed_tools=["Read", "Grep"],
-            cost_limits={
-                "max_budget_per_invocation_usd": 5.0,
-                "max_turns_per_invocation": 25,
-            },
         )
         c = constraints_from_role(role)
         assert isinstance(c, Constraints)
         assert c.allowed_tools == ["Read", "Grep"]
-        assert c.max_budget_usd == 5.0
-        assert c.max_turns == 25
 
     def test_scout_role_constraints(self):
         """Scout should be read-only (no Edit/Write/Bash)."""
@@ -488,10 +437,6 @@ class TestSystemPromptGeneration:
             system_prompt="You write code.",
             knowledge_write_access="findings_only",
             allowed_tools=["Read"],
-            cost_limits={
-                "max_budget_per_invocation_usd": 3.0,
-                "max_turns_per_invocation": 50,
-            },
         )
         task = {"name": "build-feature", "done_when": "tests pass"}
         context = "File: main.py\n..."
@@ -579,45 +524,15 @@ class TestBuiltinRoles:
 
 
 class TestRoleConfigProperties:
-    def test_max_budget_usd(self):
+    def test_basic_properties(self):
         rc = RoleConfig(
             name="t",
             description="t",
             extends=None,
             system_prompt="t",
             knowledge_write_access="none",
-            allowed_tools=[],
-            cost_limits={
-                "max_budget_per_invocation_usd": 7.5,
-                "max_turns_per_invocation": 10,
-            },
+            allowed_tools=["Read", "Grep"],
         )
-        assert rc.max_budget_usd == 7.5
-
-    def test_max_turns(self):
-        rc = RoleConfig(
-            name="t",
-            description="t",
-            extends=None,
-            system_prompt="t",
-            knowledge_write_access="none",
-            allowed_tools=[],
-            cost_limits={
-                "max_budget_per_invocation_usd": 1.0,
-                "max_turns_per_invocation": 42,
-            },
-        )
-        assert rc.max_turns == 42
-
-    def test_defaults_for_missing_cost_limits(self):
-        rc = RoleConfig(
-            name="t",
-            description="t",
-            extends=None,
-            system_prompt="t",
-            knowledge_write_access="none",
-            allowed_tools=[],
-            cost_limits={},
-        )
-        assert rc.max_budget_usd == 3.0  # default
-        assert rc.max_turns == 50  # default
+        assert rc.name == "t"
+        assert rc.allowed_tools == ["Read", "Grep"]
+        assert rc.knowledge_write_access == "none"
