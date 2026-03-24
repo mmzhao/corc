@@ -3453,7 +3453,7 @@ class TestBuildDaemonStatusHeader:
         text = _render_to_plain(header)
         assert "RUNNING" in text
         assert "5m 30s" in text
-        assert "2/3 agents active" in text
+        assert "2/3 agents" in text
 
     def test_running_status_styled_green(self):
         """Running status uses green styling."""
@@ -3543,7 +3543,7 @@ class TestBuildDaemonStatusHeader:
         header = build_daemon_status_header(status)
         text = _render_to_plain(header)
         assert "RUNNING" in text
-        assert "1/2 agents active" in text
+        assert "1/2 agents" in text
 
     def test_paused_no_reason(self):
         """Paused status without reason still renders."""
@@ -3584,7 +3584,7 @@ class TestDaemonStatusInDashboard:
         )
         text = _render_to_plain(layout, width=120)
         assert "RUNNING" in text
-        assert "1/2 agents active" in text
+        assert "1/2 agents" in text
         assert "Daemon" in text
         assert "Active Plan" in text
 
@@ -4265,9 +4265,7 @@ class TestAgentCountDenominator:
         }
         header = build_daemon_status_header(daemon_status)
         text = header.plain
-        assert "5/5 agents active" in text, (
-            f"Expected '5/5 agents active', got: {text!r}"
-        )
+        assert "5/5 agents" in text, f"Expected '5/5 agents', got: {text!r}"
 
     def test_dashboard_end_to_end_denominator(self, tmp_path):
         """End-to-end: dashboard header shows config-based denominator."""

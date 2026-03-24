@@ -59,6 +59,14 @@ class MockPopen:
     def kill(self):
         pass
 
+    def poll(self):
+        return self.returncode
+
+    def communicate(self, input=None, timeout=None):
+        stdout_val = self.stdout.read() if hasattr(self.stdout, "read") else ""
+        stderr_val = self.stderr.read() if hasattr(self.stderr, "read") else ""
+        return (stdout_val, stderr_val)
+
     def __enter__(self):
         return self
 
@@ -1207,6 +1215,15 @@ class TestExecutorStreamingIntegration:
         monkeypatch.setattr(
             "corc.dispatch.subprocess.Popen",
             _make_mock_popen(SAMPLE_EVENTS),
+        )
+        # Mock functions that call subprocess.run outside the dispatch thread
+        monkeypatch.setattr(
+            "corc.executor.check_for_merged_pr",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            "corc.executor.pull_main",
+            lambda *args, **kwargs: False,
         )
 
         _create_task(mutation_log, "t1", "Task 1")
