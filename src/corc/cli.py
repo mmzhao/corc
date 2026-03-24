@@ -882,6 +882,46 @@ def task_complete(task_id, pr_url, findings):
             click.echo(f"  {r['id']}  {r['name']}")
 
 
+@task.command("cancel")
+@click.argument("task_id")
+@click.option("--reason", default=None, help="Why the task is being cancelled")
+def task_cancel(task_id, reason):
+    """Cancel a task. Cancelled tasks are terminal and won't be retried.
+
+    Unlike completed tasks, cancelled tasks do NOT satisfy dependencies —
+    dependent tasks will remain blocked.
+    """
+    _, ml, ws, al, _, _ = _get_all()
+    t = ws.get_task(task_id)
+    if not t:
+        click.echo(f"Task {task_id} not found.")
+        return
+
+    if t["status"] in ("completed", "cancelled"):
+        click.echo(f"Error: task {task_id} is already {t['status']}.", err=True)
+        sys.exit(1)
+
+    cancel_reason = reason or "Cancelled via CLI"
+
+    # Kill agent if running
+    if t["status"] in ("running", "assigned"):
+        agents = ws.get_agents_for_task(task_id)
+        for agent in agents:
+            pid = agent.get("pid")
+            if pid:
+                try:
+                    import os
+
+                    os.kill(pid, 15)  # SIGTERM
+                    click.echo(f"Killed agent process (PID {pid}).")
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+
+    ml.append("task_cancelled", {}, reason=cancel_reason, task_id=task_id)
+    al.log("task_cancelled", task_id=task_id, reason=cancel_reason)
+    click.echo(f"Task {task_id} ({t['name']}) cancelled.")
+
+
 # --- Context ---
 
 
@@ -983,6 +1023,7 @@ def status():
         "draft",
         "failed",
         "escalated",
+        "cancelled",
         "blocked",
         "handed_off",
     ]:
@@ -996,6 +1037,7 @@ def status():
             "draft": "📝",
             "failed": "❌",
             "escalated": "🚨",
+            "cancelled": "🚫",
             "blocked": "◻",
             "handed_off": "↗",
         }.get(status_name, "?")

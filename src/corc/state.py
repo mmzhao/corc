@@ -137,13 +137,13 @@ class WorkState:
             self.conn.commit()
 
     def _task_is_completed(self, task_id: str | None) -> bool:
-        """Check if a task currently has 'completed' status in SQLite."""
+        """Check if a task has a terminal status ('completed' or 'cancelled')."""
         if task_id is None:
             return False
         row = self.conn.execute(
             "SELECT status FROM tasks WHERE id=?", (task_id,)
         ).fetchone()
-        return row is not None and row["status"] == "completed"
+        return row is not None and row["status"] in ("completed", "cancelled")
 
     def _apply_mutation(self, entry: dict):
         t = entry["type"]
@@ -230,6 +230,11 @@ class WorkState:
                         task_id,
                     ),
                 )
+        elif t == "task_cancelled":
+            self.conn.execute(
+                "UPDATE tasks SET status='cancelled', updated=? WHERE id=?",
+                (entry["ts"], task_id),
+            )
         elif t == "task_escalated":
             self.conn.execute(
                 "UPDATE tasks SET status='escalated', updated=?, attempt_count=? WHERE id=?",

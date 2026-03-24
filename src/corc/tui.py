@@ -355,6 +355,30 @@ def _format_attempt_count(task: dict) -> str | None:
     return f"attempt {current}/{total}"
 
 
+def _format_failure_line(failure: dict) -> Text:
+    """Format a single failure history entry as a TUI line.
+
+    Shows attempt number, a short reason, and the last agent activity
+    (from the session log) if available. Example::
+
+        ↳ attempt 2: Agent exited with code 1
+          last: Good, 14 files deleted. That removes ~262 tests...
+    """
+    line = Text()
+    attempt = failure.get("attempt", "?")
+    reason = failure.get("reason", "Unknown")
+    if failure.get("merge_conflict"):
+        reason = "Merge conflict: " + reason
+    line.append(f"       ↳ attempt {attempt}: ", style="dim red")
+    line.append(reason, style="dim red")
+
+    last = failure.get("last_activity")
+    if last:
+        line.append(f"\n         last: {last}", style="dim italic")
+
+    return line
+
+
 def _elapsed_since(iso_ts: str) -> str:
     """Human-readable elapsed time since an ISO timestamp.
 
@@ -750,14 +774,7 @@ def build_active_plan_panel(
             # Show failure history bullet points for retry tasks
             if failure_history and t.get("id") in failure_history:
                 for f in failure_history[t["id"]]:
-                    fline = Text()
-                    reason = f.get("reason", "Unknown")
-                    attempt = f.get("attempt", "?")
-                    if f.get("merge_conflict"):
-                        reason = "Merge conflict: " + reason
-                    fline.append(f"       ↳ attempt {attempt}: ", style="dim red")
-                    fline.append(reason, style="dim red")
-                    lines.append(fline)
+                    lines.append(_format_failure_line(f))
 
         lines.append(Text(""))
 
@@ -845,14 +862,7 @@ def build_active_plan_panel(
             # Show failure history for failed/escalated tasks
             if failure_history and t.get("id") in failure_history:
                 for f in failure_history[t["id"]]:
-                    fline = Text()
-                    reason = f.get("reason", "Unknown")
-                    attempt = f.get("attempt", "?")
-                    if f.get("merge_conflict"):
-                        reason = "Merge conflict: " + reason
-                    fline.append(f"       ↳ attempt {attempt}: ", style="dim red")
-                    fline.append(reason, style="dim red")
-                    lines.append(fline)
+                    lines.append(_format_failure_line(f))
 
         lines.append(Text(""))
 

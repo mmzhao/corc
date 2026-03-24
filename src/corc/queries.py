@@ -147,24 +147,82 @@ class QueryAPI:
     def get_task_failure_history(self, task_id: str) -> list[dict]:
         """Get failure reasons for each attempt of a task.
 
-        Reads task_failed mutations from the mutation log and returns
-        a list of dicts with ``attempt`` and ``reason`` for each failure.
-        Sorted by attempt number ascending.
+        Reads task_failed mutations and enriches with the last assistant
+        message from the session log to provide actionable context.
+        Deduplicates by attempt number (keeps the last failure per attempt).
+        Only returns failures from the current task lifecycle (based on the
+        most recent task_created mutation for this task_id).
         """
         mutations = self.work_state.mutation_log.read_all()
-        failures = []
+
+        # Find the seq of the most recent task_created for this task
+        created_seq = 0
         for m in mutations:
+            if m["type"] == "task_created" and m.get("data", {}).get("id") == task_id:
+                created_seq = m.get("seq", 0)
+            elif m["type"] == "task_created" and m.get("task_id") == task_id:
+                created_seq = m.get("seq", 0)
+
+        # Collect failures after the most recent creation, dedup by attempt
+        by_attempt: dict[int, dict] = {}
+        for m in mutations:
+            if m.get("seq", 0) < created_seq:
+                continue
             if m.get("task_id") == task_id and m["type"] == "task_failed":
-                failures.append(
-                    {
-                        "attempt": m["data"].get("attempt", "?"),
-                        "reason": m.get("reason", "Unknown"),
-                        "merge_conflict": m["data"].get("merge_conflict", False),
-                        "exit_code": m["data"].get("exit_code"),
-                    }
-                )
-        failures.sort(key=lambda f: f.get("attempt", 0) or 0)
+                attempt = m["data"].get("attempt", 0) or 0
+                by_attempt[attempt] = {
+                    "attempt": attempt,
+                    "reason": m.get("reason", "Unknown"),
+                    "merge_conflict": m["data"].get("merge_conflict", False),
+                    "exit_code": m["data"].get("exit_code"),
+                }
+
+        # Enrich with last assistant message from session log
+        for info in by_attempt.values():
+            attempt = info["attempt"]
+            if not attempt:
+                continue
+            try:
+                entries = self.session_logger.read_session(task_id, attempt)
+                last_msg = self._extract_last_assistant_text(entries)
+                if last_msg:
+                    info["last_activity"] = last_msg
+            except Exception:
+                pass
+
+        failures = sorted(by_attempt.values(), key=lambda f: f.get("attempt", 0))
         return failures
+
+    @staticmethod
+    def _extract_last_assistant_text(
+        entries: list[dict], max_len: int = 120
+    ) -> str | None:
+        """Extract the last meaningful assistant message from session entries."""
+        import json as _json
+
+        last_text = None
+        for entry in entries:
+            if entry.get("type") != "stream_event":
+                continue
+            try:
+                inner = _json.loads(entry.get("content", "{}"))
+            except (ValueError, TypeError):
+                continue
+            if inner.get("type") != "assistant":
+                continue
+            for block in inner.get("message", {}).get("content", []):
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block["text"].strip()
+                    if len(text) > 30:
+                        last_text = text
+
+        if not last_text:
+            return None
+        # Truncate to first line or max_len
+        first_line = last_text.split("\n")[0].strip()
+        if len(first_line) > max_len:
+            return first_line[: max_len - 3] + "..."
+        return first_line
 
     # ------------------------------------------------------------------
     # Event / stream queries
