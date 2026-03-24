@@ -11,6 +11,7 @@ ensure branches start from the latest state. After agent completion, the
 worktree branch is pushed and a PR is created via `gh pr create`.
 """
 
+import subprocess
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor

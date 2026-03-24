@@ -137,16 +137,12 @@ def merge_worktree(project_root: Path, worktree_path: Path) -> bool:
 
     Uses a multi-step merge to auto-resolve conflicts:
     1. ``git merge --no-ff --no-commit`` stages the merge without committing.
-    2. ``git checkout --ours`` for data files (mutations.jsonl, audit.jsonl,
-       sessions/) keeps main's version — agents never write these files.
-    3. If non-data conflicts remain, invoke a short ``claude -p`` agent to
+    2. If conflicts remain, invoke a short ``claude -p`` agent to
        resolve trivial conflicts (formatting, whitespace, ordering).
-    4. ``git commit`` finalises the merge.
+    3. ``git commit`` finalises the merge.
 
-    This eliminates the #1 source of merge conflicts: data/mutations.jsonl
-    diverging because the daemon appends to it on main while agents run.
-    Non-data trivial conflicts are resolved by the agent; genuine semantic
-    conflicts still cause merge failure.
+    Data files (mutations.jsonl, audit.jsonl, sessions/) are excluded from
+    git tracking entirely, so they never cause merge conflicts.
 
     Args:
         project_root: The main repository root directory.
@@ -186,28 +182,7 @@ def merge_worktree(project_root: Path, worktree_path: Path) -> bool:
         timeout=60,
     )
 
-    # Even if there are conflicts (returncode != 0), we may be able to
-    # auto-resolve them if they're only in data files.  Check below.
-
-    # Step 2: For each data path, resolve to main's version (--ours).
-    # If the path doesn't exist in the repo, git checkout --ours is a no-op
-    # (it will fail silently, which is fine).
-    for data_path in _DATA_PATHS_OURS:
-        subprocess.run(
-            ["git", "checkout", "--ours", "--", data_path],
-            capture_output=True,
-            cwd=str(project_root),
-            timeout=10,
-        )
-        # Stage the resolved file so it's no longer marked as conflicted
-        subprocess.run(
-            ["git", "add", "--", data_path],
-            capture_output=True,
-            cwd=str(project_root),
-            timeout=10,
-        )
-
-    # Check if there are still unresolved conflicts after auto-resolving data files
+    # Check if there are unresolved conflicts
     status_result = subprocess.run(
         ["git", "diff", "--name-only", "--diff-filter=U"],
         capture_output=True,
