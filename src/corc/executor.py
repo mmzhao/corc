@@ -470,9 +470,12 @@ class Executor:
             )
 
             # Create PR from worktree branch (PR-based workflow)
+            # Skip PR for repos with "direct" merge policy
             pr_info = None
             if worktree_path and result.exit_code == 0:
-                pr_info = self._create_pr_from_worktree(task, worktree_path)
+                policy = get_repo_policy(self.project_root)
+                if not policy.is_direct:
+                    pr_info = self._create_pr_from_worktree(task, worktree_path)
 
             if not self.defer_merge and worktree_path:
                 # Legacy behavior: merge and clean up immediately

@@ -3,9 +3,10 @@
 Loads per-repo merge policies from .corc/repos.yaml. Policies control
 whether agents can auto-merge PRs or whether merges require human action.
 
-Two merge policies:
-- auto: Agent merges via worktree merge after reviewer approval
-- human-only: Agent creates PR, but only humans can merge
+Three merge policies:
+- direct: Skip PRs entirely. Merge worktree directly to main. For repos where PRs aren't needed.
+- auto: Create PR, auto-merge via gh pr merge after validation.
+- human-only: Agent creates PR, but only humans can merge.
 
 Additional per-repo settings:
 - protected_branches: list of branch names that agents cannot push to directly
@@ -26,22 +27,26 @@ class RepoPolicy:
     """Merge policy configuration for a single repository."""
 
     name: str
-    merge_policy: str = "auto"  # "auto" or "human-only"
+    merge_policy: str = "auto"  # "direct", "auto", or "human-only"
     protected_branches: list[str] = field(default_factory=lambda: ["main"])
     require_reviewer_approval: bool = True
     block_auto_merge: bool = False
     block_direct_push: bool = False
 
     def __post_init__(self):
-        if self.merge_policy not in ("auto", "human-only"):
+        if self.merge_policy not in ("direct", "auto", "human-only"):
             raise ValueError(
                 f"Invalid merge_policy '{self.merge_policy}': "
-                f"must be 'auto' or 'human-only'"
+                f"must be 'direct', 'auto', or 'human-only'"
             )
         # human-only implies blocking auto-merge and direct push
         if self.merge_policy == "human-only":
             self.block_auto_merge = True
             self.block_direct_push = True
+
+    @property
+    def is_direct(self) -> bool:
+        return self.merge_policy == "direct"
 
     @property
     def is_auto(self) -> bool:
@@ -141,8 +146,9 @@ def get_repo_policy(project_root: Path, repo_name: str | None = None) -> RepoPol
     return RepoPolicy(name=repo_name, merge_policy="auto")
 
 
-def is_protected_branch(project_root: Path, branch: str,
-                         repo_name: str | None = None) -> bool:
+def is_protected_branch(
+    project_root: Path, branch: str, repo_name: str | None = None
+) -> bool:
     """Check if a branch is protected for the current repo.
 
     Args:
@@ -157,8 +163,9 @@ def is_protected_branch(project_root: Path, branch: str,
     return branch in policy.protected_branches
 
 
-def check_push_allowed(project_root: Path, command: str,
-                        repo_name: str | None = None) -> tuple[bool, str]:
+def check_push_allowed(
+    project_root: Path, command: str, repo_name: str | None = None
+) -> tuple[bool, str]:
     """Check if a git push command is allowed by the repo policy.
 
     Parses the git push command to determine the target branch and
@@ -188,8 +195,9 @@ def check_push_allowed(project_root: Path, command: str,
     return True, ""
 
 
-def check_auto_merge_allowed(project_root: Path, command: str,
-                              repo_name: str | None = None) -> tuple[bool, str]:
+def check_auto_merge_allowed(
+    project_root: Path, command: str, repo_name: str | None = None
+) -> tuple[bool, str]:
     """Check if a gh pr merge --auto command is allowed by the repo policy.
 
     Args:
