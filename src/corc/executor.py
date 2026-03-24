@@ -22,7 +22,7 @@ import json
 
 from corc.audit import AuditLog
 from corc.context import assemble_context, check_context_staleness
-from corc.dispatch import AgentDispatcher, AgentResult, Constraints
+from corc.dispatch import AgentDispatcher, AgentResult, Constraints, kill_agent_process
 from corc.mutations import MutationLog
 from corc.retry import get_retry_context
 from corc.roles import RoleLoader, constraints_from_role, get_system_prompt_for_role
@@ -102,6 +102,12 @@ class Executor:
         self._in_flight_tasks: set[str] = set()
         # Worktrees saved for conflict retry: task_id → worktree_path
         self._conflict_worktrees: dict[str, Path] = {}
+        # Track agent PIDs and start times for backup timeout enforcement.
+        # These are keyed by task_id so the daemon can poll agent age and
+        # kill agents that exceed agent_timeout_s even if the Timer thread
+        # in dispatch.py failed to fire.
+        self._agent_pids: dict[str, int] = {}
+        self._agent_start_times: dict[str, float] = {}
 
     def is_in_flight(self, task_id: str) -> bool:
         """Check if a task already has an in-flight dispatch."""
@@ -152,6 +158,7 @@ class Executor:
             return
 
         self._in_flight_tasks.add(task_id)
+        self._agent_start_times[task_id] = time.time()
         attempt = self.session_logger.get_latest_attempt(task["id"]) + 1
 
         # Check for a saved conflict worktree (from a previous merge conflict)
@@ -403,9 +410,13 @@ class Executor:
         Called by the dispatcher once the subprocess starts.  Persists the PID
         so that ``reconcile_on_startup`` can later check process liveness and
         re-attach monitoring after a daemon restart.
+
+        Also stores the PID locally in ``_agent_pids`` for backup timeout
+        enforcement by the daemon's ``_tick()`` polling loop.
         """
 
         def callback(pid: int):
+            self._agent_pids[task_id] = pid
             self.mutation_log.append(
                 "agent_updated",
                 {"agent_id": agent_id, "pid": pid},
@@ -438,6 +449,12 @@ class Executor:
         (so external reconciliation skips it).
         """
         self._in_flight_tasks.add(task["id"])
+        self._agent_pids[task["id"]] = pid
+        # Record start time for reattached agents; use provided start_time
+        # or fall back to current time (conservative — backup timeout checks
+        # agent age from this point, not from the original dispatch).
+        if task["id"] not in self._agent_start_times:
+            self._agent_start_times[task["id"]] = time.time()
         future = self._pool.submit(self._wait_for_pid, pid, task["id"])
         self._futures[future] = (task, attempt, worktree_path, agent_id)
         self._reattached_futures.add(future)
@@ -473,6 +490,47 @@ class Executor:
             exit_code=-1,
             duration_s=0,
         )
+
+    def kill_timed_out_agents(self, timeout_s: float) -> list[str]:
+        """Kill any in-flight agents that have exceeded the timeout.
+
+        This is a backup mechanism called by the daemon's ``_tick()`` loop.
+        It ensures agents are killed even if the ``threading.Timer`` watchdog
+        in ``dispatch.py`` failed to fire (e.g., due to hot-reload disrupting
+        thread state, or the timer thread dying from an unhandled exception).
+
+        Args:
+            timeout_s: Maximum allowed agent runtime in seconds.
+
+        Returns:
+            List of task IDs whose agents were killed.
+        """
+        now = time.time()
+        killed_task_ids: list[str] = []
+
+        for task_id, start_time in list(self._agent_start_times.items()):
+            age = now - start_time
+            if age <= timeout_s:
+                continue
+
+            pid = self._agent_pids.get(task_id)
+            if pid is None:
+                continue
+
+            # Agent has exceeded timeout — kill it
+            killed = kill_agent_process(pid)
+            if killed:
+                killed_task_ids.append(task_id)
+                self.audit_log.log(
+                    "agent_timeout_killed",
+                    task_id=task_id,
+                    pid=pid,
+                    age_s=round(age, 1),
+                    timeout_s=timeout_s,
+                    mechanism="tick_backup",
+                )
+
+        return killed_task_ids
 
     def _create_pr_from_worktree(
         self, task: dict, worktree_path: Path
@@ -567,6 +625,8 @@ class Executor:
         for future in done_futures:
             task, attempt, worktree_path, agent_id = self._futures.pop(future)
             self._in_flight_tasks.discard(task["id"])
+            self._agent_pids.pop(task["id"], None)
+            self._agent_start_times.pop(task["id"], None)
             is_reattached = future in self._reattached_futures
             if is_reattached:
                 self._reattached_futures.discard(future)

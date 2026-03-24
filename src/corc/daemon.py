@@ -30,6 +30,7 @@ from corc.chaos import (
     mark_event_recovered,
     read_chaos_config,
 )
+from corc.config import DEFAULTS
 from corc.dispatch import AgentDispatcher
 from corc.executor import Executor
 from corc.mutations import MutationLog
@@ -146,6 +147,7 @@ class Daemon:
             session_logger=self.session_logger,
             project_root=self.project_root,
             pid_checker=self._pid_checker,
+            agent_timeout_s=DEFAULTS["dispatch"]["agent_timeout_s"],
         )
 
         # Re-attach monitoring for agents that are still alive.
@@ -211,6 +213,14 @@ class Daemon:
 
         # 3a. Chaos monkey: randomly kill agents / corrupt state
         self._chaos_tick()
+
+        # 3b. Backup timeout: kill agents that exceed agent_timeout_s.
+        # This is a belt-and-suspenders mechanism — the primary timeout is
+        # a threading.Timer in dispatch.py. This backup catches cases where
+        # the timer thread failed (e.g., hot-reload disruption, thread death,
+        # or exception between process start and timer start).
+        timeout_s = DEFAULTS["dispatch"]["agent_timeout_s"]
+        self.executor.kill_timed_out_agents(timeout_s)
 
         # 3. Executor: poll for completed dispatches (always — in-flight tasks finish)
         completed = self.executor.poll_completed()

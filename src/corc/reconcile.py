@@ -4,20 +4,27 @@ On startup, the daemon must:
 1. Rebuild SQLite from mutation log (ensure consistency)
 2. Check all tasks marked 'running' or 'assigned' for PID liveness
 3. Scan for running claude processes whose command line contains known task IDs
-4. Return alive agent info so the daemon can re-attach monitoring
-5. Process output for dead agents that produced results
-6. Mark dead agents with no output as failed (retry policy applies)
-7. Clean up stale git worktrees
+4. Kill orphaned agents that have exceeded agent_timeout_s
+5. Return alive agent info so the daemon can re-attach monitoring
+6. Process output for dead agents that produced results
+7. Mark dead agents with no output as failed (retry policy applies)
+8. Clean up stale git worktrees
 """
 
+import logging
 import os
 import subprocess
+import time
+from datetime import datetime
 from pathlib import Path
 
 from corc.audit import AuditLog
-from corc.dispatch import AgentResult
+from corc.config import DEFAULTS
+from corc.dispatch import AgentResult, kill_agent_process
 from corc.mutations import MutationLog
 from corc.processor import process_completed
+
+logger = logging.getLogger(__name__)
 from corc.sessions import SessionLogger
 from corc.state import WorkState
 
@@ -29,12 +36,16 @@ def reconcile_on_startup(
     session_logger: SessionLogger,
     project_root: Path,
     pid_checker=None,
+    agent_timeout_s: float | None = None,
 ) -> dict:
     """Run full reconciliation on daemon startup.
 
     Rebuilds SQLite from the mutation log, checks all running/assigned tasks
     for PID liveness, processes dead agent output or marks tasks failed, and
     cleans stale worktrees.
+
+    Orphaned agents whose PID is still alive but that have exceeded
+    ``agent_timeout_s`` are killed and treated as timed-out failures.
 
     Args:
         state: The work state (SQLite materialized view).
@@ -45,11 +56,16 @@ def reconcile_on_startup(
         pid_checker: Optional callable(pid) -> bool. Returns True if PID is
             alive and is a claude process. Defaults to is_pid_alive() &&
             is_claude_process(). Inject for testing.
+        agent_timeout_s: Maximum allowed agent runtime in seconds. Agents
+            alive longer than this are killed. Defaults to config value.
 
     Returns a summary dict with counts of what was reconciled.
     """
     if pid_checker is None:
         pid_checker = _default_pid_checker
+
+    if agent_timeout_s is None:
+        agent_timeout_s = DEFAULTS["dispatch"]["agent_timeout_s"]
 
     summary = {
         "rebuilt_state": False,
@@ -58,6 +74,7 @@ def reconcile_on_startup(
         "agents_alive": 0,
         "agents_dead_with_output": 0,
         "agents_dead_no_output": 0,
+        "agents_killed_timeout": 0,
         "worktrees_cleaned": 0,
         "alive_agents": [],  # Info for daemon to re-attach monitoring
     }
@@ -98,57 +115,76 @@ def reconcile_on_startup(
             audit_log.log("reconcile_pid_from_scan", task_id=task_id, pid=pid)
 
         if pid and pid_checker(pid):
-            # Agent still alive — collect info for daemon re-attachment
-            summary["agents_alive"] += 1
-            agents = state.get_agents_for_task(task_id)
-            agent = agents[0] if agents else {}
-            attempt = session_logger.get_latest_attempt(task_id) or 1
-            summary["alive_agents"].append(
-                {
-                    "task": task,
-                    "pid": pid,
-                    "attempt": attempt,
-                    "worktree_path": agent.get("worktree_path"),
-                    "agent_id": agent.get("id"),
-                }
-            )
-            audit_log.log("reconcile_agent_alive", task_id=task_id, pid=pid)
-        else:
-            # Agent is dead — check for output in session logs
-            output = _get_last_agent_output(session_logger, task_id)
-
-            if output is not None:
-                # Process the output through normal validation pipeline
-                summary["agents_dead_with_output"] += 1
-                attempt = session_logger.get_latest_attempt(task_id)
-                process_completed(
-                    task=task,
-                    result=output,
-                    attempt=attempt,
-                    mutation_log=mutation_log,
-                    state=state,
-                    audit_log=audit_log,
-                    session_logger=session_logger,
-                    project_root=project_root,
-                )
-                audit_log.log("reconcile_processed_output", task_id=task_id)
-            else:
-                # No output — mark as failed so scheduler retry can kick in
-                summary["agents_dead_no_output"] += 1
-                attempt = session_logger.get_latest_attempt(task_id) or 1
-                mutation_log.append(
-                    "task_failed",
-                    {
-                        "attempt": attempt,
-                        "attempt_count": attempt,
-                        "exit_code": -1,
-                        "reconciled": True,
-                        "infrastructure": True,
-                    },
-                    reason="Reconciliation: agent process died without producing output",
+            # Agent is alive — check if it has exceeded the timeout.
+            # Use the task's 'updated' timestamp (set when task_started fires)
+            # to determine how long the agent has been running.
+            agent_age = _get_agent_age(task, mutation_log)
+            if agent_age is not None and agent_age > agent_timeout_s:
+                # Orphaned agent exceeded timeout — kill it
+                killed = kill_agent_process(pid)
+                summary["agents_killed_timeout"] += 1
+                audit_log.log(
+                    "reconcile_agent_killed_timeout",
                     task_id=task_id,
+                    pid=pid,
+                    age_s=round(agent_age, 1),
+                    timeout_s=agent_timeout_s,
+                    killed=killed,
                 )
-                audit_log.log("reconcile_marked_failed", task_id=task_id)
+                # Fall through to dead-agent handling below
+            else:
+                # Agent still alive and within timeout — collect info for re-attachment
+                summary["agents_alive"] += 1
+                agents = state.get_agents_for_task(task_id)
+                agent = agents[0] if agents else {}
+                attempt = session_logger.get_latest_attempt(task_id) or 1
+                summary["alive_agents"].append(
+                    {
+                        "task": task,
+                        "pid": pid,
+                        "attempt": attempt,
+                        "worktree_path": agent.get("worktree_path"),
+                        "agent_id": agent.get("id"),
+                    }
+                )
+                audit_log.log("reconcile_agent_alive", task_id=task_id, pid=pid)
+                continue
+
+        # Dead or killed agent — check for output in session logs
+        output = _get_last_agent_output(session_logger, task_id)
+
+        if output is not None:
+            # Process the output through normal validation pipeline
+            summary["agents_dead_with_output"] += 1
+            attempt = session_logger.get_latest_attempt(task_id)
+            process_completed(
+                task=task,
+                result=output,
+                attempt=attempt,
+                mutation_log=mutation_log,
+                state=state,
+                audit_log=audit_log,
+                session_logger=session_logger,
+                project_root=project_root,
+            )
+            audit_log.log("reconcile_processed_output", task_id=task_id)
+        else:
+            # No output — mark as failed so scheduler retry can kick in
+            summary["agents_dead_no_output"] += 1
+            attempt = session_logger.get_latest_attempt(task_id) or 1
+            mutation_log.append(
+                "task_failed",
+                {
+                    "attempt": attempt,
+                    "attempt_count": attempt,
+                    "exit_code": -1,
+                    "reconciled": True,
+                    "infrastructure": True,
+                },
+                reason="Reconciliation: agent process died without producing output",
+                task_id=task_id,
+            )
+            audit_log.log("reconcile_marked_failed", task_id=task_id)
 
     # 4. Clean up stale worktrees
     summary["worktrees_cleaned"] = clean_stale_worktrees(state, project_root)
@@ -164,6 +200,41 @@ def _log_reconcile_complete(audit_log: AuditLog, summary: dict):
     """Log reconcile_complete without the alive_agents list (not serializable)."""
     log_summary = {k: v for k, v in summary.items() if k != "alive_agents"}
     audit_log.log("reconcile_complete", **log_summary)
+
+
+def _get_agent_age(task: dict, mutation_log: MutationLog) -> float | None:
+    """Compute how long an agent has been running, in seconds.
+
+    Uses the task's 'updated' timestamp (set when ``task_started`` fires)
+    to determine the start time. Falls back to scanning the mutation log
+    for the most recent ``task_started`` entry for the task.
+
+    Returns None if the start time cannot be determined.
+    """
+    # Try the task's 'updated' field first (set by task_started mutation)
+    updated = task.get("updated")
+    if updated:
+        try:
+            start_dt = datetime.fromisoformat(updated)
+            return time.time() - start_dt.timestamp()
+        except (ValueError, TypeError):
+            pass
+
+    # Fallback: scan mutation log for task_started events
+    task_id = task.get("id")
+    if not task_id:
+        return None
+
+    entries = mutation_log.read_all()
+    for entry in reversed(entries):
+        if entry.get("type") == "task_started" and entry.get("task_id") == task_id:
+            try:
+                ts = datetime.fromisoformat(entry["ts"])
+                return time.time() - ts.timestamp()
+            except (ValueError, TypeError, KeyError):
+                pass
+
+    return None
 
 
 def scan_claude_processes(task_ids: set[str]) -> dict[str, int]:
