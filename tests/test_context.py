@@ -388,8 +388,8 @@ def test_context_result_behaves_as_string(tmp_path):
     }
     ctx = assemble_context(task, tmp_path)
     # String operations work
-    assert "TASK DEFINITION" in ctx
-    assert ctx.startswith("=== TASK DEFINITION ===")
+    assert "<definition>" in ctx
+    assert ctx.startswith("<definition>")
     assert isinstance(ctx, str)
 
 
