@@ -109,6 +109,7 @@ def _create_task(
     done_when="do the thing",
     depends_on=None,
     role="implementer",
+    max_retries=3,
 ):
     """Helper to create a task via mutation log."""
     mutation_log.append(
@@ -122,6 +123,7 @@ def _create_task(
             "done_when": done_when,
             "checklist": [],
             "context_bundle": [],
+            "max_retries": max_retries,
         },
         reason="Test setup",
     )
@@ -1203,6 +1205,11 @@ class TestWorktreePythonPathIsolation:
 
         This is a defense-in-depth check: even if a stale .pth file adds
         a worktree's src/, the conftest ensures the main src/ wins.
+
+        Note: When running tests FROM a worktree, the worktree's base path
+        may appear in sys.path (as the CWD). That's fine — we only care
+        about worktree *src/* directories, which would shadow the main
+        project's src/ via a stale editable-install .pth file.
         """
         project_root = Path(__file__).resolve().parent.parent
         main_src = str(project_root / "src")
@@ -1213,11 +1220,16 @@ class TestWorktreePythonPathIsolation:
         )
         # It should be at position 0 (highest priority)
         idx = sys.path.index(main_src)
-        # Check no worktree src/ comes before it
+        # Check no worktree src/ comes before it.
+        # We specifically check for paths ending with /src inside a worktree,
+        # which would be the dangerous case from `pip install -e .` in a
+        # worktree. The worktree's base path in sys.path (as CWD) is fine.
         for i in range(idx):
-            assert ".claude/worktrees/" not in sys.path[i], (
-                f"Worktree path found before main src/ in sys.path: {sys.path[i]}"
-            )
+            entry = sys.path[i]
+            if ".claude/worktrees/" in entry and entry.endswith("/src"):
+                raise AssertionError(
+                    f"Worktree src/ path found before main src/ in sys.path: {entry}"
+                )
 
 
 # ===========================================================================
@@ -1410,3 +1422,396 @@ class TestHumanOnlyMergeBlocking:
         with patch("corc.repo_policy.get_repo_policy", return_value=policy2):
             with pytest.raises(ProtectedBranchError):
                 assert_not_protected(git_repo, "master")
+
+
+# ===========================================================================
+# Worktree cleanup lifecycle tests
+# ===========================================================================
+
+
+class TestWorktreeCleanupLifecycle:
+    """Tests for automatic worktree cleanup after tasks reach terminal states.
+
+    Verifies that:
+    - Worktrees are cleaned up after task completion (terminal state)
+    - Worktrees are preserved for tasks that will be retried
+    - Worktrees are cleaned up after retries are exhausted (escalation)
+    - Stale worktrees from previous daemon runs are cleaned on startup
+    """
+
+    def test_worktree_cleaned_after_completion(
+        self, git_repo, mutation_log, work_state, audit_log, session_logger
+    ):
+        """Worktree is removed after task reaches completed (terminal) state.
+
+        After a task completes successfully and is merged, the worktree
+        directory should be removed and git worktree pruned.
+        """
+        from corc.daemon import Daemon
+        from corc.processor import ProcessResult
+
+        # Create a real worktree
+        worktree_path, branch = create_worktree(git_repo, "t-cleanup", attempt=1)
+        assert worktree_path.exists()
+
+        # Set up task in completed state
+        _create_task(mutation_log, "t-cleanup", "Cleanup Task")
+        mutation_log.append(
+            "task_started", {"attempt": 1}, reason="Test", task_id="t-cleanup"
+        )
+        mutation_log.append(
+            "task_completed", {"findings": []}, reason="Test", task_id="t-cleanup"
+        )
+        work_state.refresh()
+        assert work_state.get_task("t-cleanup")["status"] == "completed"
+
+        # Daemon should clean up worktree for completed task
+        dispatcher = CwdTrackingDispatcher()
+        daemon = Daemon(
+            state=work_state,
+            mutation_log=mutation_log,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            dispatcher=dispatcher,
+            project_root=git_repo,
+            parallel=1,
+            once=True,
+            auto_reload=False,
+        )
+
+        # Call cleanup directly as the daemon would after processing
+        proc_result = ProcessResult(
+            task_id="t-cleanup", passed=True, details=[(True, "All passed")]
+        )
+        item = CompletedTask(
+            task=work_state.get_task("t-cleanup"),
+            result=AgentResult(output="Done.", exit_code=0, duration_s=1.0),
+            attempt=1,
+            worktree_path=worktree_path,
+            pr_info=None,
+        )
+
+        # Since proc_result passed and no PR, _handle_worktree_merge
+        # will call cleanup_worktree (no PR = task failed by executor path).
+        # Test the cleanup path directly.
+        daemon.executor.cleanup_worktree("t-cleanup", worktree_path)
+
+        assert not worktree_path.exists()
+
+        # git worktree list should not include the removed worktree
+        result = subprocess.run(
+            ["git", "worktree", "list"],
+            cwd=str(git_repo),
+            capture_output=True,
+            text=True,
+        )
+        assert str(worktree_path) not in result.stdout
+        daemon.executor.shutdown()
+
+    def test_worktree_preserved_for_retriable_failure(
+        self, git_repo, mutation_log, work_state, audit_log, session_logger
+    ):
+        """Worktree is preserved when task fails but has retries remaining.
+
+        A failed task with attempt_count <= max_retries should keep its
+        worktree so the retry dispatch can reuse it.
+        """
+        from corc.daemon import Daemon
+        from corc.processor import ProcessResult
+
+        # Create a real worktree
+        worktree_path, branch = create_worktree(git_repo, "t-retry", attempt=1)
+        assert worktree_path.exists()
+
+        # Set up task in failed state with retries remaining (attempt 1, max_retries 3)
+        _create_task(mutation_log, "t-retry", "Retry Task", max_retries=3)
+        mutation_log.append(
+            "task_started", {"attempt": 1}, reason="Test", task_id="t-retry"
+        )
+        mutation_log.append(
+            "task_failed",
+            {"attempt": 1, "attempt_count": 1, "exit_code": 1},
+            reason="Test failure",
+            task_id="t-retry",
+        )
+        work_state.refresh()
+        task = work_state.get_task("t-retry")
+        assert task["status"] == "failed"
+
+        dispatcher = CwdTrackingDispatcher()
+        daemon = Daemon(
+            state=work_state,
+            mutation_log=mutation_log,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            dispatcher=dispatcher,
+            project_root=git_repo,
+            parallel=1,
+            once=True,
+            auto_reload=False,
+        )
+
+        # Simulate _handle_worktree_merge for a failed task
+        proc_result = ProcessResult(
+            task_id="t-retry", passed=False, details=[(False, "Agent error")]
+        )
+        item = CompletedTask(
+            task=task,
+            result=AgentResult(output="Error.", exit_code=1, duration_s=1.0),
+            attempt=1,
+            worktree_path=worktree_path,
+            pr_info=None,
+        )
+
+        daemon._handle_worktree_merge(item, proc_result)
+
+        # Worktree should be PRESERVED (not cleaned up)
+        assert worktree_path.exists(), (
+            "Worktree should be preserved for retriable failure"
+        )
+
+        # Worktree should be saved for reuse by next dispatch
+        assert "t-retry" in daemon.executor._conflict_worktrees
+        assert daemon.executor._conflict_worktrees["t-retry"] == worktree_path
+
+        # Clean up
+        remove_worktree(git_repo, worktree_path)
+        daemon.executor.shutdown()
+
+    def test_worktree_cleaned_after_escalation(
+        self, git_repo, mutation_log, work_state, audit_log, session_logger
+    ):
+        """Worktree is cleaned up when retries are exhausted (task escalated).
+
+        An escalated task (attempt > max_retries) is terminal — its worktree
+        should be removed.
+        """
+        from corc.daemon import Daemon
+        from corc.processor import ProcessResult
+
+        # Create a real worktree
+        worktree_path, branch = create_worktree(git_repo, "t-escalate", attempt=4)
+        assert worktree_path.exists()
+
+        # Set up task in escalated state (retries exhausted)
+        _create_task(mutation_log, "t-escalate", "Escalated Task", max_retries=3)
+        mutation_log.append(
+            "task_started", {"attempt": 4}, reason="Test", task_id="t-escalate"
+        )
+        mutation_log.append(
+            "task_escalated",
+            {"attempt": 4, "attempt_count": 4},
+            reason="Retries exhausted",
+            task_id="t-escalate",
+        )
+        work_state.refresh()
+        task = work_state.get_task("t-escalate")
+        assert task["status"] == "escalated"
+
+        dispatcher = CwdTrackingDispatcher()
+        daemon = Daemon(
+            state=work_state,
+            mutation_log=mutation_log,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            dispatcher=dispatcher,
+            project_root=git_repo,
+            parallel=1,
+            once=True,
+            auto_reload=False,
+        )
+
+        # Simulate _handle_worktree_merge for an escalated task
+        proc_result = ProcessResult(
+            task_id="t-escalate", passed=False, details=[(False, "Escalated")]
+        )
+        item = CompletedTask(
+            task=task,
+            result=AgentResult(output="Failed.", exit_code=1, duration_s=1.0),
+            attempt=4,
+            worktree_path=worktree_path,
+            pr_info=None,
+        )
+
+        daemon._handle_worktree_merge(item, proc_result)
+
+        # Worktree should be CLEANED UP (escalated = terminal)
+        assert not worktree_path.exists(), (
+            "Worktree should be removed for escalated (terminal) task"
+        )
+
+        # git worktree list should not include the removed worktree
+        result = subprocess.run(
+            ["git", "worktree", "list"],
+            cwd=str(git_repo),
+            capture_output=True,
+            text=True,
+        )
+        assert str(worktree_path) not in result.stdout
+        daemon.executor.shutdown()
+
+    def test_stale_worktrees_cleaned_on_reconciliation(
+        self, git_repo, mutation_log, work_state, audit_log, session_logger
+    ):
+        """Stale worktrees from previous daemon runs are cleaned on startup.
+
+        During reconciliation, worktrees for tasks in terminal states
+        (completed, escalated, failed) are removed. This covers the case
+        where the daemon crashed before cleaning up.
+        """
+        from corc.reconcile import reconcile_on_startup
+
+        # Create worktrees simulating a previous daemon run
+        wt1, _ = create_worktree(git_repo, "t-done", attempt=1)
+        wt2, _ = create_worktree(git_repo, "t-esc", attempt=1)
+        assert wt1.exists() and wt2.exists()
+
+        # Task 1: completed
+        _create_task(mutation_log, "t-done", "Done Task")
+        mutation_log.append(
+            "task_started", {"attempt": 1}, reason="Test", task_id="t-done"
+        )
+        mutation_log.append(
+            "agent_created",
+            {
+                "id": "agent-done",
+                "role": "implementer",
+                "task_id": "t-done",
+                "pid": 99999,
+                "worktree_path": str(wt1),
+            },
+            reason="Test",
+        )
+        mutation_log.append(
+            "task_completed", {"findings": []}, reason="Test", task_id="t-done"
+        )
+
+        # Task 2: escalated
+        _create_task(mutation_log, "t-esc", "Escalated Task")
+        mutation_log.append(
+            "task_started", {"attempt": 1}, reason="Test", task_id="t-esc"
+        )
+        mutation_log.append(
+            "agent_created",
+            {
+                "id": "agent-esc",
+                "role": "implementer",
+                "task_id": "t-esc",
+                "pid": 99998,
+                "worktree_path": str(wt2),
+            },
+            reason="Test",
+        )
+        mutation_log.append(
+            "task_escalated",
+            {"attempt": 4, "attempt_count": 4},
+            reason="Retries exhausted",
+            task_id="t-esc",
+        )
+
+        work_state.refresh()
+
+        # Reconcile on startup — should clean both stale worktrees
+        summary = reconcile_on_startup(
+            state=work_state,
+            mutation_log=mutation_log,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            project_root=git_repo,
+            pid_checker=lambda pid: False,
+        )
+
+        assert summary["worktrees_cleaned"] >= 2
+        assert not wt1.exists()
+        assert not wt2.exists()
+
+        # git worktree list should only show main
+        result = subprocess.run(
+            ["git", "worktree", "list"],
+            cwd=str(git_repo),
+            capture_output=True,
+            text=True,
+        )
+        lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
+        assert len(lines) == 1
+
+    def test_git_worktree_list_shows_no_terminal_worktrees(
+        self, git_repo, mutation_log, work_state, audit_log, session_logger
+    ):
+        """After cleanup, git worktree list shows no worktrees for terminal tasks.
+
+        Verifies that both the worktree directory and the git internal
+        references are cleaned up properly.
+        """
+        from corc.reconcile import clean_stale_worktrees
+
+        # Create worktrees
+        wt1, _ = create_worktree(git_repo, "t1-final", attempt=1)
+        wt2, _ = create_worktree(git_repo, "t2-final", attempt=1)
+
+        # Verify they show in git worktree list
+        result = subprocess.run(
+            ["git", "worktree", "list"],
+            cwd=str(git_repo),
+            capture_output=True,
+            text=True,
+        )
+        assert str(wt1) in result.stdout
+        assert str(wt2) in result.stdout
+
+        # Mark both tasks as terminal
+        _create_task(mutation_log, "t1-final", "Task 1")
+        mutation_log.append(
+            "task_started", {"attempt": 1}, reason="Test", task_id="t1-final"
+        )
+        mutation_log.append(
+            "agent_created",
+            {
+                "id": "a1",
+                "role": "implementer",
+                "task_id": "t1-final",
+                "worktree_path": str(wt1),
+            },
+            reason="Test",
+        )
+        mutation_log.append(
+            "task_completed", {"findings": []}, reason="Test", task_id="t1-final"
+        )
+
+        _create_task(mutation_log, "t2-final", "Task 2")
+        mutation_log.append(
+            "task_started", {"attempt": 1}, reason="Test", task_id="t2-final"
+        )
+        mutation_log.append(
+            "agent_created",
+            {
+                "id": "a2",
+                "role": "implementer",
+                "task_id": "t2-final",
+                "worktree_path": str(wt2),
+            },
+            reason="Test",
+        )
+        mutation_log.append(
+            "task_escalated",
+            {"attempt": 4, "attempt_count": 4},
+            reason="Retries exhausted",
+            task_id="t2-final",
+        )
+        work_state.refresh()
+
+        # Clean stale worktrees
+        cleaned = clean_stale_worktrees(work_state, git_repo)
+        assert cleaned == 2
+
+        # git worktree list should only show main worktree
+        result = subprocess.run(
+            ["git", "worktree", "list"],
+            cwd=str(git_repo),
+            capture_output=True,
+            text=True,
+        )
+        assert str(wt1) not in result.stdout
+        assert str(wt2) not in result.stdout
+        lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
+        assert len(lines) == 1
