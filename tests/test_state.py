@@ -517,3 +517,126 @@ def test_task_updated_all_fields(state):
     assert task["attempt_count"] == 2
     assert task["max_retries"] == 5
     assert task["merge_status"] == "merged"
+
+
+# --- target_repo tests ---
+
+
+def test_task_created_with_target_repo(state):
+    """task_created mutation with target_repo should store it in SQLite."""
+    ml, ws = state
+    ml.append(
+        "task_created",
+        {
+            "id": "t1",
+            "name": "fdp task",
+            "done_when": "tests pass",
+            "target_repo": "fdp",
+        },
+        reason="test",
+    )
+    ws.refresh()
+
+    task = ws.get_task("t1")
+    assert task is not None
+    assert task["target_repo"] == "fdp"
+
+
+def test_task_created_without_target_repo(state):
+    """task_created without target_repo should default to None."""
+    ml, ws = state
+    ml.append(
+        "task_created",
+        {
+            "id": "t1",
+            "name": "corc task",
+            "done_when": "tests pass",
+        },
+        reason="test",
+    )
+    ws.refresh()
+
+    task = ws.get_task("t1")
+    assert task is not None
+    assert task["target_repo"] is None
+
+
+def test_task_updated_sets_target_repo(state):
+    """task_updated mutation should be able to set target_repo on an existing task."""
+    ml, ws = state
+    ml.append(
+        "task_created",
+        {
+            "id": "t1",
+            "name": "task",
+            "done_when": "done",
+        },
+        reason="test",
+    )
+    ws.refresh()
+
+    task = ws.get_task("t1")
+    assert task["target_repo"] is None
+
+    # Update target_repo via task_updated mutation
+    ml.append(
+        "task_updated",
+        {"target_repo": "fdp"},
+        reason="set target repo",
+        task_id="t1",
+    )
+    ws.refresh()
+
+    task = ws.get_task("t1")
+    assert task["target_repo"] == "fdp"
+
+
+def test_migration_adds_target_repo_column(tmp_path):
+    """Opening a database with old schema should add target_repo column."""
+    db_path = tmp_path / "state.db"
+
+    # Create DB with old schema (no target_repo column)
+    _create_old_schema_db(db_path)
+    old_columns = _get_column_names(db_path)
+    assert "target_repo" not in old_columns
+
+    # Now open with WorkState — migration should add column
+    ml = MutationLog(tmp_path / "mutations.jsonl")
+    WorkState(db_path, ml)
+
+    new_columns = _get_column_names(db_path)
+    assert "target_repo" in new_columns
+
+
+def test_fresh_db_has_target_repo_column(tmp_path):
+    """Fresh database should include target_repo column."""
+    ml = MutationLog(tmp_path / "mutations.jsonl")
+    db_path = tmp_path / "state.db"
+    WorkState(db_path, ml)
+
+    columns = _get_column_names(db_path)
+    assert "target_repo" in columns
+
+
+def test_rebuild_preserves_target_repo(tmp_path):
+    """Rebuild from mutation log should preserve target_repo."""
+    ml = MutationLog(tmp_path / "mutations.jsonl")
+    ml.append(
+        "task_created",
+        {
+            "id": "t1",
+            "name": "fdp task",
+            "done_when": "done",
+            "target_repo": "fdp",
+        },
+        reason="test",
+    )
+
+    ws = WorkState(tmp_path / "state.db", ml)
+    task = ws.get_task("t1")
+    assert task["target_repo"] == "fdp"
+
+    # Full rebuild
+    ws.rebuild()
+    task = ws.get_task("t1")
+    assert task["target_repo"] == "fdp"
