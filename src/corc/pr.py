@@ -117,7 +117,10 @@ def pull_main(project_root: Path, timeout: int = 60) -> bool:
 
 
 def push_branch(
-    project_root: Path, branch_name: str, timeout: int = 60
+    project_root: Path,
+    branch_name: str,
+    timeout: int = 60,
+    force_with_lease: bool = False,
 ) -> tuple[bool, str]:
     """Push a worktree branch to the remote.
 
@@ -125,13 +128,19 @@ def push_branch(
         project_root: The main repository root directory.
         branch_name: The branch name to push.
         timeout: Timeout in seconds.
+        force_with_lease: If True, use --force-with-lease for safe force push
+            (e.g. after merging main into a PR branch for conflict resolution).
 
     Returns:
         Tuple of (success, error_message). error_message is empty on success.
     """
     try:
+        cmd = ["git", "push"]
+        if force_with_lease:
+            cmd.append("--force-with-lease")
+        cmd.extend(["-u", "origin", branch_name])
         result = subprocess.run(
-            ["git", "push", "-u", "origin", branch_name],
+            cmd,
             capture_output=True,
             text=True,
             cwd=str(project_root),
