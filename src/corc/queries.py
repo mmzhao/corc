@@ -160,3 +160,37 @@ class QueryAPI:
             return []
         entries = self.session_logger.read_session(task_id, latest_attempt)
         return [e for e in entries if e.get("type") == "stream_event"]
+
+    # ------------------------------------------------------------------
+    # Cost queries
+    # ------------------------------------------------------------------
+
+    def get_cost_summary(self) -> dict:
+        """Get cost summary from today's task_cost audit events.
+
+        Returns a dict with:
+        - ``total_cost_usd``: float — sum of all task costs today
+        - ``task_costs``: list of dicts, each with task_id, cost_usd,
+          input_tokens, output_tokens, cache_tokens, duration_ms
+        """
+        events = self.audit_log.read_today()
+        cost_events = [e for e in events if e.get("event_type") == "task_cost"]
+
+        total = sum(float(e.get("cost_usd", 0)) for e in cost_events)
+        task_costs = []
+        for e in cost_events:
+            task_costs.append(
+                {
+                    "task_id": e.get("task_id", "unknown"),
+                    "cost_usd": float(e.get("cost_usd", 0)),
+                    "input_tokens": e.get("input_tokens", 0),
+                    "output_tokens": e.get("output_tokens", 0),
+                    "cache_tokens": e.get("cache_tokens", 0),
+                    "duration_ms": e.get("duration_ms", 0),
+                }
+            )
+
+        return {
+            "total_cost_usd": total,
+            "task_costs": task_costs,
+        }
