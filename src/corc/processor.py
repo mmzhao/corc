@@ -22,7 +22,7 @@ from corc.notifications import (
     notify_pr_awaiting_human_merge,
     notify_task_failure,
 )
-from corc.pr import PRInfo, merge_pr, post_review_comment
+from corc.pr import PRInfo, check_for_merged_pr, merge_pr, post_review_comment
 from corc.repo_policy import get_repo_policy
 from corc.retry import create_escalation
 from corc.sessions import SessionLogger
@@ -89,6 +89,50 @@ def process_completed(
             passed=True,
             details=[(True, "Task already completed — skipped duplicate completion")],
         )
+
+    # Before treating a non-zero exit as failure, check if a merged PR
+    # already exists for this task.  This handles the retry scenario where
+    # the previous attempt's PR was merged but the task was re-dispatched.
+    # The agent finds nothing to do, PR creation fails (no commits ahead),
+    # and the executor marks exit_code=1.  The merged PR is proof the work
+    # landed, so we mark the task completed.
+    if result.exit_code != 0:
+        merged_pr = check_for_merged_pr(project_root, task_id)
+        if merged_pr is not None:
+            audit_log.log(
+                "task_completed_merged_pr_found",
+                task_id=task_id,
+                pr_url=merged_pr.url,
+                pr_number=merged_pr.number,
+                attempt=attempt,
+            )
+            mutation_log.append(
+                "task_completed",
+                {
+                    "findings": [],
+                    "proof_of_work": {
+                        "merged_pr_url": merged_pr.url,
+                        "merged_pr_number": merged_pr.number,
+                    },
+                    "pr_url": merged_pr.url,
+                    "pr_number": merged_pr.number,
+                    "pr_merged": True,
+                    "already_merged": True,
+                },
+                reason=f"Merged PR #{merged_pr.number} found — work already landed",
+                task_id=task_id,
+            )
+            state.refresh()
+            return ProcessResult(
+                task_id=task_id,
+                passed=True,
+                details=[
+                    (
+                        True,
+                        f"Merged PR #{merged_pr.number} found — work already landed ({merged_pr.url})",
+                    )
+                ],
+            )
 
     # Agent crashed or errored
     if result.exit_code != 0:

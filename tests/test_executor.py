@@ -633,3 +633,143 @@ class TestDaemonPullMainAfterMerge:
         event_types = [e["event_type"] for e in events]
         assert "pr_merge_synced" in event_types
         daemon.executor.shutdown()
+
+
+# ===========================================================================
+# Merged PR detection before dispatch
+# ===========================================================================
+
+
+class TestMergedPRDetection:
+    """Executor.dispatch() checks for merged PRs and skips dispatch if found."""
+
+    def test_dispatch_skipped_when_merged_pr_exists(
+        self,
+        git_repo,
+        mutation_log,
+        work_state,
+        audit_log,
+        session_logger,
+    ):
+        """If a merged PR exists for the task, dispatch is skipped and task is marked completed."""
+        _create_task(mutation_log, "t1", "Task 1")
+        work_state.refresh()
+        task = work_state.get_task("t1")
+
+        merged_pr = PRInfo(
+            url="https://github.com/org/repo/pull/99",
+            number=99,
+            branch="corc/t1-1",
+            title="[corc] Task 1 (t1)",
+        )
+
+        dispatcher = MockDispatcher()
+        executor = _make_executor(
+            git_repo,
+            mutation_log,
+            work_state,
+            audit_log,
+            session_logger,
+            dispatcher=dispatcher,
+        )
+
+        with patch("corc.executor.check_for_merged_pr", return_value=merged_pr):
+            executor.dispatch(task)
+            time.sleep(0.3)
+            completed = executor.poll_completed()
+
+        # No agent should have been dispatched
+        assert len(dispatcher.dispatched) == 0
+        # No in-flight tasks
+        assert executor.in_flight_count == 0
+
+        # Task should be marked completed via mutation log
+        work_state.refresh()
+        updated = work_state.get_task("t1")
+        assert updated["status"] == "completed"
+
+        # Check mutation log for the completion with PR info
+        entries = mutation_log.read_all()
+        completions = [e for e in entries if e.get("type") == "task_completed"]
+        assert len(completions) == 1
+        assert completions[0]["data"]["pr_url"] == "https://github.com/org/repo/pull/99"
+        assert completions[0]["data"]["pr_number"] == 99
+        assert completions[0]["data"]["already_merged"] is True
+
+        # Audit log should show dispatch_skipped_merged_pr
+        events = audit_log.read_for_task("t1")
+        event_types = [e["event_type"] for e in events]
+        assert "dispatch_skipped_merged_pr" in event_types
+
+        executor.shutdown()
+
+    def test_dispatch_proceeds_when_no_merged_pr(
+        self,
+        git_repo,
+        mutation_log,
+        work_state,
+        audit_log,
+        session_logger,
+    ):
+        """If no merged PR exists, dispatch proceeds normally."""
+        _create_task(mutation_log, "t1", "Task 1")
+        work_state.refresh()
+        task = work_state.get_task("t1")
+
+        dispatcher = MockDispatcher()
+        executor = _make_executor(
+            git_repo,
+            mutation_log,
+            work_state,
+            audit_log,
+            session_logger,
+            dispatcher=dispatcher,
+        )
+
+        with (
+            patch("corc.executor.check_for_merged_pr", return_value=None),
+            patch("corc.executor.pull_main", return_value=True),
+        ):
+            executor.dispatch(task)
+            time.sleep(0.5)
+            completed = executor.poll_completed()
+
+        # Agent should have been dispatched
+        assert len(dispatcher.dispatched) == 1
+        assert len(completed) == 1
+
+        executor.shutdown()
+
+    def test_merged_pr_check_uses_task_id(
+        self,
+        git_repo,
+        mutation_log,
+        work_state,
+        audit_log,
+        session_logger,
+    ):
+        """check_for_merged_pr is called with the correct project_root and task_id."""
+        _create_task(mutation_log, "my-task-42", "Task 42")
+        work_state.refresh()
+        task = work_state.get_task("my-task-42")
+
+        dispatcher = MockDispatcher()
+        executor = _make_executor(
+            git_repo,
+            mutation_log,
+            work_state,
+            audit_log,
+            session_logger,
+            dispatcher=dispatcher,
+        )
+
+        with (
+            patch("corc.executor.check_for_merged_pr", return_value=None) as mock_check,
+            patch("corc.executor.pull_main", return_value=True),
+        ):
+            executor.dispatch(task)
+            time.sleep(0.3)
+            executor.poll_completed()
+
+        mock_check.assert_called_once_with(git_repo, "my-task-42")
+        executor.shutdown()
