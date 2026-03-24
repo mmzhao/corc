@@ -41,6 +41,8 @@ from corc.repo_policy import get_repo_policy
 from corc.worktree import (
     ProtectedBranchError,
     WorktreeError,
+    _get_current_branch,
+    _try_agent_conflict_resolution,
     assert_not_protected,
     create_worktree,
     merge_main_into_worktree,
@@ -912,6 +914,212 @@ class Executor:
             )
             self.cleanup_worktree(task_id, worktree_path)
             return False
+
+    def resolve_conflict_and_remerge_pr(
+        self, task_id: str, worktree_path: Path, pr_info: PRInfo
+    ) -> str:
+        """Three-stage merge conflict resolution pipeline.
+
+        Called when ``gh pr merge`` fails with a conflict.  Attempts to
+        resolve the conflict locally without redispatching the full agent.
+
+        Stage 1: ``git merge main`` in the worktree.  If the merge is
+            clean, push with ``--force-with-lease`` and re-attempt
+            ``merge_pr``.  No agent dispatch needed.
+        Stage 2: If the merge has conflicts, dispatch
+            ``_try_agent_conflict_resolution`` to resolve them in-place.
+            If resolved, ``git commit``, push, and re-attempt ``merge_pr``.
+        Stage 3: If both stages fail, return ``"conflict"`` so the caller
+            can mark the task failed for a full retry.
+
+        Args:
+            task_id: Task identifier.
+            worktree_path: Path to the worktree with the agent's work.
+            pr_info: PR information (number, url) for the existing PR.
+
+        Returns:
+            ``"merged"`` if the PR was successfully merged (stage 1 or 2).
+            ``"conflict"`` if all stages failed.
+        """
+        branch_name = get_worktree_branch(self.project_root, worktree_path)
+        if not branch_name:
+            self.audit_log.log(
+                "conflict_resolution_skipped",
+                task_id=task_id,
+                reason="Could not determine branch name",
+            )
+            return "conflict"
+
+        main_branch = _get_current_branch(self.project_root)
+        if not main_branch:
+            self.audit_log.log(
+                "conflict_resolution_skipped",
+                task_id=task_id,
+                reason="Could not determine main branch",
+            )
+            return "conflict"
+
+        # --- Stage 1: git merge main in worktree ---
+        try:
+            merge_result = subprocess.run(
+                [
+                    "git",
+                    "merge",
+                    main_branch,
+                    "-m",
+                    f"Merge {main_branch} for conflict resolution",
+                ],
+                capture_output=True,
+                text=True,
+                cwd=str(worktree_path),
+                timeout=60,
+            )
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError) as e:
+            self.audit_log.log(
+                "conflict_stage1_merge_error",
+                task_id=task_id,
+                error=str(e),
+            )
+            return "conflict"
+
+        if merge_result.returncode == 0:
+            # Clean merge — push and re-attempt PR merge
+            self.audit_log.log(
+                "conflict_stage1_clean_merge",
+                task_id=task_id,
+                worktree_path=str(worktree_path),
+            )
+            pushed, push_err = push_branch(
+                self.project_root, branch_name, force_with_lease=True
+            )
+            if pushed:
+                merged = merge_pr(self.project_root, pr_info.number)
+                if merged:
+                    pull_main(self.project_root)
+                    self.audit_log.log(
+                        "conflict_stage1_merged",
+                        task_id=task_id,
+                        pr_number=pr_info.number,
+                    )
+                    return "merged"
+                self.audit_log.log(
+                    "conflict_stage1_remerge_failed",
+                    task_id=task_id,
+                    pr_number=pr_info.number,
+                )
+            else:
+                self.audit_log.log(
+                    "conflict_stage1_push_failed",
+                    task_id=task_id,
+                    error=push_err,
+                )
+            return "conflict"
+
+        # --- Stage 2: merge had conflicts, try agent resolution ---
+        try:
+            status_result = subprocess.run(
+                ["git", "diff", "--name-only", "--diff-filter=U"],
+                capture_output=True,
+                text=True,
+                cwd=str(worktree_path),
+                timeout=30,
+            )
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError):
+            self._abort_merge_safe(worktree_path)
+            return "conflict"
+
+        conflicted_files = [
+            f.strip() for f in status_result.stdout.strip().splitlines() if f.strip()
+        ]
+
+        if not conflicted_files:
+            # Merge failed but no conflicted files detected — abort
+            self._abort_merge_safe(worktree_path)
+            return "conflict"
+
+        self.audit_log.log(
+            "conflict_stage2_agent_resolution",
+            task_id=task_id,
+            conflicted_files=conflicted_files,
+        )
+
+        resolved = _try_agent_conflict_resolution(worktree_path, conflicted_files)
+        if not resolved:
+            self.audit_log.log(
+                "conflict_stage2_agent_failed",
+                task_id=task_id,
+            )
+            self._abort_merge_safe(worktree_path)
+            return "conflict"
+
+        # Agent resolved conflicts — commit the merge
+        try:
+            commit_result = subprocess.run(
+                [
+                    "git",
+                    "commit",
+                    "--no-edit",
+                    "-m",
+                    f"Merge {main_branch} with agent conflict resolution",
+                ],
+                capture_output=True,
+                text=True,
+                cwd=str(worktree_path),
+                timeout=60,
+            )
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError) as e:
+            self.audit_log.log(
+                "conflict_stage2_commit_error",
+                task_id=task_id,
+                error=str(e),
+            )
+            self._abort_merge_safe(worktree_path)
+            return "conflict"
+
+        if commit_result.returncode != 0:
+            self.audit_log.log(
+                "conflict_stage2_commit_failed",
+                task_id=task_id,
+                error=commit_result.stderr.strip(),
+            )
+            self._abort_merge_safe(worktree_path)
+            return "conflict"
+
+        # Push and re-attempt PR merge
+        pushed, push_err = push_branch(
+            self.project_root, branch_name, force_with_lease=True
+        )
+        if pushed:
+            merged = merge_pr(self.project_root, pr_info.number)
+            if merged:
+                pull_main(self.project_root)
+                self.audit_log.log(
+                    "conflict_stage2_merged",
+                    task_id=task_id,
+                    pr_number=pr_info.number,
+                )
+                return "merged"
+
+        self.audit_log.log(
+            "conflict_stage2_push_or_remerge_failed",
+            task_id=task_id,
+        )
+
+        # --- Stage 3: all failed ---
+        return "conflict"
+
+    @staticmethod
+    def _abort_merge_safe(worktree_path: Path):
+        """Abort a merge in progress, ignoring errors."""
+        try:
+            subprocess.run(
+                ["git", "merge", "--abort"],
+                capture_output=True,
+                cwd=str(worktree_path),
+                timeout=30,
+            )
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError):
+            pass
 
     def cleanup_worktree(
         self, task_id: str, worktree_path: Path, remove_branch: bool = True

@@ -394,7 +394,19 @@ class Daemon:
         self._apply_merge_result(item, merge_status)
 
     def _apply_merge_result(self, item, merge_status):
-        """Record merge result, handle conflicts, and clean up worktree."""
+        """Record merge result, handle conflicts via three-stage pipeline, clean up.
+
+        When a PR merge fails with a conflict and ``item.pr_info`` is
+        available, runs the three-stage conflict resolution pipeline
+        (see :meth:`Executor.resolve_conflict_and_remerge_pr`):
+
+        1. ``git merge main`` in the worktree → push → re-merge PR
+        2. Agent conflict resolution → commit → push → re-merge PR
+        3. Only if both fail, mark ``task_failed`` for full retry
+
+        For non-PR merges, falls back to the legacy ``prepare_conflict_retry``
+        path (merge main into worktree + save for retry dispatch).
+        """
         task_id = item.task["id"]
         worktree_path = item.worktree_path
 
@@ -409,28 +421,39 @@ class Daemon:
             self.executor.cleanup_worktree(task_id, worktree_path)
 
         elif merge_status == "conflict":
-            # Merge conflict — prepare worktree for retry
+            # --- Three-stage conflict resolution for PR-based merges ---
+            if item.pr_info:
+                resolved = self.executor.resolve_conflict_and_remerge_pr(
+                    task_id, worktree_path, item.pr_info
+                )
+                if resolved == "merged":
+                    # Stage 1 or 2 succeeded — record success and clean up
+                    self.mutation_log.append(
+                        "task_updated",
+                        {"merge_status": "merged"},
+                        reason="Conflict resolved via three-stage pipeline",
+                        task_id=task_id,
+                    )
+                    self.executor.cleanup_worktree(task_id, worktree_path)
+                    self.audit_log.log(
+                        "conflict_resolved_without_retry",
+                        task_id=task_id,
+                        pr_number=item.pr_info.number,
+                    )
+                    return
+
+            # Stage 3 (or no PR): all resolution stages failed — mark
+            # task_failed for full retry with a fresh agent dispatch.
             self.mutation_log.append(
                 "task_updated",
                 {"merge_status": "conflict"},
-                reason="Merge conflict detected, preparing retry with merged state",
+                reason="Merge conflict detected, all resolution stages failed",
                 task_id=task_id,
             )
 
-            # Try merging main into the worktree for retry baseline
-            retry_prepared = self.executor.prepare_conflict_retry(
-                task_id,
-                worktree_path,
-            )
+            # Clean up worktree — full retry creates a fresh one
+            self.executor.cleanup_worktree(task_id, worktree_path)
 
-            if retry_prepared:
-                reason = (
-                    "Merge conflict with main; retrying with merged state as baseline"
-                )
-            else:
-                reason = "Merge conflict unresolvable; retrying from fresh state"
-
-            # Revert task from completed to failed so scheduler retries it
             self.mutation_log.append(
                 "task_failed",
                 {
@@ -438,14 +461,14 @@ class Daemon:
                     "attempt_count": item.attempt,
                     "merge_conflict": True,
                 },
-                reason=reason,
+                reason="Merge conflict unresolvable locally; retrying with fresh agent",
                 task_id=task_id,
             )
             self.audit_log.log(
                 "merge_conflict_retry",
                 task_id=task_id,
                 attempt=item.attempt,
-                retry_prepared=retry_prepared,
+                retry_prepared=False,
             )
 
         else:
