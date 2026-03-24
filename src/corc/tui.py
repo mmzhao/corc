@@ -281,6 +281,27 @@ def _format_checklist_progress(checklist) -> str | None:
     return f"{done}/{total} items done"
 
 
+def _format_attempt_count(task: dict) -> str | None:
+    """Format the retry attempt count for display.
+
+    Returns e.g. ``'attempt 2/4'`` when the task is on its second attempt
+    (out of 4 total possible = 1 initial + 3 retries).
+
+    Returns ``None`` for first-attempt tasks (attempt_count == 0) since
+    no retry indicator is needed.
+
+    Args:
+        task: Task dict with optional ``attempt_count`` and ``max_retries``.
+    """
+    attempt_count = task.get("attempt_count", 0)
+    if not attempt_count or attempt_count <= 0:
+        return None
+    max_retries = task.get("max_retries", 3)
+    current = attempt_count + 1  # attempt_count=1 means 2nd attempt
+    total = max_retries + 1  # max_retries=3 means 4 total possible attempts
+    return f"attempt {current}/{total}"
+
+
 def build_streaming_detail_panel(
     running_tasks: list[dict],
     stream_events_by_task: dict[str, list[dict]],
@@ -329,6 +350,12 @@ def build_streaming_detail_panel(
         header = Text()
         header.append(f"  🔄 {_name(task)}", style="bold yellow")
         header.append(f"  ({_tid(task)})", style="dim")
+
+        # Retry attempt indicator
+        attempt_str = _format_attempt_count(task)
+        if attempt_str:
+            header.append(f"  🔁 {attempt_str}", style="yellow")
+
         lines.append(header)
 
         # ── Checklist progress ─────────────────────────────────────
@@ -426,6 +453,9 @@ def build_active_plan_panel(
     blocked_tasks: list[dict],
     recently_completed: list[dict],
     other_active: list[dict] | None = None,
+    scroll_offset: int = 0,
+    max_lines: int = 40,
+    focused_panel: str | None = None,
 ) -> Panel:
     """Build the active plan panel showing only current/relevant tasks.
 
@@ -435,6 +465,8 @@ def build_active_plan_panel(
       3. BLOCKED  — with dependency info, dim
       4. Other active (escalated, failed, pending_merge, etc.) — red/yellow
       5. RECENTLY COMPLETED — dimmed, last hour
+
+    Supports scrolling via *scroll_offset* (lines from the top).
     """
     lines: list[Text] = []
 
@@ -463,6 +495,11 @@ def build_active_plan_panel(
             elapsed = _elapsed_since(started)
             if elapsed:
                 line.append(f"  ⏱ {elapsed}", style="yellow")
+
+            # Retry attempt indicator
+            attempt_str = _format_attempt_count(t)
+            if attempt_str:
+                line.append(f"  🔁 {attempt_str}", style="yellow")
 
             # Agent info — deduplicate to show only latest per task
             agents = _deduplicate_agents(t.get("agents", []))
@@ -554,6 +591,12 @@ def build_active_plan_panel(
             line.append(f"{_name(t):<30}", style=style)
             line.append(f"  {_tid(t)}", style="dim")
             line.append(f"  [{status}]", style="dim")
+
+            # Retry attempt indicator for failed/escalated tasks
+            attempt_str = _format_attempt_count(t)
+            if attempt_str:
+                line.append(f"  🔁 {attempt_str}", style="dim red")
+
             lines.append(line)
         lines.append(Text(""))
 
