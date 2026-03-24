@@ -1684,6 +1684,57 @@ class TestBuildStreamingDetailPanel:
         text = _render_to_plain(panel, width=200)
         assert "Streaming Detail" in text
 
+    def test_border_style_is_literal_not_undefined_call(self):
+        """Regression: _border_style_for was referenced but never defined (ef712861).
+
+        build_streaming_detail_panel previously had:
+            border_style=_border_style_for("streaming", focused_panel)
+        which raised NameError because _border_style_for was never defined
+        and focused_panel was not a parameter. The fix uses a literal
+        border_style string.
+        """
+        # Empty state path
+        panel_empty = build_streaming_detail_panel([], {})
+        assert isinstance(panel_empty, Panel)
+        assert isinstance(panel_empty.border_style, str)
+
+        # Non-empty state path (with running tasks)
+        running = [_make_task("t1", "regression-task", status="running")]
+        panel_with_tasks = build_streaming_detail_panel(running, {})
+        assert isinstance(panel_with_tasks, Panel)
+        assert isinstance(panel_with_tasks.border_style, str)
+
+        # With stream events (exercises the full code path)
+        events = {
+            "t1": [
+                _make_stream_entry(
+                    "tool_use",
+                    {
+                        "type": "tool_use",
+                        "tool": {"name": "Read", "input": {"file_path": "/a.py"}},
+                    },
+                ),
+            ]
+        }
+        panel_with_events = build_streaming_detail_panel(running, events)
+        assert isinstance(panel_with_events, Panel)
+        assert isinstance(panel_with_events.border_style, str)
+
+    def test_no_undefined_name_border_style_for(self):
+        """Regression: ensure _border_style_for is not called anywhere in the module.
+
+        The function was never defined, so any reference would be a NameError
+        at runtime. This test inspects the source to prevent reintroduction.
+        """
+        import inspect
+        import corc.tui as tui_module
+
+        source = inspect.getsource(tui_module)
+        assert "_border_style_for" not in source, (
+            "_border_style_for is referenced in tui.py source but was never defined. "
+            "Use a literal border_style string or define the function."
+        )
+
 
 # ── Active Dashboard with Streaming ──────────────────────────────────────
 
