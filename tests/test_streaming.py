@@ -59,6 +59,12 @@ class MockPopen:
     def kill(self):
         pass
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
 
 def _make_mock_popen(events, exit_code=0, stderr_text=""):
     """Create a factory that returns a MockPopen with the given events."""

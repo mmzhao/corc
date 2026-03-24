@@ -778,7 +778,7 @@ repos:
         with (
             patch("corc.executor.get_repo_policy") as mock_policy,
             patch("corc.executor.create_pr") as mock_create_pr,
-            patch("corc.executor.push_branch", return_value=True),
+            patch("corc.executor.push_branch", return_value=(True, "")),
         ):
             mock_policy.return_value = RepoPolicy(name="repo", merge_policy="auto")
             mock_create_pr.return_value = PRInfo(
@@ -841,7 +841,7 @@ repos:
         with (
             patch("corc.executor.get_repo_policy") as mock_policy,
             patch("corc.executor.create_pr") as mock_create_pr,
-            patch("corc.executor.push_branch", return_value=True),
+            patch("corc.executor.push_branch", return_value=(True, "")),
         ):
             mock_policy.return_value = RepoPolicy(
                 name="repo", merge_policy="human-only"
@@ -1129,7 +1129,7 @@ repos:
             patch("corc.executor.get_repo_policy") as exec_mock,
             patch("corc.processor.get_repo_policy") as proc_mock,
             patch("corc.executor.create_pr") as mock_create_pr,
-            patch("corc.executor.push_branch", return_value=True),
+            patch("corc.executor.push_branch", return_value=(True, "")),
         ):
             exec_mock.return_value = RepoPolicy(name="repo", merge_policy="auto")
             proc_mock.return_value = RepoPolicy(name="repo", merge_policy="auto")
@@ -1209,7 +1209,7 @@ repos:
             patch("corc.executor.get_repo_policy") as exec_mock,
             patch("corc.processor.get_repo_policy") as proc_mock,
             patch("corc.executor.create_pr") as mock_create_pr,
-            patch("corc.executor.push_branch", return_value=True),
+            patch("corc.executor.push_branch", return_value=(True, "")),
         ):
             human_policy = RepoPolicy(name="repo", merge_policy="human-only")
             exec_mock.return_value = human_policy
