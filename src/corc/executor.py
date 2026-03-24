@@ -94,8 +94,14 @@ class Executor:
         self._futures: dict[Future, tuple[dict, int, Path | None, str | None]] = {}
         # Track which futures are reattached (skip session logging for these)
         self._reattached_futures: set[Future] = set()
+        # Track in-flight task IDs to prevent duplicate dispatches
+        self._in_flight_tasks: set[str] = set()
         # Worktrees saved for conflict retry: task_id → worktree_path
         self._conflict_worktrees: dict[str, Path] = {}
+
+    def is_in_flight(self, task_id: str) -> bool:
+        """Check if a task already has an in-flight dispatch."""
+        return task_id in self._in_flight_tasks
 
     def dispatch(self, task: dict):
         """Dispatch an agent for a task (non-blocking).
@@ -103,6 +109,16 @@ class Executor:
         Creates a git worktree for isolation, marks the task as running,
         builds prompt/context, submits to thread pool.
         """
+        task_id = task["id"]
+        if task_id in self._in_flight_tasks:
+            self.audit_log.log(
+                "dispatch_skipped_duplicate",
+                task_id=task_id,
+                reason="Task already has an in-flight agent",
+            )
+            return
+
+        self._in_flight_tasks.add(task_id)
         attempt = self.session_logger.get_latest_attempt(task["id"]) + 1
 
         # Check for a saved conflict worktree (from a previous merge conflict)
@@ -332,6 +348,7 @@ class Executor:
         (so the scheduler ignores it) and is tracked in ``in_flight_task_ids``
         (so external reconciliation skips it).
         """
+        self._in_flight_tasks.add(task["id"])
         future = self._pool.submit(self._wait_for_pid, pid, task["id"])
         self._futures[future] = (task, attempt, worktree_path, agent_id)
         self._reattached_futures.add(future)
@@ -439,6 +456,7 @@ class Executor:
 
         for future in done_futures:
             task, attempt, worktree_path, agent_id = self._futures.pop(future)
+            self._in_flight_tasks.discard(task["id"])
             is_reattached = future in self._reattached_futures
             if is_reattached:
                 self._reattached_futures.discard(future)
