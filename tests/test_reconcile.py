@@ -1476,3 +1476,299 @@ class TestGetAgentAge:
         age = _get_agent_age(task, mutation_log)
         # Should return None since no timestamp available and no matching mutations
         assert age is None
+
+
+# ===========================================================================
+# Unit tests: PR creation during reconciliation
+# ===========================================================================
+
+
+class TestReconciliationPRCreation:
+    """Test that dead agents with worktrees get PRs created during reconciliation."""
+
+    def test_dead_agent_with_worktree_creates_pr(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
+        """Dead agent with successful output and worktree with commits → PR created, task completed."""
+        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing")
+        _start_task(mutation_log, "t1")
+
+        # Create worktree directory to simulate an existing worktree
+        worktree_dir = tmp_project / ".claude" / "worktrees" / "t1-1"
+        worktree_dir.mkdir(parents=True)
+
+        _create_agent(
+            mutation_log,
+            "agent-1",
+            "t1",
+            pid=99999,
+            worktree_path=str(worktree_dir),
+        )
+        work_state.refresh()
+
+        # Agent produced successful output
+        session_logger.log_dispatch("t1", 1, "prompt", "system", ["Read"], 3.0)
+        session_logger.log_output("t1", 1, "Successfully completed!", 0, 5.0)
+
+        from corc.pr import PRInfo
+
+        mock_pr_info = PRInfo(
+            url="https://github.com/test/repo/pull/42",
+            number=42,
+            branch="corc/t1-1",
+            title="[corc] Task 1 (t1)",
+        )
+
+        with (
+            patch("corc.reconcile._branch_has_commits_ahead", return_value=True),
+            patch("corc.reconcile.get_worktree_branch", return_value="corc/t1-1"),
+            patch("corc.reconcile.push_branch", return_value=(True, "")),
+            patch("corc.reconcile.create_pr", return_value=(mock_pr_info, "")),
+        ):
+            summary = reconcile_on_startup(
+                state=work_state,
+                mutation_log=mutation_log,
+                audit_log=audit_log,
+                session_logger=session_logger,
+                project_root=tmp_project,
+                pid_checker=lambda pid: False,
+            )
+
+        assert summary["agents_dead_with_output"] == 1
+        assert summary["prs_created"] == 1
+
+        # Task should be completed (exit code 0, no validation rules → pass)
+        task = work_state.get_task("t1")
+        assert task["status"] == "completed"
+
+        # Verify audit log has PR creation event
+        events = audit_log.read_today()
+        event_types = [e["event_type"] for e in events]
+        assert "reconcile_pr_created" in event_types
+        assert "reconcile_processed_output" in event_types
+
+    def test_dead_agent_with_worktree_pr_creation_failure_marks_failed(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
+        """Dead agent with output but PR creation fails → task marked failed (retriable)."""
+        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing")
+        _start_task(mutation_log, "t1")
+
+        worktree_dir = tmp_project / ".claude" / "worktrees" / "t1-1"
+        worktree_dir.mkdir(parents=True)
+
+        _create_agent(
+            mutation_log,
+            "agent-1",
+            "t1",
+            pid=99999,
+            worktree_path=str(worktree_dir),
+        )
+        work_state.refresh()
+
+        # Agent produced successful output
+        session_logger.log_dispatch("t1", 1, "prompt", "system", ["Read"], 3.0)
+        session_logger.log_output("t1", 1, "Successfully completed!", 0, 5.0)
+
+        with (
+            patch("corc.reconcile._branch_has_commits_ahead", return_value=True),
+            patch("corc.reconcile.get_worktree_branch", return_value="corc/t1-1"),
+            patch("corc.reconcile.push_branch", return_value=(True, "")),
+            patch(
+                "corc.reconcile.create_pr",
+                return_value=(None, "gh: command not found"),
+            ),
+        ):
+            summary = reconcile_on_startup(
+                state=work_state,
+                mutation_log=mutation_log,
+                audit_log=audit_log,
+                session_logger=session_logger,
+                project_root=tmp_project,
+                pid_checker=lambda pid: False,
+            )
+
+        assert summary["agents_dead_with_output"] == 1
+        assert summary["prs_created"] == 0
+
+        # Task should be FAILED, not completed
+        task = work_state.get_task("t1")
+        assert task["status"] == "failed"
+
+        # Check mutation log for infrastructure + reconciled flags
+        entries = mutation_log.read_all()
+        fail_entries = [e for e in entries if e["type"] == "task_failed"]
+        assert len(fail_entries) == 1
+        assert fail_entries[0]["data"]["infrastructure"] is True
+        assert fail_entries[0]["data"]["reconciled"] is True
+        assert fail_entries[0]["data"]["exit_code"] == 0
+        assert "PR creation failed" in fail_entries[0]["reason"]
+
+        # Verify audit log has PR failure event
+        events = audit_log.read_today()
+        event_types = [e["event_type"] for e in events]
+        assert "reconcile_pr_creation_failed" in event_types
+        # process_completed should NOT have been called
+        assert "reconcile_processed_output" not in event_types
+
+    def test_dead_agent_with_worktree_push_failure_marks_failed(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
+        """Dead agent with output but branch push fails → task marked failed (retriable)."""
+        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing")
+        _start_task(mutation_log, "t1")
+
+        worktree_dir = tmp_project / ".claude" / "worktrees" / "t1-1"
+        worktree_dir.mkdir(parents=True)
+
+        _create_agent(
+            mutation_log,
+            "agent-1",
+            "t1",
+            pid=99999,
+            worktree_path=str(worktree_dir),
+        )
+        work_state.refresh()
+
+        session_logger.log_dispatch("t1", 1, "prompt", "system", ["Read"], 3.0)
+        session_logger.log_output("t1", 1, "Successfully completed!", 0, 5.0)
+
+        with (
+            patch("corc.reconcile._branch_has_commits_ahead", return_value=True),
+            patch("corc.reconcile.get_worktree_branch", return_value="corc/t1-1"),
+            patch(
+                "corc.reconcile.push_branch",
+                return_value=(False, "remote: Permission denied"),
+            ),
+        ):
+            summary = reconcile_on_startup(
+                state=work_state,
+                mutation_log=mutation_log,
+                audit_log=audit_log,
+                session_logger=session_logger,
+                project_root=tmp_project,
+                pid_checker=lambda pid: False,
+            )
+
+        assert summary["agents_dead_with_output"] == 1
+
+        # Task should be FAILED
+        task = work_state.get_task("t1")
+        assert task["status"] == "failed"
+
+        # Check mutation log
+        entries = mutation_log.read_all()
+        fail_entries = [e for e in entries if e["type"] == "task_failed"]
+        assert len(fail_entries) == 1
+        assert fail_entries[0]["data"]["infrastructure"] is True
+        assert "branch push failed" in fail_entries[0]["reason"]
+
+    def test_dead_agent_no_worktree_still_processes_output(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
+        """Dead agent with output but no worktree → output processed normally (no PR)."""
+        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing")
+        _start_task(mutation_log, "t1")
+        _create_agent(mutation_log, "agent-1", "t1", pid=99999)
+        work_state.refresh()
+
+        session_logger.log_dispatch("t1", 1, "prompt", "system", ["Read"], 3.0)
+        session_logger.log_output("t1", 1, "Done!", 0, 5.0)
+
+        summary = reconcile_on_startup(
+            state=work_state,
+            mutation_log=mutation_log,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            project_root=tmp_project,
+            pid_checker=lambda pid: False,
+        )
+
+        assert summary["agents_dead_with_output"] == 1
+        assert summary["prs_created"] == 0
+
+        # Task should still be completed (no worktree → no PR needed)
+        task = work_state.get_task("t1")
+        assert task["status"] == "completed"
+
+    def test_dead_agent_worktree_no_commits_ahead_no_pr(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
+        """Dead agent with worktree but no commits ahead → no PR, output processed normally."""
+        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing")
+        _start_task(mutation_log, "t1")
+
+        worktree_dir = tmp_project / ".claude" / "worktrees" / "t1-1"
+        worktree_dir.mkdir(parents=True)
+
+        _create_agent(
+            mutation_log,
+            "agent-1",
+            "t1",
+            pid=99999,
+            worktree_path=str(worktree_dir),
+        )
+        work_state.refresh()
+
+        session_logger.log_dispatch("t1", 1, "prompt", "system", ["Read"], 3.0)
+        session_logger.log_output("t1", 1, "Done!", 0, 5.0)
+
+        with (
+            patch("corc.reconcile._branch_has_commits_ahead", return_value=False),
+            patch("corc.reconcile.get_worktree_branch", return_value="corc/t1-1"),
+        ):
+            summary = reconcile_on_startup(
+                state=work_state,
+                mutation_log=mutation_log,
+                audit_log=audit_log,
+                session_logger=session_logger,
+                project_root=tmp_project,
+                pid_checker=lambda pid: False,
+            )
+
+        assert summary["agents_dead_with_output"] == 1
+        assert summary["prs_created"] == 0
+
+        # Task should be completed (no commits ahead → no PR needed)
+        task = work_state.get_task("t1")
+        assert task["status"] == "completed"
+
+    def test_dead_agent_failed_exit_code_no_pr_attempted(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
+        """Dead agent with exit_code != 0 → no PR attempted even if worktree exists."""
+        _create_task(mutation_log, "t1", "Task 1", done_when="do the thing")
+        _start_task(mutation_log, "t1")
+
+        worktree_dir = tmp_project / ".claude" / "worktrees" / "t1-1"
+        worktree_dir.mkdir(parents=True)
+
+        _create_agent(
+            mutation_log,
+            "agent-1",
+            "t1",
+            pid=99999,
+            worktree_path=str(worktree_dir),
+        )
+        work_state.refresh()
+
+        # Agent failed (exit_code 1)
+        session_logger.log_dispatch("t1", 1, "prompt", "system", ["Read"], 3.0)
+        session_logger.log_output("t1", 1, "Error occurred", 1, 5.0)
+
+        # push_branch should never be called for failed agents
+        with patch("corc.reconcile.push_branch") as mock_push:
+            summary = reconcile_on_startup(
+                state=work_state,
+                mutation_log=mutation_log,
+                audit_log=audit_log,
+                session_logger=session_logger,
+                project_root=tmp_project,
+                pid_checker=lambda pid: False,
+            )
+            mock_push.assert_not_called()
+
+        assert summary["agents_dead_with_output"] == 1
+        # Task should be failed (exit code 1)
+        task = work_state.get_task("t1")
+        assert task["status"] == "failed"

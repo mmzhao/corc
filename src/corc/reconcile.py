@@ -22,6 +22,7 @@ from corc.audit import AuditLog
 from corc.config import DEFAULTS
 from corc.dispatch import AgentResult, kill_agent_process
 from corc.mutations import MutationLog
+from corc.pr import create_pr, get_worktree_branch, push_branch
 from corc.processor import process_completed
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,7 @@ def reconcile_on_startup(
         "agents_dead_no_output": 0,
         "agents_killed_timeout": 0,
         "worktrees_cleaned": 0,
+        "prs_created": 0,
         "alive_agents": [],  # Info for daemon to re-attach monitoring
     }
 
@@ -157,6 +159,71 @@ def reconcile_on_startup(
             # Process the output through normal validation pipeline
             summary["agents_dead_with_output"] += 1
             attempt = session_logger.get_latest_attempt(task_id)
+
+            # For successful agents with worktrees that have commits ahead
+            # of main, create a PR before processing completion.
+            pr_info = None
+            if output.exit_code == 0:
+                worktree_path, branch_name = _get_worktree_info_for_task(
+                    state, task_id, project_root
+                )
+                if (
+                    worktree_path is not None
+                    and branch_name is not None
+                    and _branch_has_commits_ahead(project_root, branch_name)
+                ):
+                    push_ok, push_err = push_branch(project_root, branch_name)
+                    if push_ok:
+                        pr_info, pr_err = create_pr(project_root, branch_name, task)
+                        if pr_info is None:
+                            # PR creation failed — mark as failed (retriable)
+                            mutation_log.append(
+                                "task_failed",
+                                {
+                                    "attempt": attempt,
+                                    "attempt_count": attempt,
+                                    "exit_code": 0,
+                                    "reconciled": True,
+                                    "infrastructure": True,
+                                },
+                                reason=f"Reconciliation: PR creation failed: {pr_err}",
+                                task_id=task_id,
+                            )
+                            audit_log.log(
+                                "reconcile_pr_creation_failed",
+                                task_id=task_id,
+                                error=pr_err,
+                            )
+                            continue
+                        else:
+                            summary["prs_created"] += 1
+                            audit_log.log(
+                                "reconcile_pr_created",
+                                task_id=task_id,
+                                pr_url=pr_info.url,
+                                pr_number=pr_info.number,
+                            )
+                    else:
+                        # Push failed — mark as failed (retriable)
+                        mutation_log.append(
+                            "task_failed",
+                            {
+                                "attempt": attempt,
+                                "attempt_count": attempt,
+                                "exit_code": 0,
+                                "reconciled": True,
+                                "infrastructure": True,
+                            },
+                            reason=f"Reconciliation: branch push failed: {push_err}",
+                            task_id=task_id,
+                        )
+                        audit_log.log(
+                            "reconcile_push_failed",
+                            task_id=task_id,
+                            error=push_err,
+                        )
+                        continue
+
             process_completed(
                 task=task,
                 result=output,
@@ -166,6 +233,7 @@ def reconcile_on_startup(
                 audit_log=audit_log,
                 session_logger=session_logger,
                 project_root=project_root,
+                pr_info=pr_info,
             )
             audit_log.log("reconcile_processed_output", task_id=task_id)
         else:
@@ -359,6 +427,53 @@ def is_claude_process(pid: int) -> bool:
         comm = result.stdout.strip().lower()
         return "claude" in comm or "node" in comm
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+
+
+def _get_worktree_info_for_task(
+    state: WorkState, task_id: str, project_root: Path
+) -> tuple[Path | None, str | None]:
+    """Get worktree path and branch name for a task's agent.
+
+    Looks up the agent record for the given task and checks if it has
+    a worktree_path that still exists on disk. If so, resolves the
+    branch name from git.
+
+    Returns:
+        Tuple of (worktree_path, branch_name). Both are None if no
+        valid worktree exists for the task.
+    """
+    agents = state.get_agents_for_task(task_id)
+    for agent in agents:
+        worktree_path_str = agent.get("worktree_path")
+        if worktree_path_str:
+            wt_path = Path(worktree_path_str)
+            if wt_path.exists():
+                branch = get_worktree_branch(project_root, wt_path)
+                if branch:
+                    return wt_path, branch
+    return None, None
+
+
+def _branch_has_commits_ahead(project_root: Path, branch_name: str) -> bool:
+    """Check if a branch has commits ahead of HEAD (main).
+
+    Runs ``git log HEAD..<branch_name> --oneline`` to see if there are
+    any commits on the branch that are not on the current HEAD.
+
+    Returns:
+        True if the branch has at least one commit ahead of HEAD.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "log", "HEAD.." + branch_name, "--oneline"],
+            capture_output=True,
+            text=True,
+            cwd=str(project_root),
+            timeout=30,
+        )
+        return result.returncode == 0 and bool(result.stdout.strip())
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
         return False
 
 
