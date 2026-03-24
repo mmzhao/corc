@@ -489,7 +489,12 @@ def task_status(task_id):
 @click.option(
     "--resume", "resume_session", is_flag=True, help="Resume the last planning session"
 )
-def plan(file, resume_session):
+@click.option(
+    "--show-feedback",
+    is_flag=True,
+    help="Print the planning feedback section and exit",
+)
+def plan(file, resume_session, show_feedback):
     """Start an interactive planning session.
 
     Launches Claude Code in interactive mode with full CORC context injected:
@@ -498,6 +503,8 @@ def plan(file, resume_session):
     Optionally pre-load a seed document: corc plan my-idea.md
 
     Resume a crashed/interrupted session: corc plan --resume
+
+    Show planning feedback digest: corc plan --show-feedback
     """
     import uuid as _uuid
     from pathlib import Path as _Path
@@ -507,9 +514,19 @@ def plan(file, resume_session):
         load_latest_draft,
         mark_session_complete,
         launch_interactive_claude,
+        _get_planning_feedback,
     )
 
     paths, ml, ws, al, sl, ks = _get_all()
+
+    # --show-feedback: print the feedback section and exit
+    if show_feedback:
+        feedback = _get_planning_feedback(paths)
+        if feedback:
+            click.echo(feedback)
+        else:
+            click.echo("No planning feedback available yet.")
+        return
 
     seed_content = None
     if file:
@@ -2173,9 +2190,11 @@ def rate(task_id, auto_flag, no_claude):
       corc rate --auto --no-claude       Batch score without claude -p
     """
     from corc.rating import RatingEngine, RatingStore, format_rating
+    from corc.planning_feedback import PlanningFeedbackStore, record_planning_outcome
 
     paths, _, ws, al, sl, _ = _get_all()
     rs = RatingStore(paths["ratings_dir"])
+    pfs = PlanningFeedbackStore(paths["planning_feedback"])
     spec_path = paths["root"] / "SPEC.md"
 
     engine = RatingEngine(
@@ -2185,6 +2204,15 @@ def rate(task_id, auto_flag, no_claude):
         session_logger=sl,
         spec_path=spec_path if spec_path.exists() else None,
     )
+
+    def _record_outcome(tid, rating):
+        """Record a planning outcome after rating a task."""
+        task = ws.get_task(tid)
+        if task:
+            try:
+                record_planning_outcome(task, rating, pfs)
+            except Exception as e:
+                click.echo(f"Warning: could not record planning outcome: {e}", err=True)
 
     if auto_flag:
         use_claude = not no_claude
@@ -2197,6 +2225,7 @@ def rate(task_id, auto_flag, no_claude):
                 try:
                     rating = engine.rate_task(tid, use_claude=use_claude)
                     new_ratings.append(rating)
+                    _record_outcome(tid, rating)
                     click.echo(format_rating(rating))
                     click.echo()
                 except ValueError as e:
@@ -2211,6 +2240,7 @@ def rate(task_id, auto_flag, no_claude):
 
     try:
         rating = engine.rate_task(task_id, use_claude=not no_claude)
+        _record_outcome(task_id, rating)
         click.echo(format_rating(rating))
     except ValueError as e:
         click.echo(f"Error: {e}", err=True)
