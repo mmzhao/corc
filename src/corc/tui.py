@@ -984,10 +984,17 @@ def build_event_panel(
             border_style=border,
         )
 
+    # Filter out assistant_message spam — these are shown in the streaming
+    # detail panel instead.  The events panel should only show structural
+    # events (task lifecycle, cost, dispatches).
+    _EVENTS_PANEL_SKIP = frozenset({"assistant_message"})
+
     lines: list[Text] = []
     for e in display_events:
-        ts = e.get("timestamp", "")[:19].replace("T", " ")
         etype = e.get("event_type", "unknown")
+        if etype in _EVENTS_PANEL_SKIP:
+            continue
+        ts = e.get("timestamp", "")[:19].replace("T", " ")
         tid = e.get("task_id", "")[:8] if e.get("task_id") else ""
         style = EVENT_STYLES.get(etype, "white")
 

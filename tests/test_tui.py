@@ -4308,3 +4308,207 @@ class TestAgentCountDenominator:
         )
         text = _render_to_plain(layout)
         assert "3/5" in text, f"Expected '3/5' in dashboard, got: {text!r}"
+
+
+# ── assistant_message filtering in events panel ──────────────────────────
+
+
+class TestEventPanelFiltersAssistantMessage:
+    """Regression: assistant_message events should NOT appear in the events panel.
+
+    assistant_message events are high-frequency noise — they are already
+    shown in the streaming detail panel (💭 icon).  The events panel
+    should only show structural events (task lifecycle, cost, dispatches).
+    """
+
+    def test_assistant_message_events_excluded_from_panel(self):
+        """Events panel with assistant_message entries produces zero
+        assistant_message lines in the rendered output."""
+        events = [
+            {
+                "timestamp": "2026-03-24T10:00:00.000Z",
+                "event_type": "task_created",
+                "task_id": "t1",
+                "name": "my-task",
+            },
+            {
+                "timestamp": "2026-03-24T10:01:00.000Z",
+                "event_type": "assistant_message",
+                "task_id": "t1",
+            },
+            {
+                "timestamp": "2026-03-24T10:01:30.000Z",
+                "event_type": "assistant_message",
+                "task_id": "t1",
+            },
+            {
+                "timestamp": "2026-03-24T10:02:00.000Z",
+                "event_type": "task_dispatched",
+                "task_id": "t1",
+            },
+            {
+                "timestamp": "2026-03-24T10:03:00.000Z",
+                "event_type": "assistant_message",
+                "task_id": "t1",
+            },
+            {
+                "timestamp": "2026-03-24T10:05:00.000Z",
+                "event_type": "task_completed",
+                "task_id": "t1",
+            },
+        ]
+        panel = build_event_panel(events)
+        text = _render_to_plain(panel)
+        assert "assistant_message" not in text
+
+    def test_structural_events_still_shown(self):
+        """task_created, task_dispatched, task_completed, task_failed,
+        task_cost all appear in the events panel."""
+        events = [
+            {
+                "timestamp": "2026-03-24T10:00:00.000Z",
+                "event_type": "task_created",
+                "task_id": "t1",
+            },
+            {
+                "timestamp": "2026-03-24T10:01:00.000Z",
+                "event_type": "assistant_message",
+                "task_id": "t1",
+            },
+            {
+                "timestamp": "2026-03-24T10:02:00.000Z",
+                "event_type": "task_dispatched",
+                "task_id": "t1",
+            },
+            {
+                "timestamp": "2026-03-24T10:03:00.000Z",
+                "event_type": "task_completed",
+                "task_id": "t1",
+            },
+            {
+                "timestamp": "2026-03-24T10:04:00.000Z",
+                "event_type": "task_failed",
+                "task_id": "t2",
+            },
+            {
+                "timestamp": "2026-03-24T10:05:00.000Z",
+                "event_type": "task_cost",
+                "task_id": "t1",
+                "cost_usd": 0.05,
+                "input_tokens": 300,
+                "output_tokens": 30,
+                "duration_ms": 5000,
+            },
+        ]
+        panel = build_event_panel(events)
+        text = _render_to_plain(panel)
+        assert "task_created" in text
+        assert "task_dispatched" in text
+        assert "task_completed" in text
+        assert "task_failed" in text
+        assert "task_cost" in text
+        assert "assistant_message" not in text
+
+    def test_only_assistant_message_events_shows_empty(self):
+        """If ALL events are assistant_message, panel shows no event lines
+        (but not 'No events yet' since events list is non-empty)."""
+        events = [
+            {
+                "timestamp": "2026-03-24T10:01:00.000Z",
+                "event_type": "assistant_message",
+                "task_id": "t1",
+            },
+            {
+                "timestamp": "2026-03-24T10:02:00.000Z",
+                "event_type": "assistant_message",
+                "task_id": "t1",
+            },
+        ]
+        panel = build_event_panel(events)
+        text = _render_to_plain(panel)
+        assert "assistant_message" not in text
+
+    def test_streaming_panel_still_shows_assistant_messages(self):
+        """Assistant messages still appear in the streaming detail panel (💭).
+
+        This verifies the filter is ONLY in the events panel, not in
+        the streaming panel which uses a different rendering path.
+        """
+        running = [_make_task("t1", "thinking-task", status="running")]
+        stream_events = {
+            "t1": [
+                _make_stream_entry(
+                    "assistant",
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "Let me think about this problem.",
+                                }
+                            ],
+                        },
+                    },
+                ),
+            ]
+        }
+        panel = build_streaming_detail_panel(running, stream_events)
+        text = _render_to_plain(panel)
+        assert "Let me think about this problem." in text
+
+    def test_assistant_message_count_is_zero_in_events(self):
+        """Count of assistant_message occurrences in rendered events panel is 0."""
+        events = [
+            {
+                "timestamp": f"2026-03-24T10:{i:02d}:00.000Z",
+                "event_type": "assistant_message" if i % 2 == 0 else "task_dispatched",
+                "task_id": f"t{i}",
+            }
+            for i in range(10)
+        ]
+        panel = build_event_panel(events)
+        text = _render_to_plain(panel)
+        assert text.count("assistant_message") == 0
+        # But the task_dispatched events should be there
+        assert text.count("task_dispatched") == 5
+
+    def test_session_cost_total_unaffected_by_filter(self):
+        """Session cost total still computed from ALL events including
+        those that come alongside assistant_message events."""
+        events = [
+            {
+                "timestamp": "2026-03-24T10:00:00.000Z",
+                "event_type": "assistant_message",
+                "task_id": "t1",
+            },
+            {
+                "timestamp": "2026-03-24T10:01:00.000Z",
+                "event_type": "task_cost",
+                "task_id": "t1",
+                "cost_usd": 0.05,
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "duration_ms": 2000,
+            },
+            {
+                "timestamp": "2026-03-24T10:02:00.000Z",
+                "event_type": "assistant_message",
+                "task_id": "t1",
+            },
+            {
+                "timestamp": "2026-03-24T10:03:00.000Z",
+                "event_type": "task_cost",
+                "task_id": "t2",
+                "cost_usd": 0.10,
+                "input_tokens": 200,
+                "output_tokens": 20,
+                "duration_ms": 4000,
+            },
+        ]
+        panel = build_event_panel(events)
+        text = _render_to_plain(panel)
+        assert "assistant_message" not in text
+        assert "Session:" in text
+        assert "$0.1500" in text
+        assert "2 tasks" in text
