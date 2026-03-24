@@ -38,6 +38,8 @@ from corc.pr import (
     PRInfo,
 )
 from corc.repo_policy import get_repo_policy
+import yaml
+
 from corc.worktree import (
     ProtectedBranchError,
     WorktreeError,
@@ -49,6 +51,36 @@ from corc.worktree import (
     merge_worktree,
     remove_worktree,
 )
+
+
+def _resolve_repo_root(project_root: Path, task: dict) -> Path:
+    """Resolve the repo root for a task, using target_repo if set.
+
+    For cross-repo tasks (target_repo is set), looks up the repo path
+    from .corc/config.yaml. Falls back to project_root if not found.
+    """
+    target_repo = task.get("target_repo")
+    if not target_repo:
+        return project_root
+
+    config_path = project_root / ".corc" / "config.yaml"
+    if not config_path.exists():
+        return project_root
+
+    try:
+        with open(config_path) as f:
+            data = yaml.safe_load(f) or {}
+        repos = data.get("repos", {})
+        repo_config = repos.get(target_repo, {})
+        repo_path = repo_config.get("path")
+        if repo_path:
+            resolved = Path(repo_path)
+            if resolved.exists():
+                return resolved
+    except (yaml.YAMLError, OSError):
+        pass
+
+    return project_root
 
 
 @dataclass
@@ -97,13 +129,17 @@ class Executor:
         self.role_loader = role_loader or RoleLoader(project_root)
         self.defer_merge = defer_merge
         self._pool = ThreadPoolExecutor(max_workers=max_workers)
-        self._futures: dict[Future, tuple[dict, int, Path | None, str | None]] = {}
+        self._futures: dict[
+            Future, tuple[dict, int, Path | None, str | None, Path]
+        ] = {}
         # Track which futures are reattached (skip session logging for these)
         self._reattached_futures: set[Future] = set()
         # Track in-flight task IDs to prevent duplicate dispatches
         self._in_flight_tasks: set[str] = set()
         # Worktrees saved for conflict retry: task_id → worktree_path
         self._conflict_worktrees: dict[str, Path] = {}
+        # Resolved repo roots for cross-repo tasks: task_id → Path
+        self._task_repo_roots: dict[str, Path] = {}
         # Track agent PIDs and start times for backup timeout enforcement.
         # These are keyed by task_id so the daemon can poll agent age and
         # kill agents that exceed agent_timeout_s even if the Timer thread
@@ -130,9 +166,12 @@ class Executor:
             )
             return
 
+        # Resolve the repo root for cross-repo tasks (needed for merged PR check and worktree)
+        repo_root = _resolve_repo_root(self.project_root, task)
+
         # Check if a merged PR already exists for this task.
         # If so, the work has already landed — mark complete and skip dispatch.
-        merged_pr = check_for_merged_pr(self.project_root, task_id)
+        merged_pr = check_for_merged_pr(repo_root, task_id)
         if merged_pr is not None:
             self.audit_log.log(
                 "dispatch_skipped_merged_pr",
@@ -161,6 +200,7 @@ class Executor:
 
         self._in_flight_tasks.add(task_id)
         self._agent_start_times[task_id] = time.time()
+        self._task_repo_roots[task_id] = repo_root
         attempt = self.session_logger.get_latest_attempt(task["id"]) + 1
 
         # Check for a saved conflict worktree (from a previous merge conflict)
@@ -180,7 +220,7 @@ class Executor:
         else:
             # Pull latest main before creating worktree so branch starts
             # from the most recent state.
-            pulled = pull_main(self.project_root)
+            pulled = pull_main(repo_root)
             self.audit_log.log(
                 "main_pulled",
                 task_id=task["id"],
@@ -190,7 +230,7 @@ class Executor:
             # Create git worktree for agent isolation
             try:
                 worktree_path, branch_name = create_worktree(
-                    self.project_root, task["id"], attempt
+                    repo_root, task["id"], attempt
                 )
                 self.audit_log.log(
                     "worktree_created",
@@ -317,7 +357,7 @@ class Executor:
             event_callback=event_callback,
             cwd=cwd,
         )
-        self._futures[future] = (task, attempt, worktree_path, agent_id)
+        self._futures[future] = (task, attempt, worktree_path, agent_id, repo_root)
 
     def _make_event_callback(
         self, task_id: str, attempt: int, role: str = "implementer"
@@ -458,7 +498,8 @@ class Executor:
         if task["id"] not in self._agent_start_times:
             self._agent_start_times[task["id"]] = time.time()
         future = self._pool.submit(self._wait_for_pid, pid, task["id"])
-        self._futures[future] = (task, attempt, worktree_path, agent_id)
+        repo_root = _resolve_repo_root(self.project_root, task)
+        self._futures[future] = (task, attempt, worktree_path, agent_id, repo_root)
         self._reattached_futures.add(future)
         self.audit_log.log(
             "agent_reattached",
@@ -535,7 +576,7 @@ class Executor:
         return killed_task_ids
 
     def _create_pr_from_worktree(
-        self, task: dict, worktree_path: Path
+        self, task: dict, worktree_path: Path, repo_root: Path | None = None
     ) -> PRInfo | None:
         """Push worktree branch and create a PR.
 
@@ -546,12 +587,14 @@ class Executor:
         Args:
             task: The task dict.
             worktree_path: Path to the worktree.
+            repo_root: The repo root (for cross-repo tasks). Defaults to project_root.
 
         Returns:
             PRInfo if PR was created successfully, None otherwise.
         """
+        effective_root = repo_root or self.project_root
         task_id = task["id"]
-        branch_name = get_worktree_branch(self.project_root, worktree_path)
+        branch_name = get_worktree_branch(effective_root, worktree_path)
         if not branch_name:
             self.audit_log.log(
                 "pr_creation_skipped",
@@ -566,7 +609,7 @@ class Executor:
                 ["git", "log", "--oneline", f"main..{branch_name}"],
                 capture_output=True,
                 text=True,
-                cwd=str(self.project_root),
+                cwd=str(effective_root),
                 timeout=10,
             )
             commits_ahead = diff_check.stdout.strip()
@@ -582,7 +625,7 @@ class Executor:
             pass  # If check fails, try pushing anyway
 
         # Push the branch to remote
-        pushed, push_error = push_branch(self.project_root, branch_name)
+        pushed, push_error = push_branch(effective_root, branch_name)
         if not pushed:
             self.audit_log.log(
                 "pr_push_failed",
@@ -593,7 +636,7 @@ class Executor:
             return None
 
         # Create the PR
-        pr_info, pr_error = create_pr(self.project_root, branch_name, task)
+        pr_info, pr_error = create_pr(effective_root, branch_name, task)
         if pr_info:
             self.audit_log.log(
                 "pr_created",
@@ -625,7 +668,9 @@ class Executor:
         done_futures = [f for f in self._futures if f.done()]
 
         for future in done_futures:
-            task, attempt, worktree_path, agent_id = self._futures.pop(future)
+            task, attempt, worktree_path, agent_id, repo_root = self._futures.pop(
+                future
+            )
             self._in_flight_tasks.discard(task["id"])
             self._agent_pids.pop(task["id"], None)
             self._agent_start_times.pop(task["id"], None)
@@ -665,7 +710,7 @@ class Executor:
             # PR creation is mandatory — if it fails, the task fails
             pr_info = None
             if worktree_path and result.exit_code == 0:
-                pr_info = self._create_pr_from_worktree(task, worktree_path)
+                pr_info = self._create_pr_from_worktree(task, worktree_path, repo_root)
                 if pr_info is None:
                     self.audit_log.log(
                         "task_failed_pr_required",
@@ -1133,9 +1178,9 @@ class Executor:
                 references it, e.g. human-only repos).
         """
         try:
-            remove_worktree(
-                self.project_root, worktree_path, remove_branch=remove_branch
-            )
+            effective_root = self._task_repo_roots.get(task_id, self.project_root)
+            remove_worktree(effective_root, worktree_path, remove_branch=remove_branch)
+            self._task_repo_roots.pop(task_id, None)
             self.audit_log.log(
                 "worktree_removed",
                 task_id=task_id,
