@@ -16,9 +16,26 @@ import yaml
 # Schema & validation
 # ---------------------------------------------------------------------------
 
-REQUIRED_FIELDS = {"name", "description", "system_prompt", "allowed_tools", "cost_limits", "knowledge_write_access"}
+REQUIRED_FIELDS = {
+    "name",
+    "description",
+    "system_prompt",
+    "allowed_tools",
+    "cost_limits",
+    "knowledge_write_access",
+}
 VALID_KNOWLEDGE_WRITE_ACCESS = {"none", "findings_only", "full"}
-VALID_TOOL_NAMES = {"Read", "Edit", "Write", "Bash", "Grep", "Glob", "WebSearch", "WebFetch", "Agent"}
+VALID_TOOL_NAMES = {
+    "Read",
+    "Edit",
+    "Write",
+    "Bash",
+    "Grep",
+    "Glob",
+    "WebSearch",
+    "WebFetch",
+    "Agent",
+}
 
 COST_LIMITS_SCHEMA = {
     "max_budget_per_invocation_usd": (int | float, True),
@@ -29,6 +46,7 @@ COST_LIMITS_SCHEMA = {
 @dataclass
 class RoleConfig:
     """Parsed and validated role configuration."""
+
     name: str
     description: str
     extends: str | None
@@ -50,6 +68,7 @@ class RoleConfig:
 @dataclass
 class ValidationResult:
     """Result of role validation."""
+
     valid: bool
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -58,6 +77,7 @@ class ValidationResult:
 # ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
+
 
 def parse_role_yaml(path: Path) -> dict:
     """Parse a role YAML file and return raw dict."""
@@ -102,7 +122,9 @@ def validate_role_data(data: dict) -> ValidationResult:
     # Validate knowledge_write_access
     kwa = data.get("knowledge_write_access", "")
     if kwa not in VALID_KNOWLEDGE_WRITE_ACCESS:
-        errors.append(f"'knowledge_write_access' must be one of {VALID_KNOWLEDGE_WRITE_ACCESS}, got '{kwa}'")
+        errors.append(
+            f"'knowledge_write_access' must be one of {VALID_KNOWLEDGE_WRITE_ACCESS}, got '{kwa}'"
+        )
 
     # Validate allowed_tools
     tools = data.get("allowed_tools", [])
@@ -128,7 +150,9 @@ def validate_role_data(data: dict) -> ValidationResult:
             else:
                 val = cl[key]
                 if not isinstance(val, (int, float)):
-                    errors.append(f"cost_limits.{key} must be a number, got {type(val).__name__}")
+                    errors.append(
+                        f"cost_limits.{key} must be a number, got {type(val).__name__}"
+                    )
                 elif val <= 0:
                     errors.append(f"cost_limits.{key} must be positive, got {val}")
 
@@ -153,6 +177,7 @@ def _data_to_role_config(data: dict, source_path: Path | None = None) -> RoleCon
 # Role composition (extends)
 # ---------------------------------------------------------------------------
 
+
 def compose_roles(child_data: dict, parent: RoleConfig) -> dict:
     """Compose a child role with its parent.
 
@@ -164,7 +189,9 @@ def compose_roles(child_data: dict, parent: RoleConfig) -> dict:
         "name": child_data.get("name", parent.name),
         "description": child_data.get("description", parent.description),
         "extends": child_data.get("extends"),
-        "knowledge_write_access": child_data.get("knowledge_write_access", parent.knowledge_write_access),
+        "knowledge_write_access": child_data.get(
+            "knowledge_write_access", parent.knowledge_write_access
+        ),
         "allowed_tools": child_data.get("allowed_tools", list(parent.allowed_tools)),
         "cost_limits": {**parent.cost_limits, **child_data.get("cost_limits", {})},
     }
@@ -172,7 +199,9 @@ def compose_roles(child_data: dict, parent: RoleConfig) -> dict:
     # System prompt: append if starts with '+', else replace
     child_prompt = child_data.get("system_prompt", "")
     if child_prompt.startswith("+"):
-        composed["system_prompt"] = parent.system_prompt.rstrip() + "\n\n" + child_prompt[1:].lstrip()
+        composed["system_prompt"] = (
+            parent.system_prompt.rstrip() + "\n\n" + child_prompt[1:].lstrip()
+        )
     elif child_prompt:
         composed["system_prompt"] = child_prompt
     else:
@@ -192,7 +221,9 @@ class RoleLoader:
     """Loads roles from project .corc/roles/ with fallback to built-in roles."""
 
     def __init__(self, project_root: Path | None = None):
-        self._project_roles_dir = (project_root / ".corc" / "roles") if project_root else None
+        self._project_roles_dir = (
+            (project_root / ".corc" / "roles") if project_root else None
+        )
         self._builtin_dir = _BUILTIN_ROLES_DIR
         self._cache: dict[str, RoleConfig] = {}
 
@@ -228,7 +259,9 @@ class RoleLoader:
     def _load_recursive(self, name: str, seen: set[str]) -> RoleConfig:
         """Load a role, recursively resolving extends."""
         if name in seen:
-            raise ValueError(f"Circular role inheritance detected: {name} -> {' -> '.join(seen)}")
+            raise ValueError(
+                f"Circular role inheritance detected: {name} -> {' -> '.join(seen)}"
+            )
         seen.add(name)
 
         path = self._find_role_file(name)
@@ -245,7 +278,9 @@ class RoleLoader:
         # Validate the (possibly composed) data
         result = validate_role_data(data)
         if not result.valid:
-            raise ValueError(f"Role '{name}' validation failed: {'; '.join(result.errors)}")
+            raise ValueError(
+                f"Role '{name}' validation failed: {'; '.join(result.errors)}"
+            )
 
         return _data_to_role_config(data, source_path=path)
 
@@ -290,7 +325,9 @@ class RoleLoader:
         if extends:
             parent_path = self._find_role_file(extends)
             if parent_path is None:
-                return ValidationResult(valid=False, errors=[f"Parent role '{extends}' not found"])
+                return ValidationResult(
+                    valid=False, errors=[f"Parent role '{extends}' not found"]
+                )
             try:
                 parent = self.load(extends)
                 data = compose_roles(data, parent)
@@ -308,9 +345,11 @@ class RoleLoader:
 # Convenience: get constraints from a role
 # ---------------------------------------------------------------------------
 
+
 def constraints_from_role(role: RoleConfig) -> "Constraints":
     """Convert a RoleConfig into a dispatch Constraints object."""
     from corc.dispatch import Constraints
+
     return Constraints(
         allowed_tools=list(role.allowed_tools),
         max_budget_usd=role.max_budget_usd,
@@ -321,8 +360,8 @@ def constraints_from_role(role: RoleConfig) -> "Constraints":
 def get_system_prompt_for_role(role: RoleConfig, task: dict, context: str) -> str:
     """Build a full system prompt from role config and task context."""
     return (
-        f"=== ROLE: {role.name} ===\n"
+        f'<role name="{role.name}">\n'
         f"{role.system_prompt}\n\n"
-        f"=== TASK: {task['name']} ===\n\n"
+        f'<task name="{task["name"]}">\n\n'
         f"{context}"
     )
