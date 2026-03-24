@@ -71,19 +71,29 @@ def session_logger(tmp_project):
     return SessionLogger(tmp_project / "data" / "sessions")
 
 
-def _create_task(mutation_log, task_id, name, done_when="do the thing",
-                 depends_on=None, role="implementer"):
+def _create_task(
+    mutation_log,
+    task_id,
+    name,
+    done_when="do the thing",
+    depends_on=None,
+    role="implementer",
+):
     """Helper to create a task via mutation log."""
-    mutation_log.append("task_created", {
-        "id": task_id,
-        "name": name,
-        "description": f"Test task: {name}",
-        "role": role,
-        "depends_on": depends_on or [],
-        "done_when": done_when,
-        "checklist": [],
-        "context_bundle": [],
-    }, reason="Test setup")
+    mutation_log.append(
+        "task_created",
+        {
+            "id": task_id,
+            "name": name,
+            "description": f"Test task: {name}",
+            "role": role,
+            "depends_on": depends_on or [],
+            "done_when": done_when,
+            "checklist": [],
+            "context_bundle": [],
+        },
+        reason="Test setup",
+    )
 
 
 def _start_task(mutation_log, task_id, attempt=1):
@@ -106,16 +116,21 @@ def _assign_task(mutation_log, task_id, agent_id):
     )
 
 
-def _create_agent(mutation_log, agent_id, task_id, role="implementer",
-                  pid=None, worktree_path=None):
+def _create_agent(
+    mutation_log, agent_id, task_id, role="implementer", pid=None, worktree_path=None
+):
     """Helper to create an agent record."""
-    mutation_log.append("agent_created", {
-        "id": agent_id,
-        "role": role,
-        "task_id": task_id,
-        "pid": pid,
-        "worktree_path": worktree_path,
-    }, reason="Test setup")
+    mutation_log.append(
+        "agent_created",
+        {
+            "id": agent_id,
+            "role": role,
+            "task_id": task_id,
+            "pid": pid,
+            "worktree_path": worktree_path,
+        },
+        reason="Test setup",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -139,8 +154,15 @@ class MockDispatcher(AgentDispatcher):
     def set_result_for(self, prompt_substring, result):
         self._results[prompt_substring] = result
 
-    def dispatch(self, prompt, system_prompt, constraints,
-                 pid_callback=None, event_callback=None, cwd=None):
+    def dispatch(
+        self,
+        prompt,
+        system_prompt,
+        constraints,
+        pid_callback=None,
+        event_callback=None,
+        cwd=None,
+    ):
         self.dispatched.append((prompt, system_prompt, constraints))
         if self.delay:
             time.sleep(self.delay)
@@ -158,8 +180,9 @@ class MockDispatcher(AgentDispatcher):
 class TestRebuildState:
     """Test that SQLite is correctly rebuilt from the mutation log on boot."""
 
-    def test_rebuild_empty_log(self, work_state, mutation_log, audit_log,
-                                session_logger, tmp_project):
+    def test_rebuild_empty_log(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
         """Rebuilding from an empty log produces empty state."""
         summary = reconcile_on_startup(
             state=work_state,
@@ -173,13 +196,16 @@ class TestRebuildState:
         assert summary["running_found"] == 0
         assert work_state.list_tasks() == []
 
-    def test_rebuild_from_mutation_log(self, work_state, mutation_log, audit_log,
-                                        session_logger, tmp_project):
+    def test_rebuild_from_mutation_log(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
         """State is rebuilt correctly from mutation log entries."""
         _create_task(mutation_log, "t1", "Task 1")
         _create_task(mutation_log, "t2", "Task 2", depends_on=["t1"])
         mutation_log.append("task_started", {"attempt": 1}, reason="test", task_id="t1")
-        mutation_log.append("task_completed", {"findings": []}, reason="test", task_id="t1")
+        mutation_log.append(
+            "task_completed", {"findings": []}, reason="test", task_id="t1"
+        )
 
         # Delete the SQLite DB to simulate a fresh start
         work_state.conn.close()
@@ -204,8 +230,9 @@ class TestRebuildState:
         t2 = new_state.get_task("t2")
         assert t2["status"] == "pending"
 
-    def test_rebuild_clears_stale_sqlite(self, work_state, mutation_log, audit_log,
-                                          session_logger, tmp_project):
+    def test_rebuild_clears_stale_sqlite(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
         """Rebuild clears old SQLite data and replays fresh from log."""
         _create_task(mutation_log, "t1", "Task 1")
         work_state.refresh()
@@ -256,8 +283,9 @@ class TestPIDLiveness:
         result = is_claude_process(os.getpid())
         assert result is False
 
-    def test_running_task_agent_alive(self, work_state, mutation_log, audit_log,
-                                       session_logger, tmp_project):
+    def test_running_task_agent_alive(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
         """Running task with alive agent is left running."""
         _create_task(mutation_log, "t1", "Task 1")
         _start_task(mutation_log, "t1")
@@ -291,8 +319,9 @@ class TestPIDLiveness:
 class TestDeadAgentWithOutput:
     """Test that dead agents with recorded output get their output processed."""
 
-    def test_dead_agent_output_processed(self, work_state, mutation_log, audit_log,
-                                          session_logger, tmp_project):
+    def test_dead_agent_output_processed(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
         """Dead agent with session output → output is processed normally."""
         _create_task(mutation_log, "t1", "Task 1", done_when="do the thing")
         _start_task(mutation_log, "t1")
@@ -320,8 +349,9 @@ class TestDeadAgentWithOutput:
         task = work_state.get_task("t1")
         assert task["status"] == "completed"
 
-    def test_dead_agent_output_failed_exit(self, work_state, mutation_log, audit_log,
-                                            session_logger, tmp_project):
+    def test_dead_agent_output_failed_exit(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
         """Dead agent with failed output → task marked failed."""
         _create_task(mutation_log, "t1", "Task 1", done_when="do the thing")
         _start_task(mutation_log, "t1")
@@ -347,8 +377,9 @@ class TestDeadAgentWithOutput:
         task = work_state.get_task("t1")
         assert task["status"] == "failed"
 
-    def test_dead_agent_output_with_findings(self, work_state, mutation_log, audit_log,
-                                              session_logger, tmp_project):
+    def test_dead_agent_output_with_findings(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
         """Dead agent output with findings → findings are extracted."""
         _create_task(mutation_log, "t1", "Task 1", done_when="do it")
         _start_task(mutation_log, "t1")
@@ -381,8 +412,9 @@ class TestDeadAgentWithOutput:
 class TestDeadAgentNoOutput:
     """Test that dead agents without output are marked failed."""
 
-    def test_dead_agent_no_output_marked_failed(self, work_state, mutation_log,
-                                                  audit_log, session_logger, tmp_project):
+    def test_dead_agent_no_output_marked_failed(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
         """Dead agent with no session output → task marked failed."""
         _create_task(mutation_log, "t1", "Task 1")
         _start_task(mutation_log, "t1")
@@ -406,8 +438,9 @@ class TestDeadAgentNoOutput:
         task = work_state.get_task("t1")
         assert task["status"] == "failed"
 
-    def test_dead_agent_no_output_has_reconciled_flag(self, work_state, mutation_log,
-                                                       audit_log, session_logger, tmp_project):
+    def test_dead_agent_no_output_has_reconciled_flag(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
         """Failed task mutation from reconciliation has 'reconciled' flag."""
         _create_task(mutation_log, "t1", "Task 1")
         _start_task(mutation_log, "t1")
@@ -429,8 +462,9 @@ class TestDeadAgentNoOutput:
         assert fail_entries[0]["data"]["reconciled"] is True
         assert "Reconciliation" in fail_entries[0]["reason"]
 
-    def test_dead_agent_no_output_no_pid(self, work_state, mutation_log, audit_log,
-                                          session_logger, tmp_project):
+    def test_dead_agent_no_output_no_pid(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
         """Running task with no agent PID → treated as dead, marked failed."""
         _create_task(mutation_log, "t1", "Task 1")
         _start_task(mutation_log, "t1")
@@ -452,6 +486,49 @@ class TestDeadAgentNoOutput:
 
 
 # ===========================================================================
+# Unit tests: infrastructure failure tagging
+# ===========================================================================
+
+
+class TestInfrastructureFailureTagging:
+    """Test that reconciliation failures are tagged as infrastructure failures."""
+
+    def test_reconciliation_failure_has_infrastructure_flag(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
+        """Reconciliation failure includes infrastructure: True and does not increment attempt_count."""
+        _create_task(mutation_log, "t1", "Task 1")
+        _start_task(mutation_log, "t1")
+        _create_agent(mutation_log, "agent-1", "t1", pid=99999)
+        work_state.refresh()
+
+        # Verify starting attempt_count
+        task = work_state.get_task("t1")
+        assert task["attempt_count"] == 0
+
+        reconcile_on_startup(
+            state=work_state,
+            mutation_log=mutation_log,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            project_root=tmp_project,
+            pid_checker=lambda pid: False,
+        )
+
+        # Check mutation log for infrastructure flag
+        entries = mutation_log.read_all()
+        fail_entries = [e for e in entries if e["type"] == "task_failed"]
+        assert len(fail_entries) == 1
+        assert fail_entries[0]["data"]["infrastructure"] is True
+        assert fail_entries[0]["data"]["reconciled"] is True
+
+        # attempt_count should NOT be incremented for infrastructure failures
+        task = work_state.get_task("t1")
+        assert task["status"] == "failed"
+        assert task["attempt_count"] == 0
+
+
+# ===========================================================================
 # Unit tests: assigned task reconciliation
 # ===========================================================================
 
@@ -459,8 +536,9 @@ class TestDeadAgentNoOutput:
 class TestAssignedTaskReconciliation:
     """Test that 'assigned' tasks are also reconciled on restart."""
 
-    def test_assigned_task_dead_agent(self, work_state, mutation_log, audit_log,
-                                       session_logger, tmp_project):
+    def test_assigned_task_dead_agent(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
         """Assigned task with dead agent → marked failed."""
         _create_task(mutation_log, "t1", "Task 1")
         _assign_task(mutation_log, "t1", "agent-1")
@@ -480,8 +558,9 @@ class TestAssignedTaskReconciliation:
         task = work_state.get_task("t1")
         assert task["status"] == "failed"
 
-    def test_assigned_task_alive_agent(self, work_state, mutation_log, audit_log,
-                                        session_logger, tmp_project):
+    def test_assigned_task_alive_agent(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
         """Assigned task with alive agent → left as-is."""
         _create_task(mutation_log, "t1", "Task 1")
         _assign_task(mutation_log, "t1", "agent-1")
@@ -512,21 +591,29 @@ class TestWorktreeCleanup:
 
     def test_clean_nonexistent_worktree(self, work_state, mutation_log, tmp_project):
         """Worktree path that doesn't exist is silently skipped."""
-        _create_agent(mutation_log, "agent-1", "t1", pid=99999,
-                      worktree_path=str(tmp_project / "worktrees" / "nonexistent"))
+        _create_agent(
+            mutation_log,
+            "agent-1",
+            "t1",
+            pid=99999,
+            worktree_path=str(tmp_project / "worktrees" / "nonexistent"),
+        )
         work_state.refresh()
 
         cleaned = clean_stale_worktrees(work_state, tmp_project)
         assert cleaned == 0
 
-    def test_clean_stale_worktree_directory(self, work_state, mutation_log, tmp_project):
+    def test_clean_stale_worktree_directory(
+        self, work_state, mutation_log, tmp_project
+    ):
         """Worktree directory for dead agent is cleaned up."""
         worktree_dir = tmp_project / "worktrees" / "agent-1"
         worktree_dir.mkdir(parents=True)
         (worktree_dir / "some_file.py").write_text("# code")
 
-        _create_agent(mutation_log, "agent-1", "t1", pid=99999,
-                      worktree_path=str(worktree_dir))
+        _create_agent(
+            mutation_log, "agent-1", "t1", pid=99999, worktree_path=str(worktree_dir)
+        )
         work_state.refresh()
 
         # Mock git worktree remove to fail (simulates non-git-tracked directory).
@@ -543,16 +630,22 @@ class TestWorktreeCleanup:
         worktree_dir = tmp_project / "worktrees" / "agent-1"
         worktree_dir.mkdir(parents=True)
 
-        _create_agent(mutation_log, "agent-1", "t1", pid=os.getpid(),
-                      worktree_path=str(worktree_dir))
+        _create_agent(
+            mutation_log,
+            "agent-1",
+            "t1",
+            pid=os.getpid(),
+            worktree_path=str(worktree_dir),
+        )
         work_state.refresh()
 
         cleaned = clean_stale_worktrees(work_state, tmp_project)
         assert cleaned == 0
         assert worktree_dir.exists()
 
-    def test_worktrees_cleaned_during_reconcile(self, work_state, mutation_log,
-                                                  audit_log, session_logger, tmp_project):
+    def test_worktrees_cleaned_during_reconcile(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
         """Reconciliation cleans stale worktrees as part of the full flow."""
         worktree_dir = tmp_project / "worktrees" / "agent-1"
         worktree_dir.mkdir(parents=True)
@@ -560,8 +653,9 @@ class TestWorktreeCleanup:
 
         _create_task(mutation_log, "t1", "Task 1")
         _start_task(mutation_log, "t1")
-        _create_agent(mutation_log, "agent-1", "t1", pid=99999,
-                      worktree_path=str(worktree_dir))
+        _create_agent(
+            mutation_log, "agent-1", "t1", pid=99999, worktree_path=str(worktree_dir)
+        )
         work_state.refresh()
 
         with patch("corc.reconcile.subprocess.run") as mock_run:
@@ -578,16 +672,22 @@ class TestWorktreeCleanup:
         assert summary["worktrees_cleaned"] == 1
         assert not worktree_dir.exists()
 
-    def test_worktrees_cleaned_even_without_stale_tasks(self, work_state, mutation_log,
-                                                         audit_log, session_logger, tmp_project):
+    def test_worktrees_cleaned_even_without_stale_tasks(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
         """Stale worktrees are cleaned even when no running/assigned tasks exist."""
         worktree_dir = tmp_project / "worktrees" / "agent-old"
         worktree_dir.mkdir(parents=True)
         (worktree_dir / "leftover.py").write_text("# old work")
 
         # Agent record exists but no running tasks
-        _create_agent(mutation_log, "agent-old", "t-old", pid=99999,
-                      worktree_path=str(worktree_dir))
+        _create_agent(
+            mutation_log,
+            "agent-old",
+            "t-old",
+            pid=99999,
+            worktree_path=str(worktree_dir),
+        )
         work_state.refresh()
 
         with patch("corc.reconcile.subprocess.run") as mock_run:
@@ -660,8 +760,9 @@ class TestHelpers:
 class TestMultipleRunningTasks:
     """Test reconciliation with multiple tasks in different states."""
 
-    def test_mixed_state_reconciliation(self, work_state, mutation_log, audit_log,
-                                         session_logger, tmp_project):
+    def test_mixed_state_reconciliation(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
         """Multiple tasks: one alive, one dead with output, one dead without."""
         # Task 1: running, agent alive
         _create_task(mutation_log, "t1", "Task 1")
@@ -713,8 +814,9 @@ class TestMultipleRunningTasks:
 class TestAuditLogEvents:
     """Test that reconciliation logs appropriate audit events."""
 
-    def test_audit_events_logged(self, work_state, mutation_log, audit_log,
-                                  session_logger, tmp_project):
+    def test_audit_events_logged(
+        self, work_state, mutation_log, audit_log, session_logger, tmp_project
+    ):
         """All reconciliation steps produce audit log events."""
         _create_task(mutation_log, "t1", "Task 1")
         _start_task(mutation_log, "t1")
@@ -745,8 +847,9 @@ class TestAuditLogEvents:
 class TestDaemonReconciliation:
     """Test that the daemon calls reconciliation on startup."""
 
-    def test_daemon_reconciles_on_start(self, mutation_log, work_state, audit_log,
-                                          session_logger, tmp_project):
+    def test_daemon_reconciles_on_start(
+        self, mutation_log, work_state, audit_log, session_logger, tmp_project
+    ):
         """Daemon calls reconcile_on_startup() and stores the summary."""
         _create_task(mutation_log, "t1", "Task 1")
         _start_task(mutation_log, "t1")
@@ -776,8 +879,9 @@ class TestDaemonReconciliation:
         assert daemon._reconcile_summary["running_found"] == 1
         assert daemon._reconcile_summary["agents_dead_no_output"] == 1
 
-    def test_daemon_reconcile_then_dispatch(self, mutation_log, work_state, audit_log,
-                                              session_logger, tmp_project):
+    def test_daemon_reconcile_then_dispatch(
+        self, mutation_log, work_state, audit_log, session_logger, tmp_project
+    ):
         """After reconciliation, the daemon retries failed tasks and dispatches ready ones."""
         # Task 1 was running but agent is dead → gets failed → retried → completed
         # Task 2 depends on t1 → unblocked after t1 completes via retry
@@ -817,15 +921,18 @@ class TestDaemonReconciliation:
         # t1 (retry) + t2 + t3 = at least 3 dispatches
         assert len(dispatcher.dispatched) >= 3
 
-    def test_daemon_reconcile_processes_output(self, mutation_log, work_state, audit_log,
-                                                 session_logger, tmp_project):
+    def test_daemon_reconcile_processes_output(
+        self, mutation_log, work_state, audit_log, session_logger, tmp_project
+    ):
         """Daemon reconciliation processes dead agent output, unblocking downstream tasks."""
         # t1 was running, agent died but left output → should be completed
         # t2 depends on t1 → should become ready and get dispatched
         _create_task(mutation_log, "t1", "Task 1", done_when="do it")
         _start_task(mutation_log, "t1")
         _create_agent(mutation_log, "agent-1", "t1", pid=99999)
-        _create_task(mutation_log, "t2", "Task 2", done_when="do it too", depends_on=["t1"])
+        _create_task(
+            mutation_log, "t2", "Task 2", done_when="do it too", depends_on=["t1"]
+        )
         work_state.refresh()
 
         # Simulate agent-1 having written output before dying
@@ -870,8 +977,9 @@ class TestKillDaemonMidTask:
     is running, then verifies that restarting the daemon correctly reconciles.
     """
 
-    def test_kill_and_restart_no_output(self, mutation_log, audit_log,
-                                         session_logger, tmp_project):
+    def test_kill_and_restart_no_output(
+        self, mutation_log, audit_log, session_logger, tmp_project
+    ):
         """Kill daemon mid-task (no output) → restart → reconcile marks failed → retry succeeds.
 
         Simulates a daemon crash by manually setting up the state as if the
@@ -918,13 +1026,16 @@ class TestKillDaemonMidTask:
         # After reconciliation + retry, the task should be completed
         state2.refresh()
         task = state2.get_task("t1")
-        assert task["status"] == "completed", f"Expected completed, got {task['status']}"
+        assert task["status"] == "completed", (
+            f"Expected completed, got {task['status']}"
+        )
 
         # Verify the retry dispatched
         assert len(fast_dispatcher.dispatched) >= 1
 
-    def test_kill_and_restart_with_output(self, mutation_log, audit_log,
-                                            session_logger, tmp_project):
+    def test_kill_and_restart_with_output(
+        self, mutation_log, audit_log, session_logger, tmp_project
+    ):
         """Kill daemon after agent finishes but before processing → restart processes output."""
         state1 = WorkState(tmp_project / "data" / "state.db", mutation_log)
 
@@ -967,8 +1078,9 @@ class TestKillDaemonMidTask:
         # No re-dispatch needed — the original output was processed
         assert len(dispatcher.dispatched) == 0
 
-    def test_kill_and_restart_dag_continues(self, mutation_log, audit_log,
-                                              session_logger, tmp_project):
+    def test_kill_and_restart_dag_continues(
+        self, mutation_log, audit_log, session_logger, tmp_project
+    ):
         """After restart and reconciliation, blocked downstream tasks become ready."""
         state1 = WorkState(tmp_project / "data" / "state.db", mutation_log)
 
@@ -1011,8 +1123,9 @@ class TestKillDaemonMidTask:
         assert state2.get_task("t2")["status"] == "completed"  # Dispatched after t1
         assert state2.get_task("t3")["status"] == "completed"  # Dispatched after t2
 
-    def test_kill_and_restart_idempotent(self, mutation_log, audit_log,
-                                           session_logger, tmp_project):
+    def test_kill_and_restart_idempotent(
+        self, mutation_log, audit_log, session_logger, tmp_project
+    ):
         """Multiple restarts converge to the same state (idempotent reconciliation)."""
         _create_task(mutation_log, "t1", "Task 1", done_when="do it")
         _start_task(mutation_log, "t1")
@@ -1048,8 +1161,9 @@ class TestKillDaemonMidTask:
         assert summary2["running_found"] == 0
         assert state2.get_task("t1")["status"] == "completed"
 
-    def test_restart_with_real_subprocess(self, mutation_log, audit_log,
-                                           session_logger, tmp_project):
+    def test_restart_with_real_subprocess(
+        self, mutation_log, audit_log, session_logger, tmp_project
+    ):
         """Kill a real subprocess mid-flight and verify reconciliation handles it.
 
         Spawns a real 'sleep' process to simulate an agent, kills it, and

@@ -143,6 +143,7 @@ def reconcile_on_startup(
                         "attempt_count": attempt,
                         "exit_code": -1,
                         "reconciled": True,
+                        "infrastructure": True,
                     },
                     reason="Reconciliation: agent process died without producing output",
                     task_id=task_id,
