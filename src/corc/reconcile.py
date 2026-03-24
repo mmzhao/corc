@@ -3,9 +3,11 @@
 On startup, the daemon must:
 1. Rebuild SQLite from mutation log (ensure consistency)
 2. Check all tasks marked 'running' or 'assigned' for PID liveness
-3. Process output for dead agents that produced results
-4. Mark dead agents with no output as failed (retry policy applies)
-5. Clean up stale git worktrees
+3. Scan for running claude processes whose command line contains known task IDs
+4. Return alive agent info so the daemon can re-attach monitoring
+5. Process output for dead agents that produced results
+6. Mark dead agents with no output as failed (retry policy applies)
+7. Clean up stale git worktrees
 """
 
 import os
@@ -57,6 +59,7 @@ def reconcile_on_startup(
         "agents_dead_with_output": 0,
         "agents_dead_no_output": 0,
         "worktrees_cleaned": 0,
+        "alive_agents": [],  # Info for daemon to re-attach monitoring
     }
 
     # 1. Rebuild SQLite from mutation log
@@ -74,17 +77,41 @@ def reconcile_on_startup(
     if not stale_tasks:
         # 3. Still clean worktrees even if no stale tasks
         summary["worktrees_cleaned"] = clean_stale_worktrees(state, project_root)
-        audit_log.log("reconcile_complete", **summary)
+        _log_reconcile_complete(audit_log, summary)
         return summary
+
+    # Scan for running claude processes as fallback for missing PIDs.
+    # If a task has no PID recorded in its agent record (e.g. old dispatch
+    # without PID capture), we can still find the process by scanning ps
+    # for claude -p commands whose command line contains the task ID.
+    stale_task_ids = {task["id"] for task in stale_tasks}
+    scanned_pids = scan_claude_processes(stale_task_ids)
 
     # 3. For each stale task, check agent liveness
     for task in stale_tasks:
         task_id = task["id"]
         pid = _get_agent_pid(state, task_id)
 
+        # Fallback: check process scan results if no PID in agent record
+        if not pid and task_id in scanned_pids:
+            pid = scanned_pids[task_id]
+            audit_log.log("reconcile_pid_from_scan", task_id=task_id, pid=pid)
+
         if pid and pid_checker(pid):
-            # Agent still alive — leave it running
+            # Agent still alive — collect info for daemon re-attachment
             summary["agents_alive"] += 1
+            agents = state.get_agents_for_task(task_id)
+            agent = agents[0] if agents else {}
+            attempt = session_logger.get_latest_attempt(task_id) or 1
+            summary["alive_agents"].append(
+                {
+                    "task": task,
+                    "pid": pid,
+                    "attempt": attempt,
+                    "worktree_path": agent.get("worktree_path"),
+                    "agent_id": agent.get("id"),
+                }
+            )
             audit_log.log("reconcile_agent_alive", task_id=task_id, pid=pid)
         else:
             # Agent is dead — check for output in session logs
@@ -128,8 +155,63 @@ def reconcile_on_startup(
     # Refresh state after all mutations
     state.refresh()
 
-    audit_log.log("reconcile_complete", **summary)
+    _log_reconcile_complete(audit_log, summary)
     return summary
+
+
+def _log_reconcile_complete(audit_log: AuditLog, summary: dict):
+    """Log reconcile_complete without the alive_agents list (not serializable)."""
+    log_summary = {k: v for k, v in summary.items() if k != "alive_agents"}
+    audit_log.log("reconcile_complete", **log_summary)
+
+
+def scan_claude_processes(task_ids: set[str]) -> dict[str, int]:
+    """Scan running processes for claude -p commands matching known task IDs.
+
+    Checks ``ps`` output for processes containing 'claude' and '-p' whose
+    command line also contains a recognized task_id.  Used as a fallback
+    when the agent's PID wasn't recorded in the mutation log.
+
+    Returns mapping of task_id → PID for each match found.
+    """
+    if not task_ids:
+        return {}
+
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid,args"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return {}
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return {}
+
+    found: dict[str, int] = {}
+    for line in result.stdout.splitlines()[1:]:  # Skip header
+        line = line.strip()
+        if not line:
+            continue
+        if "claude" not in line.lower() or "-p" not in line:
+            continue
+        # Parse PID from first field
+        parts = line.split(None, 1)
+        if len(parts) < 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        # Check if any task_id appears in the command line
+        cmd_line = parts[1]
+        for task_id in task_ids:
+            if task_id in cmd_line:
+                found[task_id] = pid
+                break
+
+    return found
 
 
 def _default_pid_checker(pid: int) -> bool:
@@ -147,7 +229,9 @@ def _get_agent_pid(state: WorkState, task_id: str) -> int | None:
     return None
 
 
-def _get_last_agent_output(session_logger: SessionLogger, task_id: str) -> AgentResult | None:
+def _get_last_agent_output(
+    session_logger: SessionLogger, task_id: str
+) -> AgentResult | None:
     """Check if there's recorded output from the last agent session.
 
     Returns an AgentResult if output was found in session logs, None otherwise.
@@ -255,6 +339,7 @@ def clean_stale_worktrees(state: WorkState, project_root: Path) -> int:
 def _remove_dir(path: Path):
     """Remove a directory tree, ignoring errors."""
     import shutil
+
     try:
         shutil.rmtree(str(path), ignore_errors=True)
     except Exception:

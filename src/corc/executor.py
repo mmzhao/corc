@@ -11,6 +11,7 @@ ensure branches start from the latest state. After agent completion, the
 worktree branch is pushed and a PR is created via `gh pr create`.
 """
 
+import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -91,6 +92,8 @@ class Executor:
         self.defer_merge = defer_merge
         self._pool = ThreadPoolExecutor(max_workers=max_workers)
         self._futures: dict[Future, tuple[dict, int, Path | None, str | None]] = {}
+        # Track which futures are reattached (skip session logging for these)
+        self._reattached_futures: set[Future] = set()
         # Worktrees saved for conflict retry: task_id → worktree_path
         self._conflict_worktrees: dict[str, Path] = {}
 
@@ -201,6 +204,7 @@ class Executor:
             )
 
         prompt = (
+            f"Task ID: {task['id']}\n\n"
             f"Complete the following task.\n\n"
             f"Done when: {task['done_when']}\n\n"
             f"Work in the current directory. Write tests alongside implementation. "
@@ -226,6 +230,11 @@ class Executor:
         # Build streaming event callback for real-time logging
         event_callback = self._make_event_callback(task["id"], attempt)
 
+        # Build PID callback to record the agent's PID in the mutation log.
+        # This is critical for daemon restart recovery — the PID allows
+        # reconciliation to check if the agent is still alive and re-attach.
+        pid_callback = self._make_pid_callback(agent_id, task["id"])
+
         # Determine working directory
         cwd = str(worktree_path) if worktree_path else None
 
@@ -235,6 +244,7 @@ class Executor:
             prompt,
             system_prompt,
             constraints,
+            pid_callback=pid_callback,
             event_callback=event_callback,
             cwd=cwd,
         )
@@ -281,6 +291,82 @@ class Executor:
                     )
 
         return callback
+
+    def _make_pid_callback(self, agent_id: str, task_id: str):
+        """Create a callback that records the agent's PID in the mutation log.
+
+        Called by the dispatcher once the subprocess starts.  Persists the PID
+        so that ``reconcile_on_startup`` can later check process liveness and
+        re-attach monitoring after a daemon restart.
+        """
+
+        def callback(pid: int):
+            self.mutation_log.append(
+                "agent_updated",
+                {"agent_id": agent_id, "pid": pid},
+                reason="Agent process started, recording PID for recovery",
+                task_id=task_id,
+            )
+
+        return callback
+
+    # ------------------------------------------------------------------
+    # Re-attachment: recover monitoring after daemon restart
+    # ------------------------------------------------------------------
+
+    def reattach(
+        self,
+        task: dict,
+        pid: int,
+        attempt: int,
+        worktree_path: Path | None,
+        agent_id: str | None,
+    ):
+        """Re-attach monitoring for a running agent found during reconciliation.
+
+        Submits a PID-watching function to the thread pool.  When the agent
+        process exits, reads session logs for captured output and produces a
+        ``CompletedTask`` through the normal ``poll_completed`` flow.
+
+        This prevents duplicate dispatches: the task stays in 'running' state
+        (so the scheduler ignores it) and is tracked in ``in_flight_task_ids``
+        (so external reconciliation skips it).
+        """
+        future = self._pool.submit(self._wait_for_pid, pid, task["id"])
+        self._futures[future] = (task, attempt, worktree_path, agent_id)
+        self._reattached_futures.add(future)
+        self.audit_log.log(
+            "agent_reattached",
+            task_id=task["id"],
+            pid=pid,
+            attempt=attempt,
+            agent_id=agent_id,
+        )
+
+    def _wait_for_pid(self, pid: int, task_id: str) -> AgentResult:
+        """Poll until *pid* exits, then return the result from session logs.
+
+        Used by ``reattach`` to monitor an agent process that was already
+        running when the daemon restarted.  The session log may contain
+        output captured before the daemon died; if so we return it.  If no
+        output was captured, we return a failure result so the retry policy
+        can kick in.
+        """
+        from corc.reconcile import _get_last_agent_output, is_pid_alive
+
+        while is_pid_alive(pid):
+            time.sleep(1.0)
+
+        # Process exited — check session logs for captured output
+        output = _get_last_agent_output(self.session_logger, task_id)
+        if output is not None:
+            return output
+
+        return AgentResult(
+            output="Agent process exited without captured output (daemon restarted mid-flight)",
+            exit_code=-1,
+            duration_s=0,
+        )
 
     def _create_pr_from_worktree(
         self, task: dict, worktree_path: Path
@@ -351,6 +437,10 @@ class Executor:
 
         for future in done_futures:
             task, attempt, worktree_path, agent_id = self._futures.pop(future)
+            is_reattached = future in self._reattached_futures
+            if is_reattached:
+                self._reattached_futures.discard(future)
+
             try:
                 result = future.result()
             except Exception as e:
@@ -360,16 +450,19 @@ class Executor:
                     duration_s=0,
                 )
 
-            # Log the output
-            self.session_logger.log_output(
-                task["id"],
-                attempt,
-                result.output,
-                result.exit_code,
-                result.duration_s,
-            )
+            if not is_reattached:
+                # Log the output (skip for reattached — session already has it)
+                self.session_logger.log_output(
+                    task["id"],
+                    attempt,
+                    result.output,
+                    result.exit_code,
+                    result.duration_s,
+                )
             self.audit_log.log(
-                "task_dispatch_complete",
+                "reattached_task_complete"
+                if is_reattached
+                else "task_dispatch_complete",
                 task_id=task["id"],
                 exit_code=result.exit_code,
                 duration_s=result.duration_s,
