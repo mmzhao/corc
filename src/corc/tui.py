@@ -671,6 +671,7 @@ def build_active_plan_panel(
     scroll_offset: int = 0,
     max_lines: int = 40,
     focused_panel: str | None = None,
+    failure_history: dict[str, list[dict]] | None = None,
 ) -> Panel:
     """Build the active plan panel showing only current/relevant tasks.
 
@@ -731,6 +732,19 @@ def build_active_plan_panel(
                     line.append("]", style="dim yellow")
 
             lines.append(line)
+
+            # Show failure history bullet points for retry tasks
+            if failure_history and t.get("id") in failure_history:
+                for f in failure_history[t["id"]]:
+                    fline = Text()
+                    reason = f.get("reason", "Unknown")
+                    attempt = f.get("attempt", "?")
+                    if f.get("merge_conflict"):
+                        reason = "Merge conflict: " + reason
+                    fline.append(f"       ↳ attempt {attempt}: ", style="dim red")
+                    fline.append(reason, style="dim red")
+                    lines.append(fline)
+
         lines.append(Text(""))
 
     # ── Ready tasks (dispatchable) ─────────────────────────────────
@@ -813,6 +827,19 @@ def build_active_plan_panel(
                 if attempt_str:
                     line.append(f"  🔁 {attempt_str}", style=style)
             lines.append(line)
+
+            # Show failure history for failed/escalated tasks
+            if failure_history and t.get("id") in failure_history:
+                for f in failure_history[t["id"]]:
+                    fline = Text()
+                    reason = f.get("reason", "Unknown")
+                    attempt = f.get("attempt", "?")
+                    if f.get("merge_conflict"):
+                        reason = "Merge conflict: " + reason
+                    fline.append(f"       ↳ attempt {attempt}: ", style="dim red")
+                    fline.append(reason, style="dim red")
+                    lines.append(fline)
+
         lines.append(Text(""))
 
     # ── Recently completed (dimmed) ────────────────────────────────
@@ -1084,6 +1111,7 @@ def build_active_dashboard(
     stream_events_by_task: dict[str, list[dict]] | None = None,
     scroll_offset: int = 0,
     daemon_status: dict | None = None,
+    failure_history: dict[str, list[dict]] | None = None,
     focused_panel: str | None = None,
     scroll_offsets: dict[str, int] | None = None,
 ) -> Layout:
@@ -1159,6 +1187,7 @@ def build_active_dashboard(
             other_active,
             scroll_offset=active_plan_scroll,
             focused_panel=focused_panel,
+            failure_history=failure_history,
         )
     )
     main["events"].update(
@@ -1455,6 +1484,15 @@ def run_active_dashboard(
                 all_active = query_api.get_active_plan_tasks()
                 other = [t for t in all_active if t["id"] not in categorized_ids]
 
+                # Fetch failure history for tasks on retry attempts
+                failure_history: dict[str, list[dict]] = {}
+                for t in running + other:
+                    ac = t.get("attempt_count", 0)
+                    if isinstance(ac, int) and ac > 0:
+                        failure_history[t["id"]] = query_api.get_task_failure_history(
+                            t["id"]
+                        )
+
                 # Fetch daemon status (live on each cycle)
                 daemon_status = None
                 if corc_dir is not None:
@@ -1474,6 +1512,7 @@ def run_active_dashboard(
                     max_events,
                     stream_events_by_task=stream_events_by_task,
                     daemon_status=daemon_status,
+                    failure_history=failure_history,
                     focused_panel=scroll_state.get("focused_panel", "streaming"),
                     scroll_offsets={
                         "streaming": scroll_state.get("streaming", 0),
