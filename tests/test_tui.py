@@ -4134,3 +4134,177 @@ class TestEventPanelScroll:
         panel = build_event_panel(events, scroll_offset=5, max_lines=10)
         text = _render_to_plain(panel)
         assert "▼" in text or "more below" in text
+
+
+# ── Agent count denominator regression tests ─────────────────────────────
+
+
+class TestAgentCountDenominator:
+    """Regression: TUI header showed N/1 instead of N/M where M is parallel config.
+
+    Root cause: get_daemon_status() defaulted parallel=1 instead of reading
+    the daemon.parallel setting from config.  When callers omitted the
+    parallel argument (or the value was lost in the call chain), the
+    denominator always showed 1.
+
+    These tests reproduce the original bug (denominator=1 when parallel=5)
+    and verify the fix reads from config.
+    """
+
+    def test_denominator_defaults_to_config_parallel(self, tmp_path):
+        """get_daemon_status reads daemon.parallel from config when parallel=None.
+
+        Regression: before the fix, calling get_daemon_status(corc_dir)
+        without an explicit parallel value always produced slots_total=1.
+        Now it should read from config (e.g. 5 when daemon.parallel=5).
+        """
+        from corc.tui import get_daemon_status
+
+        corc_dir = tmp_path / ".corc"
+        corc_dir.mkdir()
+        pid_file = corc_dir / "daemon.pid"
+        pid_file.write_text(str(os.getpid()))
+
+        # Write config with parallel=5
+        config_yaml = tmp_path / ".corc" / "config.yaml"
+        config_yaml.write_text("daemon:\n  parallel: 5\n")
+
+        # Patch load_config to load from our tmp config
+        from corc.config import CorcConfig
+
+        with patch(
+            "corc.config.load_config",
+            return_value=CorcConfig({"daemon": {"parallel": 5}}),
+        ):
+            result = get_daemon_status(corc_dir)
+
+        # The denominator should be 5, NOT the old default of 1
+        assert result["slots_total"] == 5, (
+            f"Expected slots_total=5 from config, got {result['slots_total']}. "
+            "Denominator should read daemon.parallel from config, not default to 1."
+        )
+
+    def test_denominator_was_1_before_fix(self, tmp_path):
+        """Reproduces the original bug: parallel defaults to 1 when not passed.
+
+        Before the fix, get_daemon_status(corc_dir) produced slots_total=1
+        even though daemon.parallel was configured as 5.  This test confirms
+        the fix: slots_total should be 5 (from config), not 1.
+        """
+        from corc.tui import get_daemon_status
+
+        corc_dir = tmp_path / ".corc"
+        corc_dir.mkdir()
+        # No PID file — stopped state, but slots_total should still reflect config
+        from corc.config import CorcConfig
+
+        with patch(
+            "corc.config.load_config",
+            return_value=CorcConfig({"daemon": {"parallel": 5}}),
+        ):
+            result = get_daemon_status(corc_dir)
+
+        # Even in stopped state, denominator should reflect config
+        assert result["slots_total"] == 5, (
+            f"Bug regression: slots_total={result['slots_total']}, expected 5. "
+            "The denominator should read from daemon config, not default to 1."
+        )
+
+    def test_explicit_parallel_overrides_config(self, tmp_path):
+        """Explicit parallel= parameter takes precedence over config."""
+        from corc.tui import get_daemon_status
+
+        corc_dir = tmp_path / ".corc"
+        corc_dir.mkdir()
+        pid_file = corc_dir / "daemon.pid"
+        pid_file.write_text(str(os.getpid()))
+
+        # Even if config says 5, explicit parallel=3 should win
+        result = get_daemon_status(corc_dir, parallel=3)
+        assert result["slots_total"] == 3
+
+    def test_header_shows_correct_denominator(self):
+        """build_daemon_status_header renders N/M with M from slots_total."""
+        from corc.tui import build_daemon_status_header
+
+        daemon_status = {
+            "status": "running",
+            "pid": 12345,
+            "uptime": "5m 30s",
+            "reason": None,
+            "slots_used": 5,
+            "slots_total": 5,
+        }
+        header = build_daemon_status_header(daemon_status)
+        text = header.plain
+        assert "5/5" in text, (
+            f"Expected '5/5' in header, got: {text!r}. "
+            "Denominator should match slots_total from config."
+        )
+        # Must NOT show 5/1
+        assert "5/1" not in text, (
+            f"Found '5/1' in header — denominator bug! Got: {text!r}"
+        )
+
+    def test_header_denominator_not_hardcoded_1(self):
+        """Verify the header does not show /1 when parallel config is higher.
+
+        This is the exact scenario from the bug report: 5 running agents
+        but denominator shows 1 instead of the configured parallel limit.
+        """
+        from corc.tui import build_daemon_status_header
+
+        # Simulate the bug scenario: 5 running, should show 5/5
+        daemon_status = {
+            "status": "running",
+            "pid": 12345,
+            "uptime": "10m 0s",
+            "reason": None,
+            "slots_used": 5,
+            "slots_total": 5,  # This was 1 before the fix
+        }
+        header = build_daemon_status_header(daemon_status)
+        text = header.plain
+        assert "5/5 agents active" in text, (
+            f"Expected '5/5 agents active', got: {text!r}"
+        )
+
+    def test_dashboard_end_to_end_denominator(self, tmp_path):
+        """End-to-end: dashboard header shows config-based denominator."""
+        from corc.tui import get_daemon_status, build_active_dashboard
+
+        corc_dir = tmp_path / ".corc"
+        corc_dir.mkdir()
+        pid_file = corc_dir / "daemon.pid"
+        pid_file.write_text(str(os.getpid()))
+
+        # Mock work state with 3 running tasks
+        ws = MagicMock()
+        ws.list_tasks.side_effect = lambda status=None: {
+            "running": [{"id": "r1"}, {"id": "r2"}, {"id": "r3"}],
+            "assigned": [],
+        }.get(status, [])
+
+        from corc.config import CorcConfig
+
+        with patch(
+            "corc.config.load_config",
+            return_value=CorcConfig({"daemon": {"parallel": 5}}),
+        ):
+            daemon_status = get_daemon_status(corc_dir, work_state=ws)
+
+        assert daemon_status["slots_used"] == 3
+        assert daemon_status["slots_total"] == 5
+
+        # Build dashboard with this daemon status
+        layout = build_active_dashboard(
+            running_tasks=[],
+            ready_tasks=[],
+            blocked_tasks=[],
+            recently_completed=[],
+            other_active=[],
+            events=[],
+            daemon_status=daemon_status,
+        )
+        text = _render_to_plain(layout)
+        assert "3/5" in text, f"Expected '3/5' in dashboard, got: {text!r}"
