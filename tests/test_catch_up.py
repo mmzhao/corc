@@ -61,7 +61,11 @@ def _make_mutations():
             "seq": 1,
             "ts": "2026-03-20T10:00:00Z",
             "type": "task_created",
-            "data": {"id": "task-a", "name": "implement-fts5-search", "done_when": "FTS5 works"},
+            "data": {
+                "id": "task-a",
+                "name": "implement-fts5-search",
+                "done_when": "FTS5 works",
+            },
             "reason": "Plan created",
             "task_id": "task-a",
         },
@@ -69,7 +73,11 @@ def _make_mutations():
             "seq": 2,
             "ts": "2026-03-20T10:00:01Z",
             "type": "task_created",
-            "data": {"id": "task-b", "name": "implement-mutation-log", "done_when": "Mutations work"},
+            "data": {
+                "id": "task-b",
+                "name": "implement-mutation-log",
+                "done_when": "Mutations work",
+            },
             "reason": "Plan created",
             "task_id": "task-b",
         },
@@ -77,7 +85,11 @@ def _make_mutations():
             "seq": 3,
             "ts": "2026-03-20T10:00:02Z",
             "type": "task_created",
-            "data": {"id": "task-c", "name": "implement-hybrid-search", "done_when": "Hybrid search works"},
+            "data": {
+                "id": "task-c",
+                "name": "implement-hybrid-search",
+                "done_when": "Hybrid search works",
+            },
             "reason": "Plan created",
             "task_id": "task-c",
         },
@@ -116,7 +128,9 @@ def _make_mutations():
             "ts": "2026-03-21T11:00:00Z",
             "type": "task_completed",
             "data": {
-                "findings": [{"content": "flock-based append is sufficient for single-machine"}],
+                "findings": [
+                    {"content": "flock-based append is sufficient for single-machine"}
+                ],
             },
             "reason": "Agent completed task",
             "task_id": "task-b",
@@ -158,7 +172,7 @@ class TestGenerateCatchUpSummary:
 
         summary = generate_catch_up_summary(task, mutations, plan_tasks)
         assert summary is not None
-        assert "CATCH-UP SUMMARY" in summary
+        assert "<catch-up>" in summary
         assert '"implement-fts5-search" was completed' in summary
         assert '"implement-mutation-log" was completed' in summary
 
@@ -239,7 +253,9 @@ class TestGenerateCatchUpSummary:
             "done_when": "done",
             "depends_on": ["unknown-id"],
         }
-        summary = generate_catch_up_summary(task, [], [{"id": "x", "status": "pending"}])
+        summary = generate_catch_up_summary(
+            task, [], [{"id": "x", "status": "pending"}]
+        )
         assert summary is not None
         assert '"unknown-id"' in summary
 
@@ -250,8 +266,8 @@ class TestGenerateCatchUpSummary:
         plan_tasks = _make_plan_tasks()
 
         summary = generate_catch_up_summary(task, mutations, plan_tasks)
-        assert summary.startswith("=== CATCH-UP SUMMARY ===")
-        assert summary.endswith("=== END CATCH-UP ===")
+        assert summary.startswith("<catch-up>")
+        assert summary.endswith("</catch-up>")
         assert "Since your last context:" in summary
 
     def test_no_deps_but_has_plan_tasks(self):
@@ -310,14 +326,14 @@ class TestCatchUpInAssembledContext:
         )
 
         # All sections present
-        assert "=== TASK DEFINITION ===" in ctx
-        assert "=== CATCH-UP SUMMARY ===" in ctx
-        assert "=== CONTEXT: doc.md ===" in ctx
+        assert "<definition>" in ctx
+        assert "<catch-up>" in ctx
+        assert '<file path="doc.md">' in ctx
 
         # Verify ordering: task def < catch-up < context bundle
-        task_end = ctx.index("=== END TASK DEFINITION ===")
-        catchup_start = ctx.index("=== CATCH-UP SUMMARY ===")
-        bundle_start = ctx.index("=== CONTEXT: doc.md ===")
+        task_end = ctx.index("</definition>")
+        catchup_start = ctx.index("<catch-up>")
+        bundle_start = ctx.index('<file path="doc.md">')
         assert task_end < catchup_start < bundle_start
 
     def test_catch_up_before_blacklist(self, tmp_path):
@@ -334,15 +350,15 @@ class TestCatchUpInAssembledContext:
             task, tmp_path, mutations=mutations, plan_tasks=plan_tasks
         )
 
-        catchup_end = ctx.index("=== END CATCH-UP ===")
-        blacklist_start = ctx.index("=== AGENT BLACKLIST ===")
+        catchup_end = ctx.index("</catch-up>")
+        blacklist_start = ctx.index("<blacklist>")
         assert catchup_end < blacklist_start
 
     def test_no_catch_up_without_mutations(self, tmp_path):
         """No catch-up section when mutations/plan_tasks not provided."""
         task = _make_target_task()
         ctx = assemble_context(task, tmp_path)
-        assert "CATCH-UP SUMMARY" not in ctx
+        assert "<catch-up>" not in ctx
 
     def test_no_catch_up_when_nothing_to_report(self, tmp_path):
         """No catch-up section when task has no deps and no plan tasks."""
@@ -353,7 +369,7 @@ class TestCatchUpInAssembledContext:
             "context_bundle": [],
         }
         ctx = assemble_context(task, tmp_path, mutations=[], plan_tasks=[])
-        assert "CATCH-UP SUMMARY" not in ctx
+        assert "<catch-up>" not in ctx
 
     def test_catch_up_contains_completed_deps(self, tmp_path):
         """Assembled context includes completed dependency info."""
@@ -402,9 +418,9 @@ class TestCatchUpInAssembledContext:
             "context_bundle": ["doc.md"],
         }
         ctx = assemble_context(task, tmp_path)
-        assert "TASK DEFINITION" in ctx
+        assert "<definition>" in ctx
         assert "Content." in ctx
-        assert "CATCH-UP" not in ctx
+        assert "<catch-up>" not in ctx
 
     def test_full_context_ordering(self, tmp_path):
         """Full integration: task def → catch-up → context → blacklist."""
@@ -424,14 +440,14 @@ class TestCatchUpInAssembledContext:
 
         # Verify all sections present and in order
         positions = [
-            ctx.index("=== TASK DEFINITION ==="),
-            ctx.index("=== END TASK DEFINITION ==="),
-            ctx.index("=== CATCH-UP SUMMARY ==="),
-            ctx.index("=== END CATCH-UP ==="),
-            ctx.index("=== CONTEXT: ref.md ==="),
-            ctx.index("=== END CONTEXT ==="),
-            ctx.index("=== AGENT BLACKLIST ==="),
-            ctx.index("=== END AGENT BLACKLIST ==="),
+            ctx.index("<definition>"),
+            ctx.index("</definition>"),
+            ctx.index("<catch-up>"),
+            ctx.index("</catch-up>"),
+            ctx.index('<file path="ref.md">'),
+            ctx.index("</file>"),
+            ctx.index("<blacklist>"),
+            ctx.index("</blacklist>"),
         ]
         assert positions == sorted(positions), "Sections are not in expected order"
 

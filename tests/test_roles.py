@@ -117,7 +117,9 @@ class TestValidateRoleData:
     def test_missing_multiple_fields(self):
         result = validate_role_data({"name": "x"})
         assert not result.valid
-        assert len(result.errors) >= 4  # missing description, system_prompt, allowed_tools, etc.
+        assert (
+            len(result.errors) >= 4
+        )  # missing description, system_prompt, allowed_tools, etc.
 
     def test_invalid_knowledge_write_access(self):
         data = _minimal_role(knowledge_write_access="admin")
@@ -192,7 +194,10 @@ class TestRoleComposition:
             system_prompt="Parent prompt.",
             knowledge_write_access="findings_only",
             allowed_tools=["Read", "Grep"],
-            cost_limits={"max_budget_per_invocation_usd": 2.0, "max_turns_per_invocation": 30},
+            cost_limits={
+                "max_budget_per_invocation_usd": 2.0,
+                "max_turns_per_invocation": 30,
+            },
         )
         child_data = {
             "name": "child",
@@ -217,7 +222,10 @@ class TestRoleComposition:
             system_prompt="Parent prompt.",
             knowledge_write_access="findings_only",
             allowed_tools=["Read", "Grep"],
-            cost_limits={"max_budget_per_invocation_usd": 2.0, "max_turns_per_invocation": 30},
+            cost_limits={
+                "max_budget_per_invocation_usd": 2.0,
+                "max_turns_per_invocation": 30,
+            },
         )
         child_data = {
             "name": "child",
@@ -236,7 +244,10 @@ class TestRoleComposition:
             system_prompt="Base instructions.",
             knowledge_write_access="findings_only",
             allowed_tools=["Read"],
-            cost_limits={"max_budget_per_invocation_usd": 2.0, "max_turns_per_invocation": 30},
+            cost_limits={
+                "max_budget_per_invocation_usd": 2.0,
+                "max_turns_per_invocation": 30,
+            },
         )
         child_data = {
             "name": "child",
@@ -266,7 +277,13 @@ class TestRoleLoader:
     def test_load_builtin_roles(self):
         """All 5 built-in roles should load successfully."""
         loader = RoleLoader(None)  # no project dir, built-in only
-        for name in ("scout", "implementer", "reviewer", "adversarial-reviewer", "planner"):
+        for name in (
+            "scout",
+            "implementer",
+            "reviewer",
+            "adversarial-reviewer",
+            "planner",
+        ):
             role = loader.load(name)
             assert role.name == name
             assert len(role.system_prompt) > 0
@@ -295,7 +312,10 @@ class TestRoleLoader:
             "system_prompt": "+Additional instructions.",
             "allowed_tools": ["Read", "Grep", "Edit", "Write"],
             "knowledge_write_access": "findings_only",
-            "cost_limits": {"max_budget_per_invocation_usd": 5.0, "max_turns_per_invocation": 50},
+            "cost_limits": {
+                "max_budget_per_invocation_usd": 5.0,
+                "max_turns_per_invocation": 50,
+            },
         }
         _write_role(roles_dir / "base.yaml", parent)
         _write_role(roles_dir / "extended.yaml", child)
@@ -378,7 +398,10 @@ class TestRoleLoader:
             "system_prompt": "+More.",
             "allowed_tools": ["Read"],
             "knowledge_write_access": "findings_only",
-            "cost_limits": {"max_budget_per_invocation_usd": 1.0, "max_turns_per_invocation": 10},
+            "cost_limits": {
+                "max_budget_per_invocation_usd": 1.0,
+                "max_turns_per_invocation": 10,
+            },
         }
         _write_role(roles_dir / "base-valid.yaml", parent)
         _write_role(roles_dir / "child-valid.yaml", child)
@@ -410,7 +433,10 @@ class TestConstraintsFromRole:
             system_prompt="Test.",
             knowledge_write_access="findings_only",
             allowed_tools=["Read", "Grep"],
-            cost_limits={"max_budget_per_invocation_usd": 5.0, "max_turns_per_invocation": 25},
+            cost_limits={
+                "max_budget_per_invocation_usd": 5.0,
+                "max_turns_per_invocation": 25,
+            },
         )
         c = constraints_from_role(role)
         assert isinstance(c, Constraints)
@@ -462,15 +488,18 @@ class TestSystemPromptGeneration:
             system_prompt="You write code.",
             knowledge_write_access="findings_only",
             allowed_tools=["Read"],
-            cost_limits={"max_budget_per_invocation_usd": 3.0, "max_turns_per_invocation": 50},
+            cost_limits={
+                "max_budget_per_invocation_usd": 3.0,
+                "max_turns_per_invocation": 50,
+            },
         )
         task = {"name": "build-feature", "done_when": "tests pass"}
         context = "File: main.py\n..."
 
         prompt = get_system_prompt_for_role(role, task, context)
-        assert "ROLE: implementer" in prompt
+        assert '<role name="implementer">' in prompt
         assert "You write code." in prompt
-        assert "TASK: build-feature" in prompt
+        assert '<task name="build-feature">' in prompt
         assert "File: main.py" in prompt
 
 
@@ -482,7 +511,13 @@ class TestSystemPromptGeneration:
 class TestBuiltinRoles:
     """Verify all 5 built-in roles are well-formed and meet spec requirements."""
 
-    BUILTIN_NAMES = ["scout", "implementer", "reviewer", "adversarial-reviewer", "planner"]
+    BUILTIN_NAMES = [
+        "scout",
+        "implementer",
+        "reviewer",
+        "adversarial-reviewer",
+        "planner",
+    ]
 
     def test_all_builtin_roles_exist(self):
         loader = RoleLoader(None)
@@ -502,8 +537,9 @@ class TestBuiltinRoles:
         loader = RoleLoader(None)
         for name in self.BUILTIN_NAMES:
             role = loader.load(name)
-            assert role.knowledge_write_access == "findings_only", \
+            assert role.knowledge_write_access == "findings_only", (
                 f"Role '{name}' has {role.knowledge_write_access}, expected findings_only"
+            )
 
     def test_scout_is_readonly(self):
         loader = RoleLoader(None)
@@ -545,24 +581,42 @@ class TestBuiltinRoles:
 class TestRoleConfigProperties:
     def test_max_budget_usd(self):
         rc = RoleConfig(
-            name="t", description="t", extends=None, system_prompt="t",
-            knowledge_write_access="none", allowed_tools=[],
-            cost_limits={"max_budget_per_invocation_usd": 7.5, "max_turns_per_invocation": 10},
+            name="t",
+            description="t",
+            extends=None,
+            system_prompt="t",
+            knowledge_write_access="none",
+            allowed_tools=[],
+            cost_limits={
+                "max_budget_per_invocation_usd": 7.5,
+                "max_turns_per_invocation": 10,
+            },
         )
         assert rc.max_budget_usd == 7.5
 
     def test_max_turns(self):
         rc = RoleConfig(
-            name="t", description="t", extends=None, system_prompt="t",
-            knowledge_write_access="none", allowed_tools=[],
-            cost_limits={"max_budget_per_invocation_usd": 1.0, "max_turns_per_invocation": 42},
+            name="t",
+            description="t",
+            extends=None,
+            system_prompt="t",
+            knowledge_write_access="none",
+            allowed_tools=[],
+            cost_limits={
+                "max_budget_per_invocation_usd": 1.0,
+                "max_turns_per_invocation": 42,
+            },
         )
         assert rc.max_turns == 42
 
     def test_defaults_for_missing_cost_limits(self):
         rc = RoleConfig(
-            name="t", description="t", extends=None, system_prompt="t",
-            knowledge_write_access="none", allowed_tools=[],
+            name="t",
+            description="t",
+            extends=None,
+            system_prompt="t",
+            knowledge_write_access="none",
+            allowed_tools=[],
             cost_limits={},
         )
         assert rc.max_budget_usd == 3.0  # default

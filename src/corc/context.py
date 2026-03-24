@@ -46,7 +46,7 @@ def assemble_context(
     """
     parts = []
 
-    parts.append("=== TASK DEFINITION ===")
+    parts.append("<definition>")
     parts.append(f"Task: {task['name']}")
     if task.get("description"):
         parts.append(f"Description: {task['description']}")
@@ -62,7 +62,7 @@ def assemble_context(
             else:
                 parts.append(f"  ☐ {item}")
 
-    parts.append("=== END TASK DEFINITION ===\n")
+    parts.append("</definition>\n")
 
     # Inject catch-up summary before context bundle
     if mutations is not None and plan_tasks is not None:
@@ -80,9 +80,9 @@ def assemble_context(
 
         file_path = project_root / ref_str
         if not file_path.exists():
-            parts.append(f"=== CONTEXT: {ref} ===")
+            parts.append(f'<file path="{ref}">')
             parts.append(f"[WARNING: File not found: {file_path}]")
-            parts.append(f"=== END CONTEXT ===\n")
+            parts.append("</file>\n")
             continue
 
         content = file_path.read_text()
@@ -90,16 +90,16 @@ def assemble_context(
         if section:
             content = _extract_section(content, section)
 
-        parts.append(f"=== CONTEXT: {ref} ===")
+        parts.append(f'<file path="{ref}">')
         parts.append(content.strip())
-        parts.append(f"=== END CONTEXT ===\n")
+        parts.append("</file>\n")
 
     # Always inject the blacklist at the end of assembled context
     blacklist = _load_blacklist(project_root)
     if blacklist:
-        parts.append("=== AGENT BLACKLIST ===")
+        parts.append("<blacklist>")
         parts.append(blacklist.strip())
-        parts.append("=== END AGENT BLACKLIST ===\n")
+        parts.append("</blacklist>\n")
 
     return "\n".join(parts)
 
@@ -170,7 +170,7 @@ def generate_catch_up_summary(
                 dep_findings[m_task_id] = findings
 
     lines = []
-    lines.append("=== CATCH-UP SUMMARY ===")
+    lines.append("<catch-up>")
     lines.append("Since your last context:")
     has_content = False
 
@@ -212,7 +212,7 @@ def generate_catch_up_summary(
         lines.append(f"- {completed_count} tasks completed, {remaining} remaining")
         has_content = True
 
-    lines.append("=== END CATCH-UP ===")
+    lines.append("</catch-up>")
 
     return "\n".join(lines) if has_content else None
 

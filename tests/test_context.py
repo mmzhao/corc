@@ -13,7 +13,7 @@ def test_basic_assembly(tmp_path):
         "context_bundle": ["doc.md"],
     }
     ctx = assemble_context(task, tmp_path)
-    assert "TASK DEFINITION" in ctx
+    assert "<definition>" in ctx
     assert "test task" in ctx
     assert "Some content here" in ctx
 
@@ -92,7 +92,7 @@ def test_empty_bundle(tmp_path):
         "context_bundle": [],
     }
     ctx = assemble_context(task, tmp_path)
-    assert "TASK DEFINITION" in ctx
+    assert "<definition>" in ctx
     assert "test" in ctx
 
 
@@ -106,10 +106,14 @@ def _make_blacklist(tmp_path, content=None):
     corc_dir = tmp_path / ".corc"
     corc_dir.mkdir(exist_ok=True)
     blacklist_content = (
-        "# Agent Blacklist\n\n"
-        "- Never use eval(). (Reason: security)\n"
-        "- Never merge directly to main. (Reason: review gate)\n"
-    ) if content is None else content
+        (
+            "# Agent Blacklist\n\n"
+            "- Never use eval(). (Reason: security)\n"
+            "- Never merge directly to main. (Reason: review gate)\n"
+        )
+        if content is None
+        else content
+    )
     (corc_dir / "blacklist.md").write_text(blacklist_content)
     return blacklist_content
 
@@ -123,8 +127,8 @@ def test_blacklist_injected_into_context(tmp_path):
         "context_bundle": [],
     }
     ctx = assemble_context(task, tmp_path)
-    assert "=== AGENT BLACKLIST ===" in ctx
-    assert "=== END AGENT BLACKLIST ===" in ctx
+    assert "<blacklist>" in ctx
+    assert "</blacklist>" in ctx
     assert "Never use eval()" in ctx
     assert "Never merge directly to main" in ctx
 
@@ -141,7 +145,7 @@ def test_blacklist_injected_with_context_bundle(tmp_path):
     ctx = assemble_context(task, tmp_path)
     # Both context bundle content and blacklist should be present
     assert "Some content" in ctx
-    assert "=== AGENT BLACKLIST ===" in ctx
+    assert "<blacklist>" in ctx
     assert "Never use eval()" in ctx
 
 
@@ -153,9 +157,9 @@ def test_blacklist_missing_file_graceful(tmp_path):
         "context_bundle": [],
     }
     ctx = assemble_context(task, tmp_path)
-    assert "AGENT BLACKLIST" not in ctx
+    assert "<blacklist>" not in ctx
     # Context should still assemble normally
-    assert "TASK DEFINITION" in ctx
+    assert "<definition>" in ctx
 
 
 def test_blacklist_missing_corc_dir_graceful(tmp_path):
@@ -167,8 +171,8 @@ def test_blacklist_missing_corc_dir_graceful(tmp_path):
     }
     # tmp_path has no .corc directory
     ctx = assemble_context(task, tmp_path)
-    assert "AGENT BLACKLIST" not in ctx
-    assert "TASK DEFINITION" in ctx
+    assert "<blacklist>" not in ctx
+    assert "<definition>" in ctx
 
 
 def test_blacklist_empty_file(tmp_path):
@@ -181,7 +185,7 @@ def test_blacklist_empty_file(tmp_path):
     }
     ctx = assemble_context(task, tmp_path)
     # Empty content after strip() is falsy, so no blacklist section
-    assert "AGENT BLACKLIST" not in ctx
+    assert "<blacklist>" not in ctx
 
 
 def test_load_blacklist_returns_content(tmp_path):
@@ -207,6 +211,6 @@ def test_blacklist_appears_after_context_bundle(tmp_path):
         "context_bundle": ["doc.md"],
     }
     ctx = assemble_context(task, tmp_path)
-    bundle_end = ctx.index("=== END CONTEXT ===")
-    blacklist_start = ctx.index("=== AGENT BLACKLIST ===")
+    bundle_end = ctx.index("</file>")
+    blacklist_start = ctx.index("<blacklist>")
     assert blacklist_start > bundle_end
