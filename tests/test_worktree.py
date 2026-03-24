@@ -360,6 +360,249 @@ class TestMergeWorktree:
         assert (git_repo / "README.md").read_text() == "# Changed in main\n"
 
 
+class TestMergeWorktreeDataFileAutoResolve:
+    """Test that data file conflicts are auto-resolved by keeping main's version.
+
+    data/mutations.jsonl is the #1 merge conflict source because the daemon
+    appends to it on main while agents run in worktrees.  Agents never write
+    to mutations.jsonl — all mutations flow through the daemon.  merge_worktree()
+    uses a two-step merge (--no-commit then checkout --ours) to auto-resolve
+    these conflicts.
+    """
+
+    def test_mutations_jsonl_conflict_auto_resolved(self, git_repo):
+        """Both sides modify data/mutations.jsonl — merge succeeds, main's version kept."""
+        # Set up data/mutations.jsonl in the repo and commit it
+        data_dir = git_repo / "data"
+        data_dir.mkdir(exist_ok=True)
+        (data_dir / "mutations.jsonl").write_text('{"seq":1,"event":"initial"}\n')
+        subprocess.run(
+            ["git", "add", "data/mutations.jsonl"],
+            cwd=str(git_repo),
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Add mutations.jsonl"],
+            cwd=str(git_repo),
+            capture_output=True,
+        )
+
+        # Create worktree (branches from current HEAD, so it has mutations.jsonl)
+        wt, branch = create_worktree(git_repo, "task-data-1", attempt=1)
+
+        # Daemon appends to mutations.jsonl on main
+        with open(git_repo / "data" / "mutations.jsonl", "a") as f:
+            f.write('{"seq":2,"event":"daemon_append"}\n')
+        subprocess.run(
+            ["git", "add", "data/mutations.jsonl"],
+            cwd=str(git_repo),
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Daemon appends to mutations"],
+            cwd=str(git_repo),
+            capture_output=True,
+        )
+
+        # Agent's worktree also has a divergent mutations.jsonl
+        # (copied from the snapshot at worktree creation, then modified)
+        with open(wt / "data" / "mutations.jsonl", "a") as f:
+            f.write('{"seq":2,"event":"worktree_append"}\n')
+        subprocess.run(
+            ["git", "add", "data/mutations.jsonl"], cwd=str(wt), capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Worktree mutations"],
+            cwd=str(wt),
+            capture_output=True,
+        )
+
+        # Merge should succeed (data file conflict auto-resolved)
+        merged = merge_worktree(git_repo, wt)
+        assert merged is True
+
+        # Main's version of mutations.jsonl should be kept
+        content = (git_repo / "data" / "mutations.jsonl").read_text()
+        assert "daemon_append" in content
+        assert "worktree_append" not in content
+
+    def test_audit_jsonl_conflict_auto_resolved(self, git_repo):
+        """Both sides modify data/audit.jsonl — merge succeeds, main's version kept."""
+        data_dir = git_repo / "data"
+        data_dir.mkdir(exist_ok=True)
+        (data_dir / "audit.jsonl").write_text('{"event":"init"}\n')
+        subprocess.run(
+            ["git", "add", "data/audit.jsonl"], cwd=str(git_repo), capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Add audit.jsonl"],
+            cwd=str(git_repo),
+            capture_output=True,
+        )
+
+        wt, branch = create_worktree(git_repo, "task-data-2", attempt=1)
+
+        # Both sides modify audit.jsonl
+        with open(git_repo / "data" / "audit.jsonl", "a") as f:
+            f.write('{"event":"main_audit"}\n')
+        subprocess.run(
+            ["git", "add", "data/audit.jsonl"], cwd=str(git_repo), capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Main audit"],
+            cwd=str(git_repo),
+            capture_output=True,
+        )
+
+        with open(wt / "data" / "audit.jsonl", "a") as f:
+            f.write('{"event":"worktree_audit"}\n')
+        subprocess.run(
+            ["git", "add", "data/audit.jsonl"], cwd=str(wt), capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Worktree audit"], cwd=str(wt), capture_output=True
+        )
+
+        merged = merge_worktree(git_repo, wt)
+        assert merged is True
+
+        content = (git_repo / "data" / "audit.jsonl").read_text()
+        assert "main_audit" in content
+        assert "worktree_audit" not in content
+
+    def test_data_file_conflict_with_code_changes_merged(self, git_repo):
+        """Data file conflict + code changes: data auto-resolved, code merged."""
+        data_dir = git_repo / "data"
+        data_dir.mkdir(exist_ok=True)
+        (data_dir / "mutations.jsonl").write_text('{"seq":1}\n')
+        subprocess.run(
+            ["git", "add", "data/mutations.jsonl"],
+            cwd=str(git_repo),
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Add mutations.jsonl"],
+            cwd=str(git_repo),
+            capture_output=True,
+        )
+
+        wt, branch = create_worktree(git_repo, "task-data-3", attempt=1)
+
+        # Daemon appends on main
+        with open(git_repo / "data" / "mutations.jsonl", "a") as f:
+            f.write('{"seq":2}\n')
+        subprocess.run(
+            ["git", "add", "data/mutations.jsonl"],
+            cwd=str(git_repo),
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Daemon append"],
+            cwd=str(git_repo),
+            capture_output=True,
+        )
+
+        # Agent adds code AND diverges mutations.jsonl in worktree
+        (wt / "feature.py").write_text("def new_feature(): pass\n")
+        with open(wt / "data" / "mutations.jsonl", "a") as f:
+            f.write('{"seq":2,"event":"agent"}\n')
+        subprocess.run(
+            ["git", "add", "feature.py", "data/mutations.jsonl"],
+            cwd=str(wt),
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Agent work"], cwd=str(wt), capture_output=True
+        )
+
+        merged = merge_worktree(git_repo, wt)
+        assert merged is True
+
+        # Code changes are merged
+        assert (git_repo / "feature.py").exists()
+        assert "new_feature" in (git_repo / "feature.py").read_text()
+
+        # Data file keeps main's version
+        content = (git_repo / "data" / "mutations.jsonl").read_text()
+        assert "agent" not in content
+
+    def test_code_only_changes_still_merge_normally(self, git_repo):
+        """Code-only changes (no data file conflicts) merge normally."""
+        wt, branch = create_worktree(git_repo, "task-code-only", attempt=1)
+
+        # Agent adds a code file (no data file changes)
+        (wt / "new_module.py").write_text("# New module\ndef hello(): return 42\n")
+        subprocess.run(
+            ["git", "add", "new_module.py"], cwd=str(wt), capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Add new module"], cwd=str(wt), capture_output=True
+        )
+
+        merged = merge_worktree(git_repo, wt)
+        assert merged is True
+
+        assert (git_repo / "new_module.py").exists()
+        assert "hello" in (git_repo / "new_module.py").read_text()
+
+    def test_non_data_conflict_still_fails(self, git_repo):
+        """Conflicts in non-data files (e.g. README.md) still cause merge failure."""
+        data_dir = git_repo / "data"
+        data_dir.mkdir(exist_ok=True)
+        (data_dir / "mutations.jsonl").write_text('{"seq":1}\n')
+        subprocess.run(
+            ["git", "add", "data/mutations.jsonl"],
+            cwd=str(git_repo),
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Add mutations"],
+            cwd=str(git_repo),
+            capture_output=True,
+        )
+
+        wt, branch = create_worktree(git_repo, "task-data-4", attempt=1)
+
+        # Both sides modify README.md (non-data file conflict)
+        (git_repo / "README.md").write_text("# Main version\n")
+        subprocess.run(
+            ["git", "add", "README.md"], cwd=str(git_repo), capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "Main README change"],
+            cwd=str(git_repo),
+            capture_output=True,
+        )
+
+        (wt / "README.md").write_text("# Worktree version\n")
+        subprocess.run(["git", "add", "README.md"], cwd=str(wt), capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Worktree README"], cwd=str(wt), capture_output=True
+        )
+
+        # Merge should fail — README.md is not a data file
+        merged = merge_worktree(git_repo, wt)
+        assert merged is False
+
+        # Main should be clean
+        assert (git_repo / "README.md").read_text() == "# Main version\n"
+
+    def test_data_files_not_in_repo_is_noop(self, git_repo):
+        """When data files don't exist in the repo, auto-resolve is a harmless no-op."""
+        wt, branch = create_worktree(git_repo, "task-no-data", attempt=1)
+
+        # Agent adds a file (no data files exist at all)
+        (wt / "code.py").write_text("print('hello')\n")
+        subprocess.run(["git", "add", "code.py"], cwd=str(wt), capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Add code"], cwd=str(wt), capture_output=True
+        )
+
+        merged = merge_worktree(git_repo, wt)
+        assert merged is True
+        assert (git_repo / "code.py").exists()
+
+
 class TestGetWorktreeBranch:
     """Test _get_worktree_branch() helper."""
 
