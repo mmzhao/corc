@@ -429,24 +429,35 @@ class Executor:
 
             # 4. Extract cost/token data from result events
             elif event_type == "result":
+                cache_creation = token_state["cache_creation_input_tokens"]
+                cache_read = token_state["cache_read_input_tokens"]
+                cache_tokens = cache_creation + cache_read
+
+                # Compute cost from accumulated tokens if not provided.
+                # Claude Opus 4 pricing (per 1M tokens):
+                #   Input: $15, Output: $75
+                #   Cache write: $18.75, Cache read: $1.50
                 total_cost = event.get("total_cost_usd")
-                if total_cost is not None:
-                    cache_tokens = (
-                        token_state["cache_creation_input_tokens"]
-                        + token_state["cache_read_input_tokens"]
+                if total_cost is None:
+                    total_cost = (
+                        token_state["input_tokens"] * 15.0 / 1_000_000
+                        + token_state["output_tokens"] * 75.0 / 1_000_000
+                        + cache_creation * 18.75 / 1_000_000
+                        + cache_read * 1.50 / 1_000_000
                     )
-                    self.audit_log.log(
-                        "task_cost",
-                        task_id=task_id,
-                        cost_usd=total_cost,
-                        input_tokens=token_state["input_tokens"],
-                        output_tokens=token_state["output_tokens"],
-                        cache_tokens=cache_tokens,
-                        num_turns=event.get("num_turns", 0),
-                        duration_ms=event.get("duration_ms", 0),
-                        role=role,
-                        attempt=attempt,
-                    )
+
+                self.audit_log.log(
+                    "task_cost",
+                    task_id=task_id,
+                    cost_usd=total_cost,
+                    input_tokens=token_state["input_tokens"],
+                    output_tokens=token_state["output_tokens"],
+                    cache_tokens=cache_tokens,
+                    num_turns=event.get("num_turns", 0),
+                    duration_ms=event.get("duration_ms", 0),
+                    role=role,
+                    attempt=attempt,
+                )
 
         return callback
 
@@ -1263,7 +1274,9 @@ class Executor:
     @property
     def in_flight_task_ids(self) -> set[str]:
         """Set of task IDs currently tracked by the executor."""
-        return {task["id"] for task, _attempt, _wt, _aid in self._futures.values()}
+        return {
+            task["id"] for task, _attempt, _wt, _aid, *_rest in self._futures.values()
+        }
 
     def shutdown(self, wait: bool = True):
         """Shutdown the thread pool, optionally waiting for in-flight tasks."""
