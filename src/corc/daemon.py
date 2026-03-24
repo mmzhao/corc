@@ -748,6 +748,9 @@ class Daemon:
         if threading.current_thread() is threading.main_thread():
             signal.signal(signal.SIGTERM, self._handle_signal)
             signal.signal(signal.SIGINT, self._handle_signal)
+            # Ignore SIGHUP so the daemon survives when the launching
+            # shell exits (e.g. backgrounded via `corc start &`).
+            signal.signal(signal.SIGHUP, signal.SIG_IGN)
 
     def _handle_signal(self, signum, frame):
         """Handle SIGTERM/SIGINT by setting running to False."""
