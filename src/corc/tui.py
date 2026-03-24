@@ -92,6 +92,8 @@ EVENT_STYLES = {
     # Streaming event types -- real-time agent visibility
     "tool_use": "magenta",
     "assistant_message": "blue",
+    # Cost tracking
+    "task_cost": "green",
 }
 
 
@@ -325,6 +327,40 @@ def _format_attempt_count(task: dict) -> str | None:
     current = attempt_count + 1  # attempt_count=1 means 2nd attempt
     total = max_retries + 1  # max_retries=3 means 4 total possible attempts
     return f"attempt {current}/{total}"
+
+
+def _format_cost_line(event: dict) -> str:
+    """Format a task_cost event as a compact cost summary line.
+
+    Returns e.g. ``'$0.05 | 300 in / 30 out | 5.0s'``.
+    """
+    cost = event.get("cost_usd", 0)
+    input_tokens = event.get("input_tokens", 0)
+    output_tokens = event.get("output_tokens", 0)
+    duration_ms = event.get("duration_ms", 0)
+
+    parts = [f"${cost:.4f}"]
+    parts.append(f"{input_tokens} in / {output_tokens} out")
+    if duration_ms:
+        duration_s = duration_ms / 1000.0
+        parts.append(f"{duration_s:.1f}s")
+    return " | ".join(parts)
+
+
+def _format_session_cost_total(events: list[dict]) -> str | None:
+    """Compute a running session cost total from a list of events.
+
+    Scans for ``task_cost`` event_type entries and sums their ``cost_usd``.
+    Returns a formatted string like ``'Session: $0.15 (3 tasks)'`` or
+    ``None`` if no cost events are present.
+    """
+    cost_events = [e for e in events if e.get("event_type") == "task_cost"]
+    if not cost_events:
+        return None
+    total = sum(float(e.get("cost_usd", 0)) for e in cost_events)
+    count = len(cost_events)
+    task_word = "task" if count == 1 else "tasks"
+    return f"Session: ${total:.4f} ({count} {task_word})"
 
 
 def build_streaming_detail_panel(
@@ -682,6 +718,10 @@ def build_event_panel(events: list[dict], max_events: int = 20) -> Panel:
 
     Each event line shows: timestamp  event_type  task_id  extras
     Colour is determined by event type.
+
+    task_cost events get a special compact format showing cost, tokens,
+    and duration.  A running session cost total is shown at the bottom
+    when any task_cost events are present in the full event list.
     """
     display_events = events[-max_events:] if len(events) > max_events else events
 
@@ -694,6 +734,17 @@ def build_event_panel(events: list[dict], max_events: int = 20) -> Panel:
             etype = e.get("event_type", "unknown")
             tid = e.get("task_id", "")[:8] if e.get("task_id") else ""
             style = EVENT_STYLES.get(etype, "white")
+
+            # task_cost events get a special compact format
+            if etype == "task_cost":
+                cost_summary = _format_cost_line(e)
+                line = Text()
+                line.append(f"{ts}  ", style="dim")
+                line.append(f"{'task_cost':<25}", style=style)
+                line.append(f"  {tid}", style="bold")
+                line.append(f"  {cost_summary}", style=style)
+                lines.append(line)
+                continue
 
             extra_parts: list[str] = []
             if e.get("duration_s"):
@@ -725,6 +776,14 @@ def build_event_panel(events: list[dict], max_events: int = 20) -> Panel:
                     detail.append("                           ", style="dim")
                     detail.append(content_line, style="blue dim")
                     lines.append(detail)
+
+        # Session cost total (computed from ALL events, not just displayed ones)
+        session_total = _format_session_cost_total(events)
+        if session_total:
+            lines.append(Text(""))  # Spacer
+            total_line = Text()
+            total_line.append(f"  {session_total}", style="bold green")
+            lines.append(total_line)
 
         content = Text("\n").join(lines)
 

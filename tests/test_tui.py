@@ -43,6 +43,8 @@ from corc.tui import (
     _truncate_reasoning,
     _format_checklist_progress,
     _format_attempt_count,
+    _format_cost_line,
+    _format_session_cost_total,
     _deduplicate_agents,
     _deduplicate_task_agents,
 )
@@ -579,6 +581,224 @@ class TestBuildEventPanel:
     def test_event_panel_has_green_border(self):
         panel = build_event_panel([])
         assert panel.border_style == "green"
+
+    # ── Cost display in event panel ────────────────────────────────
+
+    def test_task_cost_event_shows_cost(self):
+        """task_cost events show compact cost summary."""
+        events = [
+            {
+                "timestamp": "2026-03-22T10:00:00.000Z",
+                "event_type": "task_cost",
+                "task_id": "task-abc1",
+                "cost_usd": 0.05,
+                "input_tokens": 300,
+                "output_tokens": 30,
+                "duration_ms": 5000,
+            }
+        ]
+        panel = build_event_panel(events)
+        text = _render_to_plain(panel)
+        assert "task_cost" in text
+        assert "$0.0500" in text
+        assert "300 in" in text
+        assert "30 out" in text
+        assert "5.0s" in text
+
+    def test_task_cost_event_shows_task_id(self):
+        events = [
+            {
+                "timestamp": "2026-03-22T10:00:00.000Z",
+                "event_type": "task_cost",
+                "task_id": "task-abc1",
+                "cost_usd": 0.01,
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "duration_ms": 1000,
+            }
+        ]
+        panel = build_event_panel(events)
+        text = _render_to_plain(panel)
+        assert "task-abc" in text
+
+    def test_session_total_shown_with_cost_events(self):
+        """Session cost total appears when task_cost events are present."""
+        events = [
+            {
+                "timestamp": "2026-03-22T10:00:00.000Z",
+                "event_type": "task_cost",
+                "task_id": "t1",
+                "cost_usd": 0.05,
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "duration_ms": 3000,
+            },
+            {
+                "timestamp": "2026-03-22T10:05:00.000Z",
+                "event_type": "task_cost",
+                "task_id": "t2",
+                "cost_usd": 0.10,
+                "input_tokens": 200,
+                "output_tokens": 20,
+                "duration_ms": 5000,
+            },
+        ]
+        panel = build_event_panel(events)
+        text = _render_to_plain(panel)
+        assert "Session:" in text
+        assert "$0.1500" in text
+        assert "2 tasks" in text
+
+    def test_session_total_singular_task(self):
+        """Session total uses singular 'task' for one cost event."""
+        events = [
+            {
+                "timestamp": "2026-03-22T10:00:00.000Z",
+                "event_type": "task_cost",
+                "task_id": "t1",
+                "cost_usd": 0.05,
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "duration_ms": 3000,
+            },
+        ]
+        panel = build_event_panel(events)
+        text = _render_to_plain(panel)
+        assert "1 task)" in text
+
+    def test_no_session_total_without_cost_events(self):
+        """Session total does not appear when there are no task_cost events."""
+        events = [
+            {
+                "timestamp": "2026-03-22T10:00:00.000Z",
+                "event_type": "task_created",
+                "task_id": "t1",
+            },
+        ]
+        panel = build_event_panel(events)
+        text = _render_to_plain(panel)
+        assert "Session:" not in text
+
+    def test_cost_events_mixed_with_regular_events(self):
+        """Cost events render alongside regular events."""
+        events = [
+            {
+                "timestamp": "2026-03-22T10:00:00.000Z",
+                "event_type": "task_dispatched",
+                "task_id": "t1",
+            },
+            {
+                "timestamp": "2026-03-22T10:05:00.000Z",
+                "event_type": "task_cost",
+                "task_id": "t1",
+                "cost_usd": 0.05,
+                "input_tokens": 300,
+                "output_tokens": 30,
+                "duration_ms": 5000,
+            },
+            {
+                "timestamp": "2026-03-22T10:05:01.000Z",
+                "event_type": "task_completed",
+                "task_id": "t1",
+            },
+        ]
+        panel = build_event_panel(events)
+        text = _render_to_plain(panel)
+        assert "task_dispatched" in text
+        assert "task_cost" in text
+        assert "task_completed" in text
+        assert "$0.0500" in text
+        assert "Session:" in text
+
+
+# ── Cost formatting helpers ───────────────────────────────────────────────
+
+
+class TestFormatCostLine:
+    """Tests for the _format_cost_line helper."""
+
+    def test_basic_format(self):
+        event = {
+            "cost_usd": 0.05,
+            "input_tokens": 300,
+            "output_tokens": 30,
+            "duration_ms": 5000,
+        }
+        result = _format_cost_line(event)
+        assert "$0.0500" in result
+        assert "300 in" in result
+        assert "30 out" in result
+        assert "5.0s" in result
+
+    def test_zero_duration(self):
+        event = {
+            "cost_usd": 0.01,
+            "input_tokens": 100,
+            "output_tokens": 10,
+            "duration_ms": 0,
+        }
+        result = _format_cost_line(event)
+        assert "$0.0100" in result
+        # No duration part when 0
+        assert "0.0s" not in result
+
+    def test_missing_fields_default_to_zero(self):
+        result = _format_cost_line({})
+        assert "$0.0000" in result
+        assert "0 in" in result
+        assert "0 out" in result
+
+    def test_small_cost(self):
+        event = {
+            "cost_usd": 0.001,
+            "input_tokens": 50,
+            "output_tokens": 5,
+            "duration_ms": 500,
+        }
+        result = _format_cost_line(event)
+        assert "$0.0010" in result
+        assert "0.5s" in result
+
+
+class TestFormatSessionCostTotal:
+    """Tests for the _format_session_cost_total helper."""
+
+    def test_no_cost_events_returns_none(self):
+        events = [{"event_type": "task_created"}, {"event_type": "task_completed"}]
+        assert _format_session_cost_total(events) is None
+
+    def test_empty_events_returns_none(self):
+        assert _format_session_cost_total([]) is None
+
+    def test_single_cost_event(self):
+        events = [{"event_type": "task_cost", "cost_usd": 0.05}]
+        result = _format_session_cost_total(events)
+        assert result is not None
+        assert "$0.0500" in result
+        assert "1 task" in result
+
+    def test_multiple_cost_events(self):
+        events = [
+            {"event_type": "task_cost", "cost_usd": 0.05},
+            {"event_type": "task_cost", "cost_usd": 0.10},
+            {"event_type": "task_cost", "cost_usd": 0.03},
+        ]
+        result = _format_session_cost_total(events)
+        assert result is not None
+        assert "$0.1800" in result
+        assert "3 tasks" in result
+
+    def test_mixed_events_only_counts_cost(self):
+        events = [
+            {"event_type": "task_created"},
+            {"event_type": "task_cost", "cost_usd": 0.05},
+            {"event_type": "task_completed"},
+            {"event_type": "task_cost", "cost_usd": 0.10},
+        ]
+        result = _format_session_cost_total(events)
+        assert result is not None
+        assert "$0.1500" in result
+        assert "2 tasks" in result
 
 
 # ── Color-coding verification ────────────────────────────────────────────

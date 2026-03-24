@@ -256,7 +256,7 @@ class Executor:
         )
 
         # Build streaming event callback for real-time logging
-        event_callback = self._make_event_callback(task["id"], attempt)
+        event_callback = self._make_event_callback(task["id"], attempt, role_name)
 
         # Build PID callback to record the agent's PID in the mutation log.
         # This is critical for daemon restart recovery — the PID allows
@@ -278,14 +278,25 @@ class Executor:
         )
         self._futures[future] = (task, attempt, worktree_path, agent_id)
 
-    def _make_event_callback(self, task_id: str, attempt: int):
+    def _make_event_callback(
+        self, task_id: str, attempt: int, role: str = "implementer"
+    ):
         """Create a streaming event callback for a dispatch.
 
         The returned callback:
         1. Writes every event to the session log immediately (crash-safe).
         2. Writes tool_use events to the audit log with task_id.
         3. Writes assistant message events to the audit log for TUI visibility.
+        4. Extracts cost/token data from result events and persists as
+           task_cost audit event for cost tracking and TUI display.
         """
+        # Mutable state for accumulating token counts across assistant messages
+        token_state = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+        }
 
         def callback(event):
             event_type = event.get("type", "unknown")
@@ -304,8 +315,21 @@ class Executor:
                 )
 
             # 3. Write assistant messages to audit log for TUI visibility
+            #    Also accumulate token usage from assistant message events
             elif event_type == "assistant":
                 message = event.get("message", {})
+                # Accumulate token usage
+                usage = message.get("usage", {})
+                if usage:
+                    token_state["input_tokens"] += usage.get("input_tokens", 0)
+                    token_state["output_tokens"] += usage.get("output_tokens", 0)
+                    token_state["cache_creation_input_tokens"] += usage.get(
+                        "cache_creation_input_tokens", 0
+                    )
+                    token_state["cache_read_input_tokens"] += usage.get(
+                        "cache_read_input_tokens", 0
+                    )
+
                 content_blocks = message.get("content", [])
                 text_parts = []
                 for block in content_blocks:
@@ -316,6 +340,27 @@ class Executor:
                         "assistant_message",
                         task_id=task_id,
                         content="\n".join(text_parts),
+                    )
+
+            # 4. Extract cost/token data from result events
+            elif event_type == "result":
+                total_cost = event.get("total_cost_usd")
+                if total_cost is not None:
+                    cache_tokens = (
+                        token_state["cache_creation_input_tokens"]
+                        + token_state["cache_read_input_tokens"]
+                    )
+                    self.audit_log.log(
+                        "task_cost",
+                        task_id=task_id,
+                        cost_usd=total_cost,
+                        input_tokens=token_state["input_tokens"],
+                        output_tokens=token_state["output_tokens"],
+                        cache_tokens=cache_tokens,
+                        num_turns=event.get("num_turns", 0),
+                        duration_ms=event.get("duration_ms", 0),
+                        role=role,
+                        attempt=attempt,
                     )
 
         return callback

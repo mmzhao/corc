@@ -865,6 +865,273 @@ class TestAuditLogStreaming:
 
 
 # ===========================================================================
+# Cost extraction tests
+# ===========================================================================
+
+
+class TestCostExtraction:
+    """Test that result events with cost data produce task_cost audit events."""
+
+    def test_result_event_with_cost_produces_task_cost(
+        self, audit_log, session_logger, mutation_log, work_state, tmp_project
+    ):
+        """Result event with total_cost_usd creates a task_cost audit event."""
+        executor = Executor(
+            dispatcher=MagicMock(),
+            mutation_log=mutation_log,
+            state=work_state,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            project_root=tmp_project,
+        )
+
+        callback = executor._make_event_callback("t1", 1, "implementer")
+        callback(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "Task done.",
+                "total_cost_usd": 0.05,
+                "duration_ms": 5000,
+                "num_turns": 3,
+            }
+        )
+
+        events = audit_log.read_today()
+        cost_events = [e for e in events if e["event_type"] == "task_cost"]
+        assert len(cost_events) == 1
+        ce = cost_events[0]
+        assert ce["task_id"] == "t1"
+        assert ce["cost_usd"] == 0.05
+        assert ce["duration_ms"] == 5000
+        assert ce["num_turns"] == 3
+        assert ce["role"] == "implementer"
+        assert ce["attempt"] == 1
+
+    def test_result_event_without_cost_no_task_cost(
+        self, audit_log, session_logger, mutation_log, work_state, tmp_project
+    ):
+        """Result event without total_cost_usd does NOT create task_cost event."""
+        executor = Executor(
+            dispatcher=MagicMock(),
+            mutation_log=mutation_log,
+            state=work_state,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            project_root=tmp_project,
+        )
+
+        callback = executor._make_event_callback("t1", 1)
+        callback({"type": "result", "result": "done"})
+
+        events = audit_log.read_today()
+        cost_events = [e for e in events if e["event_type"] == "task_cost"]
+        assert len(cost_events) == 0
+
+    def test_token_accumulation_from_assistant_messages(
+        self, audit_log, session_logger, mutation_log, work_state, tmp_project
+    ):
+        """Token counts are accumulated from assistant message usage fields."""
+        executor = Executor(
+            dispatcher=MagicMock(),
+            mutation_log=mutation_log,
+            state=work_state,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            project_root=tmp_project,
+        )
+
+        callback = executor._make_event_callback("t1", 1, "implementer")
+
+        # Two assistant messages with usage
+        callback(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": "First message."}],
+                    "usage": {"input_tokens": 100, "output_tokens": 10},
+                },
+            }
+        )
+        callback(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": "Second message."}],
+                    "usage": {"input_tokens": 200, "output_tokens": 20},
+                },
+            }
+        )
+
+        # Result event triggers cost logging with accumulated tokens
+        callback(
+            {
+                "type": "result",
+                "total_cost_usd": 0.03,
+                "duration_ms": 3000,
+                "num_turns": 2,
+            }
+        )
+
+        events = audit_log.read_today()
+        cost_events = [e for e in events if e["event_type"] == "task_cost"]
+        assert len(cost_events) == 1
+        ce = cost_events[0]
+        assert ce["input_tokens"] == 300  # 100 + 200
+        assert ce["output_tokens"] == 30  # 10 + 20
+        assert ce["cost_usd"] == 0.03
+
+    def test_cache_token_accumulation(
+        self, audit_log, session_logger, mutation_log, work_state, tmp_project
+    ):
+        """Cache tokens (creation + read) are accumulated and reported."""
+        executor = Executor(
+            dispatcher=MagicMock(),
+            mutation_log=mutation_log,
+            state=work_state,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            project_root=tmp_project,
+        )
+
+        callback = executor._make_event_callback("t1", 1, "implementer")
+
+        callback(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": "Msg."}],
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 10,
+                        "cache_creation_input_tokens": 50,
+                        "cache_read_input_tokens": 30,
+                    },
+                },
+            }
+        )
+
+        callback(
+            {
+                "type": "result",
+                "total_cost_usd": 0.02,
+                "duration_ms": 2000,
+                "num_turns": 1,
+            }
+        )
+
+        events = audit_log.read_today()
+        cost_events = [e for e in events if e["event_type"] == "task_cost"]
+        assert len(cost_events) == 1
+        ce = cost_events[0]
+        assert ce["cache_tokens"] == 80  # 50 + 30
+        assert ce["input_tokens"] == 100
+        assert ce["output_tokens"] == 10
+
+    def test_full_sample_events_produce_task_cost(
+        self, audit_log, session_logger, mutation_log, work_state, tmp_project
+    ):
+        """Full SAMPLE_EVENTS sequence (which has total_cost_usd) produces task_cost."""
+        executor = Executor(
+            dispatcher=MagicMock(),
+            mutation_log=mutation_log,
+            state=work_state,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            project_root=tmp_project,
+        )
+
+        callback = executor._make_event_callback("t1", 1, "implementer")
+        for event in SAMPLE_EVENTS:
+            callback(event)
+
+        events = audit_log.read_today()
+        cost_events = [e for e in events if e["event_type"] == "task_cost"]
+        assert len(cost_events) == 1
+        ce = cost_events[0]
+        assert ce["cost_usd"] == 0.05
+        assert ce["duration_ms"] == 5000
+        assert ce["num_turns"] == 3
+
+    def test_real_format_events_produce_task_cost_with_tokens(
+        self, audit_log, session_logger, mutation_log, work_state, tmp_project
+    ):
+        """REAL_FORMAT_EVENTS (with usage in assistant messages) produce correct token counts."""
+        executor = Executor(
+            dispatcher=MagicMock(),
+            mutation_log=mutation_log,
+            state=work_state,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            project_root=tmp_project,
+        )
+
+        callback = executor._make_event_callback("t1", 1, "implementer")
+        for event in REAL_FORMAT_EVENTS:
+            callback(event)
+
+        events = audit_log.read_today()
+        cost_events = [e for e in events if e["event_type"] == "task_cost"]
+        assert len(cost_events) == 1
+        ce = cost_events[0]
+        assert ce["cost_usd"] == 0.05
+        assert ce["input_tokens"] == 300  # 100 + 200
+        assert ce["output_tokens"] == 30  # 10 + 20
+        assert ce["cache_tokens"] == 0  # No cache tokens in real format events
+        assert ce["num_turns"] == 2
+        assert ce["duration_ms"] == 5000
+
+    def test_analyze_aggregation_with_task_cost_events(
+        self, audit_log, session_logger, mutation_log, work_state, tmp_project
+    ):
+        """analyze.py aggregate_costs picks up task_cost events via cost_usd field."""
+        from corc.analyze import aggregate_costs
+
+        executor = Executor(
+            dispatcher=MagicMock(),
+            mutation_log=mutation_log,
+            state=work_state,
+            audit_log=audit_log,
+            session_logger=session_logger,
+            project_root=tmp_project,
+        )
+
+        # Generate two task_cost events
+        cb1 = executor._make_event_callback("t1", 1, "implementer")
+        cb1(
+            {
+                "type": "result",
+                "total_cost_usd": 0.05,
+                "duration_ms": 5000,
+                "num_turns": 3,
+            }
+        )
+
+        cb2 = executor._make_event_callback("t2", 1, "reviewer")
+        cb2(
+            {
+                "type": "result",
+                "total_cost_usd": 0.10,
+                "duration_ms": 8000,
+                "num_turns": 5,
+            }
+        )
+
+        events = audit_log.read_today()
+        breakdown = aggregate_costs(events)
+
+        assert breakdown.total_usd == pytest.approx(0.15)
+        assert breakdown.event_count == 2
+        assert "t1" in breakdown.by_task
+        assert "t2" in breakdown.by_task
+        assert breakdown.by_task["t1"] == pytest.approx(0.05)
+        assert breakdown.by_task["t2"] == pytest.approx(0.10)
+        assert "implementer" in breakdown.by_role
+        assert "reviewer" in breakdown.by_role
+
+
+# ===========================================================================
 # Executor integration tests
 # ===========================================================================
 
