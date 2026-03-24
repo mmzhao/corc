@@ -77,8 +77,6 @@ class TestDefaults:
         (tmp_project / ".corc" / "config.yaml").unlink(missing_ok=True)
         cfg = load_config(tmp_project)
         assert cfg.get("dispatch.agent_timeout_s") == 1800
-        assert cfg.get("dispatch.max_budget_usd") == 3.0
-        assert cfg.get("dispatch.max_turns") == 50
         assert cfg.get("retry.default_retries") == 2
         assert cfg.get("retry.reduced_retries") == 1
         assert cfg.get("retry.increased_retries") == 3
@@ -141,7 +139,6 @@ class TestOverrides:
         """Values not in config.yaml still have defaults."""
         cfg = load_config(tmp_project_with_config)
         # These weren't in the override file
-        assert cfg.get("dispatch.max_turns") == 50
         assert cfg.get("dispatch.provider") == "claude-code"
         assert cfg.get("retry.reduced_retries") == 1
         assert cfg.get("audit.backup_interval") == "daily"
@@ -427,8 +424,6 @@ class TestModuleIntegration:
         from corc.dispatch import Constraints
 
         c = Constraints()
-        assert c.max_budget_usd == DEFAULTS["dispatch"]["max_budget_usd"]
-        assert c.max_turns == DEFAULTS["dispatch"]["max_turns"]
         assert c.allowed_tools == DEFAULTS["dispatch"]["default_allowed_tools"]
 
     def test_backup_default_config(self):

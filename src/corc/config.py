@@ -64,8 +64,6 @@ DEFAULTS: dict[str, Any] = {
         "provider": "claude-code",
         "agent_timeout_s": 1800,
         "default_allowed_tools": ["Read", "Edit", "Write", "Bash", "Grep", "Glob"],
-        "max_budget_usd": 3.0,
-        "max_turns": 50,
     },
     # --- Daemon ---
     "daemon": {

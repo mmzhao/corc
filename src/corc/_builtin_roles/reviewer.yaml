@@ -25,7 +25,3 @@ allowed_tools:
   - Grep
   - Glob
   - "Bash(git*, gh pr*)"
-
-cost_limits:
-  max_budget_per_invocation_usd: 2.00
-  max_turns_per_invocation: 30

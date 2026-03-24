@@ -252,7 +252,7 @@ class Executor:
             prompt,
             system_prompt,
             constraints.allowed_tools,
-            constraints.max_budget_usd,
+            0.0,  # budget tracking removed from constraints
         )
 
         # Build streaming event callback for real-time logging

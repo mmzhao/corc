@@ -706,7 +706,7 @@ def dispatch(task_id, provider):
         prompt,
         system_prompt,
         constraints.allowed_tools,
-        constraints.max_budget_usd,
+        0.0,  # budget tracking removed from constraints
     )
 
     # Create git worktree for agent isolation
@@ -1579,8 +1579,6 @@ def role_show(name):
     click.echo(f"Extends: {rc.extends or '(none)'}")
     click.echo(f"Knowledge write access: {rc.knowledge_write_access}")
     click.echo(f"Allowed tools: {', '.join(rc.allowed_tools)}")
-    click.echo(f"Max budget (USD): {rc.max_budget_usd}")
-    click.echo(f"Max turns: {rc.max_turns}")
     if rc.source_path:
         click.echo(f"Source: {rc.source_path}")
     click.echo(f"\nSystem prompt:\n{rc.system_prompt}")
