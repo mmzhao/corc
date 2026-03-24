@@ -19,6 +19,7 @@ data/
 # CORC runtime
 .corc/daemon.pid
 .corc/worktrees/
+.claude/worktrees/
 data/state.db-shm
 data/state.db-wal
 .corc/secrets.yaml

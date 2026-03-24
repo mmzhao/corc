@@ -82,7 +82,8 @@ def tmp_project(tmp_path):
     project = tmp_path / "project"
     project.mkdir()
     (project / ".corc").mkdir()
-    (project / ".corc" / "worktrees").mkdir()
+    (project / ".claude").mkdir()
+    (project / ".claude" / "worktrees").mkdir()
     (project / "data").mkdir()
     (project / "data" / "events").mkdir()
     (project / "data" / "sessions").mkdir()
@@ -257,7 +258,7 @@ class TestCleanWorktreesForTerminalTasks:
         self, work_state, mutation_log, tmp_project
     ):
         """Worktree for a completed task is cleaned even if PID is unknown."""
-        worktree_dir = tmp_project / ".corc" / "worktrees" / "t1-1"
+        worktree_dir = tmp_project / ".claude" / "worktrees" / "t1-1"
         worktree_dir.mkdir(parents=True)
         (worktree_dir / "code.py").write_text("# agent work")
 
@@ -284,7 +285,7 @@ class TestCleanWorktreesForTerminalTasks:
 
     def test_failed_task_worktree_removed(self, work_state, mutation_log, tmp_project):
         """Worktree for a failed task is cleaned up."""
-        worktree_dir = tmp_project / ".corc" / "worktrees" / "t1-1"
+        worktree_dir = tmp_project / ".claude" / "worktrees" / "t1-1"
         worktree_dir.mkdir(parents=True)
         (worktree_dir / "code.py").write_text("# partial work")
 
@@ -312,7 +313,7 @@ class TestCleanWorktreesForTerminalTasks:
         self, work_state, mutation_log, tmp_project
     ):
         """Worktree for an escalated task is cleaned up."""
-        worktree_dir = tmp_project / ".corc" / "worktrees" / "t1-1"
+        worktree_dir = tmp_project / ".claude" / "worktrees" / "t1-1"
         worktree_dir.mkdir(parents=True)
         (worktree_dir / "code.py").write_text("# abandoned work")
 
@@ -340,7 +341,7 @@ class TestCleanWorktreesForTerminalTasks:
         self, work_state, mutation_log, tmp_project
     ):
         """Worktree for a running task with alive agent is NOT cleaned."""
-        worktree_dir = tmp_project / ".corc" / "worktrees" / "t1-1"
+        worktree_dir = tmp_project / ".claude" / "worktrees" / "t1-1"
         worktree_dir.mkdir(parents=True)
         (worktree_dir / "code.py").write_text("# in-progress")
 
@@ -366,7 +367,7 @@ class TestCleanWorktreesForTerminalTasks:
         self, work_state, mutation_log, tmp_project
     ):
         """Task in terminal state has worktree cleaned regardless of PID liveness."""
-        worktree_dir = tmp_project / ".corc" / "worktrees" / "t1-1"
+        worktree_dir = tmp_project / ".claude" / "worktrees" / "t1-1"
         worktree_dir.mkdir(parents=True)
 
         _create_task(mutation_log, "t1", "Task 1")
@@ -402,8 +403,8 @@ class TestOrphanedWorktreeCleanup:
     def test_orphaned_worktree_directory_removed(
         self, work_state, mutation_log, tmp_project
     ):
-        """Unreferenced directory in .corc/worktrees/ is cleaned up."""
-        orphan = tmp_project / ".corc" / "worktrees" / "old-task-1"
+        """Unreferenced directory in .claude/worktrees/ is cleaned up."""
+        orphan = tmp_project / ".claude" / "worktrees" / "old-task-1"
         orphan.mkdir(parents=True)
         (orphan / "leftover.py").write_text("# orphaned work")
 
@@ -419,9 +420,9 @@ class TestOrphanedWorktreeCleanup:
 
     def test_multiple_orphaned_worktrees(self, work_state, mutation_log, tmp_project):
         """Multiple orphaned directories are all cleaned up."""
-        orphan1 = tmp_project / ".corc" / "worktrees" / "task-a-1"
-        orphan2 = tmp_project / ".corc" / "worktrees" / "task-b-1"
-        orphan3 = tmp_project / ".corc" / "worktrees" / "task-c-2"
+        orphan1 = tmp_project / ".claude" / "worktrees" / "task-a-1"
+        orphan2 = tmp_project / ".claude" / "worktrees" / "task-b-1"
+        orphan3 = tmp_project / ".claude" / "worktrees" / "task-c-2"
         for d in (orphan1, orphan2, orphan3):
             d.mkdir(parents=True)
             (d / "code.py").write_text("# orphan")
@@ -441,9 +442,9 @@ class TestOrphanedWorktreeCleanup:
         self, work_state, mutation_log, tmp_project
     ):
         """Worktree for a running task with alive agent is not removed as orphan."""
-        active_wt = tmp_project / ".corc" / "worktrees" / "t1-1"
+        active_wt = tmp_project / ".claude" / "worktrees" / "t1-1"
         active_wt.mkdir(parents=True)
-        orphan_wt = tmp_project / ".corc" / "worktrees" / "old-task-1"
+        orphan_wt = tmp_project / ".claude" / "worktrees" / "old-task-1"
         orphan_wt.mkdir(parents=True)
 
         _create_task(mutation_log, "t1", "Task 1")
@@ -504,7 +505,7 @@ class TestReconciliationWorktreeCleanup:
         self, work_state, mutation_log, audit_log, session_logger, tmp_project
     ):
         """Worktrees from completed tasks are cleaned during reconciliation."""
-        worktree_dir = tmp_project / ".corc" / "worktrees" / "t1-1"
+        worktree_dir = tmp_project / ".claude" / "worktrees" / "t1-1"
         worktree_dir.mkdir(parents=True)
         (worktree_dir / "done.py").write_text("# completed work")
 
@@ -538,7 +539,7 @@ class TestReconciliationWorktreeCleanup:
         self, work_state, mutation_log, audit_log, session_logger, tmp_project
     ):
         """Orphaned worktree directories are cleaned during reconciliation."""
-        orphan = tmp_project / ".corc" / "worktrees" / "gone-task-1"
+        orphan = tmp_project / ".claude" / "worktrees" / "gone-task-1"
         orphan.mkdir(parents=True)
         (orphan / "code.py").write_text("# orphan")
 
@@ -563,7 +564,7 @@ class TestReconciliationWorktreeCleanup:
         self, work_state, mutation_log, audit_log, session_logger, tmp_project
     ):
         """Worktree from an escalated task is cleaned during reconciliation."""
-        worktree_dir = tmp_project / ".corc" / "worktrees" / "t1-1"
+        worktree_dir = tmp_project / ".claude" / "worktrees" / "t1-1"
         worktree_dir.mkdir(parents=True)
 
         _create_task(mutation_log, "t1", "Task 1")
@@ -968,7 +969,7 @@ class TestDaemonTickWorktreeCleanup:
         self, work_state, mutation_log, audit_log, session_logger, tmp_project
     ):
         """If _handle_worktree_merge raises, the safety net cleans up."""
-        worktree_dir = tmp_project / ".corc" / "worktrees" / "t1-1"
+        worktree_dir = tmp_project / ".claude" / "worktrees" / "t1-1"
         worktree_dir.mkdir(parents=True)
         (worktree_dir / "code.py").write_text("# work")
 
