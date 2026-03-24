@@ -85,7 +85,9 @@ def pull_main(project_root: Path, timeout: int = 60) -> bool:
         return False
 
 
-def push_branch(project_root: Path, branch_name: str, timeout: int = 60) -> bool:
+def push_branch(
+    project_root: Path, branch_name: str, timeout: int = 60
+) -> tuple[bool, str]:
     """Push a worktree branch to the remote.
 
     Args:
@@ -94,7 +96,7 @@ def push_branch(project_root: Path, branch_name: str, timeout: int = 60) -> bool
         timeout: Timeout in seconds.
 
     Returns:
-        True if push succeeded, False otherwise.
+        Tuple of (success, error_message). error_message is empty on success.
     """
     try:
         result = subprocess.run(
@@ -106,15 +108,15 @@ def push_branch(project_root: Path, branch_name: str, timeout: int = 60) -> bool
         )
         if result.returncode == 0:
             logger.info("Pushed branch %s to origin", branch_name)
-            return True
+            return (True, "")
         else:
-            logger.warning(
-                "git push failed for %s: %s", branch_name, result.stderr.strip()
-            )
-            return False
+            error_msg = result.stderr.strip()
+            logger.warning("git push failed for %s: %s", branch_name, error_msg)
+            return (False, error_msg)
     except (subprocess.SubprocessError, FileNotFoundError, OSError) as e:
-        logger.warning("git push error for %s: %s", branch_name, e)
-        return False
+        error_msg = str(e)
+        logger.warning("git push error for %s: %s", branch_name, error_msg)
+        return (False, error_msg)
 
 
 def create_pr(
@@ -123,7 +125,7 @@ def create_pr(
     task: dict,
     base_branch: str = "main",
     timeout: int = 30,
-) -> PRInfo | None:
+) -> tuple[PRInfo | None, str]:
     """Create a PR from a worktree branch via gh pr create.
 
     Args:
@@ -134,7 +136,8 @@ def create_pr(
         timeout: Timeout in seconds.
 
     Returns:
-        PRInfo with URL and number if created, None on failure.
+        Tuple of (PRInfo, error_message). PRInfo is None on failure;
+        error_message is empty on success.
     """
     task_id = task.get("id", "unknown")
     task_name = task.get("name", "unknown")
@@ -169,22 +172,27 @@ def create_pr(
             timeout=timeout,
         )
         if result.returncode != 0:
-            logger.warning("gh pr create failed: %s", result.stderr.strip())
-            return None
+            error_msg = result.stderr.strip()
+            logger.warning("gh pr create failed: %s", error_msg)
+            return (None, error_msg)
 
         pr_url = result.stdout.strip()
         pr_number = _extract_pr_number(pr_url)
 
         logger.info("Created PR #%s: %s", pr_number, pr_url)
-        return PRInfo(
-            url=pr_url,
-            number=pr_number,
-            branch=branch_name,
-            title=title,
+        return (
+            PRInfo(
+                url=pr_url,
+                number=pr_number,
+                branch=branch_name,
+                title=title,
+            ),
+            "",
         )
     except (subprocess.SubprocessError, FileNotFoundError, OSError) as e:
-        logger.warning("gh pr create error: %s", e)
-        return None
+        error_msg = str(e)
+        logger.warning("gh pr create error: %s", error_msg)
+        return (None, error_msg)
 
 
 def post_review_comment(

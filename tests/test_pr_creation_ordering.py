@@ -711,11 +711,11 @@ class TestPRCreatedBeforeMerge:
 
         def track_push(*args, **kwargs):
             call_order.append("push_branch")
-            return True
+            return (True, "")
 
         def track_create_pr(*args, **kwargs):
             call_order.append("create_pr")
-            return mock_pr_info
+            return (mock_pr_info, "")
 
         with (
             patch("corc.executor.pull_main", return_value=False),
@@ -780,16 +780,19 @@ class TestPRCreatedBeforeMerge:
                 f"Branch {branch_name} has NO commits ahead of main at PR creation time!"
             )
 
-            return PRInfo(
-                url="https://github.com/org/repo/pull/1",
-                number=1,
-                branch=branch_name,
-                title=f"[corc] Task 1 (t1)",
+            return (
+                PRInfo(
+                    url="https://github.com/org/repo/pull/1",
+                    number=1,
+                    branch=branch_name,
+                    title=f"[corc] Task 1 (t1)",
+                ),
+                "",
             )
 
         with (
             patch("corc.executor.pull_main", return_value=False),
-            patch("corc.executor.push_branch", return_value=True),
+            patch("corc.executor.push_branch", return_value=(True, "")),
             patch("corc.executor.create_pr", side_effect=capture_create_pr),
         ):
             executor.dispatch(task)
@@ -861,8 +864,8 @@ class TestDaemonTickPRWorkflow:
 
         with (
             patch("corc.executor.pull_main", return_value=False),
-            patch("corc.executor.push_branch", return_value=True),
-            patch("corc.executor.create_pr", return_value=mock_pr_info),
+            patch("corc.executor.push_branch", return_value=(True, "")),
+            patch("corc.executor.create_pr", return_value=(mock_pr_info, "")),
             patch("corc.executor.get_worktree_branch", return_value="corc/t1-1"),
             patch("corc.processor.post_review_comment", return_value=True),
             patch("corc.processor.merge_pr", return_value=True) as mock_proc_merge,
@@ -918,8 +921,8 @@ class TestDaemonTickPRWorkflow:
 
         with (
             patch("corc.executor.pull_main", return_value=False),
-            patch("corc.executor.push_branch", return_value=True),
-            patch("corc.executor.create_pr", return_value=mock_pr_info),
+            patch("corc.executor.push_branch", return_value=(True, "")),
+            patch("corc.executor.create_pr", return_value=(mock_pr_info, "")),
             patch("corc.executor.get_worktree_branch", return_value="corc/t1-1"),
             patch("corc.processor.post_review_comment", return_value=True),
             patch("corc.processor.merge_pr") as mock_proc_merge,
