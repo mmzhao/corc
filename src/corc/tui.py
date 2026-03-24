@@ -182,7 +182,7 @@ def get_daemon_status(
 
 
 def build_daemon_status_header(
-    daemon_status: dict, session_cost_usd: float | None = None
+    daemon_status: dict, cost_summary: dict | None = None
 ) -> Text:
     """Build a Rich Text object showing daemon status for the TUI header.
 
@@ -190,11 +190,11 @@ def build_daemon_status_header(
       - Green ``● RUNNING`` with uptime and slot usage when running
       - Yellow ``● PAUSED`` with reason when paused
       - Red ``● STOPPED`` when daemon is not running
-      - Session cost total when available
+      - Today's cost, tokens, and water usage
 
     Args:
         daemon_status: Dict from :func:`get_daemon_status`.
-        session_cost_usd: Running session cost total (optional).
+        cost_summary: Dict from :meth:`QueryAPI.get_today_cost_summary`.
 
     Returns:
         A Rich Text object suitable for inclusion in a Panel or Layout.
@@ -212,7 +212,7 @@ def build_daemon_status_header(
 
         slots_used = daemon_status.get("slots_used", 0)
         slots_total = daemon_status.get("slots_total", 1)
-        text.append(f"  {slots_used}/{slots_total} agents active", style="green")
+        text.append(f"  {slots_used}/{slots_total} agents", style="green")
 
     elif status == "paused":
         text.append("  ● ", style="bold yellow")
@@ -231,8 +231,22 @@ def build_daemon_status_header(
         text.append("STOPPED", style="bold red")
         text.append("  — daemon is not running", style="red")
 
-    if session_cost_usd is not None and session_cost_usd > 0:
-        text.append(f"  💰 ${session_cost_usd:.2f}", style="bold green")
+    if cost_summary:
+        cost_usd = cost_summary.get("cost_usd", 0)
+        total_tokens = cost_summary.get("total_tokens", 0)
+        water = cost_summary.get("water_liters", 0)
+
+        if cost_usd > 0:
+            text.append(f"  ${cost_usd:.2f}", style="bold green")
+
+        if total_tokens > 0:
+            if total_tokens >= 1_000_000:
+                text.append(f"  {total_tokens / 1_000_000:.1f}M tok", style="cyan")
+            else:
+                text.append(f"  {total_tokens / 1_000:.0f}K tok", style="cyan")
+
+        if water > 0:
+            text.append(f"  {water:.1f}L water", style="blue")
 
     return text
 
@@ -1147,7 +1161,7 @@ def build_active_dashboard(
     failure_history: dict[str, list[dict]] | None = None,
     focused_panel: str | None = None,
     scroll_offsets: dict[str, int] | None = None,
-    today_total_cost: float | None = None,
+    today_cost_summary: dict | None = None,
 ) -> Layout:
     """Build the active-plan-focused dashboard layout.
 
@@ -1235,7 +1249,7 @@ def build_active_dashboard(
 
     # Wrap with daemon status header if provided
     if daemon_status is not None:
-        header_content = build_daemon_status_header(daemon_status, today_total_cost)
+        header_content = build_daemon_status_header(daemon_status, today_cost_summary)
         header_panel = Panel(
             header_content,
             title="[bold] Daemon [/bold]",
@@ -1553,7 +1567,7 @@ def run_active_dashboard(
                         "active_plan": scroll_state.get("active_plan", 0),
                         "events": scroll_state.get("events", 0),
                     },
-                    today_total_cost=query_api.get_today_total_cost(),
+                    today_cost_summary=query_api.get_today_cost_summary(),
                 )
                 live.update(dashboard)
                 stop_event.wait(interval)

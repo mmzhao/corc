@@ -232,14 +232,37 @@ class QueryAPI:
         """Most recent *n* audit log events across all log files."""
         return self.audit_log.read_recent(n)
 
+    def get_today_cost_summary(self) -> dict:
+        """Aggregate cost, token, and resource data from today's audit log.
+
+        Returns dict with keys: cost_usd, input_tokens, output_tokens,
+        cache_tokens, total_tokens, water_liters.
+        """
+        events = self.audit_log.read_today()
+        cost_events = [e for e in events if e.get("event_type") == "task_cost"]
+
+        total_cost = sum(float(e.get("cost_usd", 0)) for e in cost_events)
+        input_tokens = sum(int(e.get("input_tokens", 0)) for e in cost_events)
+        output_tokens = sum(int(e.get("output_tokens", 0)) for e in cost_events)
+        cache_tokens = sum(int(e.get("cache_tokens", 0)) for e in cost_events)
+        total_tokens = input_tokens + output_tokens + cache_tokens
+
+        # Water estimate: ~0.5 liters per 1M tokens processed
+        # Based on data center cooling research for LLM inference
+        water_liters = total_tokens * 0.5 / 1_000_000
+
+        return {
+            "cost_usd": total_cost,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_tokens": cache_tokens,
+            "total_tokens": total_tokens,
+            "water_liters": water_liters,
+        }
+
     def get_today_total_cost(self) -> float:
         """Sum all task_cost events from today's audit log."""
-        events = self.audit_log.read_today()
-        return sum(
-            float(e.get("cost_usd", 0))
-            for e in events
-            if e.get("event_type") == "task_cost"
-        )
+        return self.get_today_cost_summary()["cost_usd"]
 
     def get_task_stream_events(self, task_id: str) -> list[dict]:
         """Stream events from the latest session attempt for a task.
