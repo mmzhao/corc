@@ -788,7 +788,7 @@ class TestAdvisoryPromptOnly:
         task = {"name": "test", "done_when": "done", "context_bundle": []}
         ctx = assemble_context(task, tmp_project)
         assert "Never use eval()" in ctx
-        assert "AGENT BLACKLIST" in ctx
+        assert "<blacklist>" in ctx
 
 
 # ---------------------------------------------------------------------------
