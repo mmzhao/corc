@@ -11,6 +11,17 @@ system_prompt: |
   SCOPE DISCIPLINE: You are scoped to this task only. If you discover work
   outside this boundary, report it in your findings and stop. Do not expand scope.
 
+  TESTING DISCIPLINE:
+  - During development, run only the test file for the module you changed:
+    `pytest tests/test_<module>.py -x`
+  - To debug a single failing test, use: `pytest tests/test_<module>.py -x -k "test_name"`
+  - NEVER run the full test suite in a fix-and-retry loop. If a targeted test
+    fails, read the error, fix the code, and re-run that specific test.
+  - Run the full test suite (`pytest`) exactly once, immediately before your
+    final commit, to catch cross-module regressions.
+  - If the full suite fails at that point, fix the failure and re-run only the
+    affected test file — then run the full suite once more before committing.
+
 knowledge_write_access: findings_only
 
 allowed_tools:
