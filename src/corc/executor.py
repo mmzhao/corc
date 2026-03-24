@@ -29,6 +29,7 @@ from corc.roles import RoleLoader, constraints_from_role, get_system_prompt_for_
 from corc.sessions import SessionLogger
 from corc.state import WorkState
 from corc.pr import (
+    check_for_merged_pr,
     create_pr,
     merge_pr,
     pull_main,
@@ -116,6 +117,35 @@ class Executor:
                 "dispatch_skipped_duplicate",
                 task_id=task_id,
                 reason="Task already has an in-flight agent",
+            )
+            return
+
+        # Check if a merged PR already exists for this task.
+        # If so, the work has already landed — mark complete and skip dispatch.
+        merged_pr = check_for_merged_pr(self.project_root, task_id)
+        if merged_pr is not None:
+            self.audit_log.log(
+                "dispatch_skipped_merged_pr",
+                task_id=task_id,
+                pr_url=merged_pr.url,
+                pr_number=merged_pr.number,
+                reason="Merged PR already exists for this task",
+            )
+            self.mutation_log.append(
+                "task_completed",
+                {
+                    "findings": [],
+                    "proof_of_work": {
+                        "merged_pr_url": merged_pr.url,
+                        "merged_pr_number": merged_pr.number,
+                    },
+                    "pr_url": merged_pr.url,
+                    "pr_number": merged_pr.number,
+                    "pr_merged": True,
+                    "already_merged": True,
+                },
+                reason=f"Merged PR #{merged_pr.number} already exists — skipping dispatch",
+                task_id=task_id,
             )
             return
 

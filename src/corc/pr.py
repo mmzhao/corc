@@ -382,6 +382,74 @@ def _check_pr_merged(project_root: Path, pr_number: int, timeout: int = 30) -> b
         return False
 
 
+def check_for_merged_pr(
+    project_root: Path, task_id: str, timeout: int = 15
+) -> PRInfo | None:
+    """Check if a merged PR already exists for the given task.
+
+    Queries ``gh pr list --state merged`` looking for branches matching
+    the corc/<task_id>-* pattern.  This is used before dispatch to
+    short-circuit tasks whose work has already landed (e.g. a previous
+    attempt's PR was merged).
+
+    Args:
+        project_root: The main repository root directory.
+        task_id: The task identifier to search for.
+        timeout: Timeout in seconds for the gh command.
+
+    Returns:
+        PRInfo for the merged PR if found, None otherwise.
+    """
+    # Search pattern: corc/<task_id>- branches
+    search_pattern = f"corc/{task_id}-"
+
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--state",
+                "merged",
+                "--json",
+                "number,url,title,headRefName",
+                "--limit",
+                "10",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=str(project_root),
+            timeout=timeout,
+            env=_gh_env(project_root),
+        )
+        if result.returncode != 0:
+            logger.debug(
+                "gh pr list failed for task %s: %s",
+                task_id,
+                result.stderr.strip(),
+            )
+            return None
+
+        prs = json.loads(result.stdout)
+        for pr in prs:
+            branch = pr.get("headRefName", "")
+            if branch.startswith(search_pattern):
+                return PRInfo(
+                    url=pr.get("url", ""),
+                    number=pr.get("number", 0),
+                    branch=branch,
+                    title=pr.get("title", ""),
+                )
+
+        return None
+    except (subprocess.SubprocessError, FileNotFoundError, OSError) as e:
+        logger.debug("gh pr list error for task %s: %s", task_id, e)
+        return None
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        logger.debug("Failed to parse gh pr list output for task %s: %s", task_id, e)
+        return None
+
+
 def get_worktree_branch(project_root: Path, worktree_path: Path) -> str | None:
     """Get the branch name for a worktree.
 
