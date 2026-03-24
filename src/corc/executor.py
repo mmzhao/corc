@@ -313,6 +313,10 @@ class Executor:
             f"Done when: {task['done_when']}\n\n"
             f"Work in the current directory. Write tests alongside implementation. "
             f"Commit your changes with a clear message referencing the task.\n\n"
+            f"CRITICAL: You are running in a git worktree branch. "
+            f"NEVER run 'git push' — the orchestrator handles pushing and PR creation. "
+            f"NEVER commit to or checkout main/master. Only commit to the current branch. "
+            f"NEVER edit files outside the current working directory using absolute paths.\n\n"
             f"TESTING CONVENTION: During development, run only the relevant test "
             f"file (`pytest tests/test_<module>.py -x`), not the full suite. "
             f"Use `pytest -k 'test_name'` to isolate failures. "
@@ -705,6 +709,20 @@ class Executor:
                 duration_s=result.duration_s,
                 attempt=attempt,
             )
+
+            # Safety check: verify agent didn't commit to a protected branch
+            if worktree_path and result.exit_code == 0:
+                violation = self._check_protected_branch_violation(
+                    task["id"], repo_root
+                )
+                if violation:
+                    self.audit_log.log(
+                        "protected_branch_violation",
+                        task_id=task["id"],
+                        violation=violation,
+                    )
+                    # Reset the protected branch to match remote
+                    self._reset_protected_branch(repo_root, violation)
 
             # Create PR from worktree branch (PR-based workflow)
             # PR creation is mandatory — if it fails, the task fails
@@ -1192,6 +1210,46 @@ class Executor:
                 task_id=task_id,
                 error=str(e),
             )
+
+    def _check_protected_branch_violation(
+        self, task_id: str, repo_root: Path
+    ) -> str | None:
+        """Check if a protected branch has local commits not on the remote.
+
+        Returns the branch name if a violation is found, None otherwise.
+        """
+        for branch in ("main", "master"):
+            try:
+                result = subprocess.run(
+                    ["git", "log", "--oneline", f"origin/{branch}..{branch}"],
+                    capture_output=True,
+                    text=True,
+                    cwd=str(repo_root),
+                    timeout=10,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    return branch
+            except (subprocess.SubprocessError, OSError):
+                continue
+        return None
+
+    def _reset_protected_branch(self, repo_root: Path, branch: str):
+        """Reset a protected branch to match its remote tracking branch."""
+        try:
+            subprocess.run(
+                ["git", "checkout", branch],
+                capture_output=True,
+                cwd=str(repo_root),
+                timeout=10,
+            )
+            subprocess.run(
+                ["git", "reset", "--hard", f"origin/{branch}"],
+                capture_output=True,
+                cwd=str(repo_root),
+                timeout=10,
+            )
+        except (subprocess.SubprocessError, OSError):
+            pass
 
     def set_conflict_worktree(self, task_id: str, worktree_path: Path):
         """Register a worktree for reuse on the next dispatch of a task."""
