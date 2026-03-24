@@ -34,8 +34,10 @@ from corc.dispatch import AgentDispatcher
 from corc.executor import Executor
 from corc.mutations import MutationLog
 from corc.pause import is_paused
+from corc.pr import pull_main
 from corc.processor import process_completed
 from corc.reconcile import _get_agent_pid, _get_last_agent_output, reconcile_on_startup
+from corc.repo_policy import get_repo_policy
 from corc.reload import SourceWatcher
 from corc.retry import RetryPolicy
 from corc.scheduler import get_ready_tasks
@@ -245,11 +247,20 @@ class Daemon:
     def _handle_worktree_merge(self, item, proc_result):
         """Handle worktree merge after agent completion and validation.
 
-        Implements the optimistic merge strategy:
-        1. If validation passed: try merging worktree → main
-           - Success: record merge_status="merged", clean up worktree
-           - Conflict: merge main → worktree, mark task failed for retry
-        2. If validation failed: clean up worktree (processor already handled status)
+        When a PR exists (PR workflow):
+        - Auto-merge repos: if the processor already merged the PR via
+          ``gh pr merge``, pull main to sync local repo, record merge
+          status, and clean up the worktree.  If the processor did not
+          merge, retry via ``try_merge_worktree`` with the PR info.
+        - Human-only repos: PR is left open for human review.  Clean up
+          the worktree (keeping the branch for the PR).  Task stays in
+          ``pending_merge`` status.
+
+        When no PR exists (fallback — e.g. no remote configured):
+        - Direct git merge (optimistic merge strategy) as before.
+
+        If validation failed: clean up worktree (processor already set
+        the appropriate failed/escalated status).
         """
         task_id = item.task["id"]
         worktree_path = item.worktree_path
@@ -259,8 +270,85 @@ class Daemon:
             self.executor.cleanup_worktree(task_id, worktree_path)
             return
 
-        # Validation passed — try optimistic merge to main
+        # PR-based workflow: use gh pr merge instead of direct git merge
+        if item.pr_info:
+            self._handle_pr_based_merge(item, proc_result)
+            return
+
+        # No PR (fallback): try direct git merge (optimistic merge)
+        self._handle_direct_merge(item)
+
+    def _handle_pr_based_merge(self, item, proc_result):
+        """Handle merge via PR workflow (``gh pr merge``) instead of direct git merge.
+
+        For auto-merge repos: merge the PR (or acknowledge the processor
+        already merged it), pull main to sync, and clean up the worktree.
+
+        For human-only repos: leave the PR open, clean up the worktree
+        but keep the branch so the PR remains valid on GitHub.
+        """
+        task_id = item.task["id"]
+        worktree_path = item.worktree_path
+        pr_info = item.pr_info
+        policy = get_repo_policy(self.project_root)
+
+        if policy.is_human_only:
+            # Human-only: PR is open, task is pending_merge (set by processor).
+            # Clean up worktree but keep the branch (PR references it).
+            self.audit_log.log(
+                "worktree_merge_skipped_human_only",
+                task_id=task_id,
+                pr_url=pr_info.url,
+                pr_number=pr_info.number,
+                reason="Human-only repo; PR left open for human review",
+            )
+            self.executor.cleanup_worktree(task_id, worktree_path, remove_branch=False)
+            return
+
+        # Auto-merge repo —
+        if proc_result.pr_merged:
+            # Processor already merged the PR via gh pr merge.
+            # Pull main to sync local repo with the merged state.
+            pull_main(self.project_root)
+            self.mutation_log.append(
+                "task_updated",
+                {"merge_status": "merged"},
+                reason=f"PR #{pr_info.number} merged via gh pr merge",
+                task_id=task_id,
+            )
+            self.audit_log.log(
+                "pr_merge_synced",
+                task_id=task_id,
+                pr_number=pr_info.number,
+                pr_url=pr_info.url,
+            )
+            self.executor.cleanup_worktree(task_id, worktree_path)
+            return
+
+        # PR exists but processor didn't merge it (merge_pr failed).
+        # Retry the merge via try_merge_worktree with PR info.
+        merge_status = self.executor.try_merge_worktree(
+            task_id, worktree_path, pr_info=pr_info
+        )
+        self._apply_merge_result(item, merge_status)
+
+    def _handle_direct_merge(self, item):
+        """Handle direct git merge (no PR — fallback / backward compat).
+
+        Implements the optimistic merge strategy:
+        - Success: record merge_status, clean up worktree
+        - Conflict: merge main into worktree, mark task failed for retry
+        - Error: clean up, leave task as completed
+        """
+        task_id = item.task["id"]
+        worktree_path = item.worktree_path
         merge_status = self.executor.try_merge_worktree(task_id, worktree_path)
+        self._apply_merge_result(item, merge_status)
+
+    def _apply_merge_result(self, item, merge_status):
+        """Record merge result, handle conflicts, and clean up worktree."""
+        task_id = item.task["id"]
+        worktree_path = item.worktree_path
 
         if merge_status in ("merged", "no_changes"):
             # Success! Record merge status and clean up
