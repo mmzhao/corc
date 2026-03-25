@@ -38,7 +38,7 @@ def create_worktree(
 ) -> tuple[Path, str]:
     """Create a git worktree for an agent to work in.
 
-    Creates a new worktree branching from the current HEAD. The worktree
+    Creates a new worktree branching from origin/main. The worktree
     is placed under .claude/worktrees/{task_id}-{attempt} and the branch
     is named corc/{task_id}-{attempt}.
 
@@ -65,9 +65,30 @@ def create_worktree(
     if worktree_path.exists():
         _force_remove_worktree(project_root, worktree_path)
 
-    # Create the worktree with a new branch from HEAD
+    # Fetch latest main to ensure we branch from a clean, up-to-date state.
+    # Using origin/main (not HEAD) avoids picking up uncommitted changes
+    # or state from whatever branch the working directory happens to be on.
+    fetch_result = subprocess.run(
+        ["git", "fetch", "origin", "main"],
+        capture_output=True,
+        text=True,
+        cwd=str(project_root),
+        timeout=30,
+    )
+    # Use origin/main if fetch succeeded, fall back to main (for repos without remote)
+    base_ref = "origin/main" if fetch_result.returncode == 0 else "main"
+
+    # Create the worktree with a new branch from the base ref
     result = subprocess.run(
-        ["git", "worktree", "add", "-b", branch_name, str(worktree_path), "HEAD"],
+        [
+            "git",
+            "worktree",
+            "add",
+            "-b",
+            branch_name,
+            str(worktree_path),
+            base_ref,
+        ],
         capture_output=True,
         text=True,
         cwd=str(project_root),
