@@ -33,6 +33,33 @@ class WorktreeError(Exception):
     pass
 
 
+def _get_default_branch(project_root: Path) -> str:
+    """Detect the default branch name (main or master) for a repo."""
+    result = subprocess.run(
+        ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+        capture_output=True,
+        text=True,
+        cwd=str(project_root),
+        timeout=10,
+    )
+    if result.returncode == 0:
+        # e.g. "refs/remotes/origin/main" -> "main"
+        return result.stdout.strip().split("/")[-1]
+
+    # Fallback: check if main or master branch exists
+    for branch in ("main", "master"):
+        check = subprocess.run(
+            ["git", "rev-parse", "--verify", branch],
+            capture_output=True,
+            cwd=str(project_root),
+            timeout=10,
+        )
+        if check.returncode == 0:
+            return branch
+
+    return "main"
+
+
 def create_worktree(
     project_root: Path, task_id: str, attempt: int = 1
 ) -> tuple[Path, str]:
@@ -65,18 +92,21 @@ def create_worktree(
     if worktree_path.exists():
         _force_remove_worktree(project_root, worktree_path)
 
-    # Fetch latest main to ensure we branch from a clean, up-to-date state.
-    # Using origin/main (not HEAD) avoids picking up uncommitted changes
+    # Detect and fetch the default branch (main or master) to branch from.
+    # Using origin/<default> (not HEAD) avoids picking up uncommitted changes
     # or state from whatever branch the working directory happens to be on.
+    default_branch = _get_default_branch(project_root)
     fetch_result = subprocess.run(
-        ["git", "fetch", "origin", "main"],
+        ["git", "fetch", "origin", default_branch],
         capture_output=True,
         text=True,
         cwd=str(project_root),
         timeout=30,
     )
-    # Use origin/main if fetch succeeded, fall back to main (for repos without remote)
-    base_ref = "origin/main" if fetch_result.returncode == 0 else "main"
+    # Use origin/<branch> if fetch succeeded, fall back to local branch (no remote)
+    base_ref = (
+        f"origin/{default_branch}" if fetch_result.returncode == 0 else default_branch
+    )
 
     # Create the worktree with a new branch from the base ref
     result = subprocess.run(
